@@ -66,6 +66,14 @@ def build_moderation_photo_keyboard(photo_id: int, source: str) -> InlineKeyboar
         text="⛔ Забанить",
         callback_data=f"mod:photo_block:{source}:{photo_id}",
     )
+    kb.button(
+        text="⏭ Пропустить",
+        callback_data=f"mod:photo_skip:{source}:{photo_id}",
+    )
+    kb.button(
+        text="⬅️ Меню модерации",
+        callback_data="mod:menu",
+    )
     kb.adjust(1)
     return kb.as_markup()
 
@@ -292,6 +300,11 @@ async def moderator_entry(message: Message, state: FSMContext) -> None:
     - если пользователь уже модератор — сразу показываем меню модерации;
     - если пользователь не модератор — говорим, что доступ выдаёт админ.
     """
+    try:
+        await message.delete()
+    except Exception:
+        # Например, если нет прав на удаление сообщения
+        pass
     tg_id = message.from_user.id
     user = await get_user_by_tg_id(tg_id)
 
@@ -506,6 +519,84 @@ async def moderator_photo_ok(callback: CallbackQuery) -> None:
 
     try:
         await callback.answer("Фотография возвращена в ленту.", show_alert=False)
+    except TelegramBadRequest:
+        pass
+
+
+# Новый обработчик: пропуск фотографии модератором
+@router.callback_query(F.data.startswith("mod:photo_skip:"))
+async def moderator_photo_skip(callback: CallbackQuery) -> None:
+    """
+    Модератор пропускает фотографию без изменения статуса.
+
+    Логика:
+    - проверяем, что нажал модератор;
+    - логируем просмотр в moderator_reviews;
+    - удаляем карточку из чата модератора;
+    - показываем следующую фотографию в соответствующем режиме.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    # Ожидаемый формат:
+    #   mod:photo_skip:<source>:<photo_id>
+    # На всякий случай поддержим старый вариант mod:photo_skip:<photo_id>
+    source = "queue"
+    photo_id_str: str | None = None
+
+    if len(parts) == 4:
+        source = parts[2]
+        photo_id_str = parts[3]
+    elif len(parts) == 3:
+        photo_id_str = parts[2]
+    else:
+        await callback.answer("Некорректные данные для модерации.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(photo_id_str)
+    except (TypeError, ValueError):
+        await callback.answer("Некорректный ID фотографии.", show_alert=True)
+        return
+
+    # Фиксируем, что модератор увидел эту работу в выбранном режиме
+    try:
+        moderator = await get_user_by_tg_id(tg_id)
+    except Exception:
+        moderator = None
+
+    if moderator is not None:
+        try:
+            await add_moderator_review(
+                moderator_id=moderator["id"],
+                photo_id=photo_id,
+                source="report" if source == "queue" else "self",
+            )
+        except Exception:
+            # Не валим обработчик, если статистику не удалось записать
+            pass
+
+    # Чистим карточку из чата модератора
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    # Показываем следующую фотографию в соответствующем режиме
+    if source == "self":
+        await show_next_photo_for_self_check(callback)
+    else:
+        await show_next_photo_for_moderation(callback)
+
+    try:
+        await callback.answer("Фотография пропущена.", show_alert=False)
     except TelegramBadRequest:
         pass
 
