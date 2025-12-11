@@ -106,22 +106,30 @@ def build_rate_caption(photo: dict) -> str:
 
     Формат:
     (фото)
-    💎 "Название" • устройство    — если автор с премиумом, иначе без 💎
+    💎 "Название" моноширным • 📷 устройство — если автор с премиумом, иначе без 💎
     Категория: обычная фотография
+    📝 Описание: текст описания (если есть)
 
-    Снизу — ссылка на канал, если указана.
+    Снизу — «🔗 Ссылка: …» только если:
+    • у автора есть премиум;
+    • и он добавил ссылку на канал/аккаунт.
+
     Имя автора здесь не показываем.
     """
     title = (photo.get("title") or "").strip() or "Без названия"
     device_info = (photo.get("device_info") or photo.get("device_type") or "").strip() or "устройство не указано"
+    description = (photo.get("description") or "").strip()
 
     # Экранируем текст для HTML-подписи
     safe_title = escape(title)
     safe_device = escape(device_info)
+    safe_description = escape(description) if description else ""
 
     is_premium_author = bool(photo.get("user_is_premium"))
 
-    first_line = f"\"{safe_title}\" • {safe_device}"
+    # Первая строка: название моноширным + устройство со смайликом
+    device_part = f"📷 {safe_device}"
+    first_line = f"<code>\"{safe_title}\"</code> • {device_part}"
     if is_premium_author:
         first_line = f"💎 {first_line}"
 
@@ -137,12 +145,17 @@ def build_rate_caption(photo: dict) -> str:
         f"Категория: {category_label}",
     ]
 
-    # Ссылка на канал/аккаунт
+    # Описание, если есть
+    if safe_description:
+        lines.append(f"📝 Описание: {safe_description}")
+
+    # Ссылка на канал/аккаунт показывается только,
+    # если автор премиум И ссылка реально указана
     raw_link = photo.get("user_tg_channel_link") or photo.get("tg_channel_link")
     href = None
     display = None
 
-    if raw_link:
+    if is_premium_author and raw_link:
         link = raw_link.strip()
 
         # Вариант 1: https://t.me/username или http://t.me/username

@@ -80,9 +80,11 @@ def build_menu_text(is_premium: bool) -> str:
     # Текущее время по Москве
     now = datetime.now(timezone(timedelta(hours=3)))
 
-    results_hour = 20
-    results_minute = 45
-    results_today = now.replace(
+    # Итоги дня теперь подводятся каждый день в 05:00 по Москве
+    results_hour = 5
+    results_minute = 0
+
+    today_results_time = now.replace(
         hour=results_hour, minute=results_minute, second=0, microsecond=0
     )
 
@@ -91,9 +93,9 @@ def build_menu_text(is_premium: bool) -> str:
     lines.append("<b>GlowShot</b> — бот для любителей фотографии.")
     lines.append("")
 
-    if now < results_today:
-        # Итоги ещё не подведены — считаем, сколько осталось
-        delta = results_today - now
+    if now < today_results_time:
+        # До ближайших итогов — в 05:00 по Москве
+        delta = today_results_time - now
         total_seconds = int(delta.total_seconds())
         hours_left = total_seconds // 3600
         minutes_left = (total_seconds % 3600) // 60
@@ -109,10 +111,16 @@ def build_menu_text(is_premium: bool) -> str:
         else:
             left_str = "меньше минуты"
 
-        lines.append(f"До итогов дня осталось: <b>{left_str}</b>.")
+        lines.append(
+            "Итоги дня подводятся каждый день в <b>05:00 по Москве</b>."
+        )
+        lines.append(f"До ближайших итогов осталось: <b>{left_str}</b>.")
     else:
-        # Итоги уже есть — подталкиваем посмотреть
+        # Итоги за прошлый день уже есть — подталкиваем посмотреть
         lines.append("Итоги дня уже подведены — загляни в раздел «Итоги дня» 👇")
+        lines.append(
+            "Следующие итоги будут завтра в <b>05:00 по Москве</b>."
+        )
 
     lines.append("")
     lines.append(
