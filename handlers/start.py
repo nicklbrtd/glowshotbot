@@ -204,6 +204,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
+                        is_premium=is_premium,
                     ),
                 )
             except TelegramBadRequest:
@@ -213,6 +214,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
+                        is_premium=is_premium,
                     ),
                     disable_notification=True,
                 )
@@ -223,6 +225,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
+                    is_premium=is_premium,
                 ),
                 disable_notification=True,
             )
@@ -262,6 +265,7 @@ async def subscription_check(callback: CallbackQuery):
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
+                    is_premium=is_premium,
                 ),
             )
         except Exception:
@@ -272,6 +276,7 @@ async def subscription_check(callback: CallbackQuery):
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
+                        is_premium=is_premium,
                     ),
                     disable_notification=True,
                 )
@@ -281,6 +286,7 @@ async def subscription_check(callback: CallbackQuery):
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
+                        is_premium=is_premium,
                     ),
                     disable_notification=True,
                 )
@@ -317,6 +323,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
             reply_markup=build_main_menu(
                 is_admin=is_admin,
                 is_moderator=is_moderator,
+                is_premium=is_premium,
             ),
         )
         menu_msg_id = callback.message.message_id
@@ -329,6 +336,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
+                    is_premium=is_premium,
                 ),
                 disable_notification=True,
             )
@@ -338,6 +346,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
+                    is_premium=is_premium,
                 ),
                 disable_notification=True,
             )
