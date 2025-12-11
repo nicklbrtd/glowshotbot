@@ -239,7 +239,11 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
         else:
             author_display = "Неизвестный автор"
 
-        avg = item.get("avg_rating") or 0
+        avg = item.get("avg_rating")
+        if avg is not None:
+            avg_str = f"{avg:.2f}".rstrip("0").rstrip(".")
+        else:
+            avg_str = "—"
 
         medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
         medal = medal_map.get(place_num, "🏅")
@@ -250,7 +254,7 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
             f"<code>\"{item['title']}\"</code>",
             f"Автор: {author_display}",
             "",
-            f"Рейтинг: <b>{avg:.1f}</b>",
+            f"Рейтинг: <b>{avg_str}</b>",
         ]
         caption = "\n".join(caption_lines)
 
@@ -269,7 +273,7 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
     for i, item in enumerate(top, start=1):
         avg = item.get("avg_rating")
         if avg is not None:
-            avg_str = f"{avg:.1f}"
+            avg_str = f"{avg:.2f}".rstrip("0").rstrip(".")
         else:
             avg_str = "—"
 
@@ -383,7 +387,8 @@ async def results_week(callback: CallbackQuery):
         f"Автор: {author_display}",
     ]
     if avg is not None:
-        caption_lines.append(f"Средняя оценка: <b>{avg:.1f}</b> ({count} голосов)")
+        avg_str = f"{avg:.2f}".rstrip("0").rstrip(".")
+        caption_lines.append(f"Средняя оценка: <b>{avg_str}</b> ({count} голосов)")
     caption = "\n".join(caption_lines)
 
     await _show_photo_result(

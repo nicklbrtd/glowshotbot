@@ -1471,7 +1471,7 @@ async def get_daily_top_photos(day_key: str, limit: int = 10):
                     ) = 0
                     THEN NULL
                     ELSE
-                        SUM(
+                        1.0 * SUM(
                             CASE
                                 WHEN r.value IS NOT NULL AND r.value != 0
                                     THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
