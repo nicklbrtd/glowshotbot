@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from datetime import timedelta
+from datetime import timedelta, datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
@@ -24,15 +24,32 @@ from database import (
     get_premium_users,
     set_user_premium_role_by_tg_id,
     set_user_premium_status,
-    give_achievement_to_user_by_code,
+    ive_achievement_to_user_by_code,
+    get_awards_for_user,
+    get_award_by_id,
+    delete_award_by_id,
+    update_award_text,
+    update_award_icon,
+    create_custom_award_for_user,
 )
 # ====== AchievementStates: FSM для работы с ачивками ======
 class AchievementStates(StatesGroup):
     """
     Состояния для работы с ачивками / наградами в админке.
-    Пока есть только выдача статуса «Бета-тестер бота».
+    Пока есть:
+    • выдача статуса «Бета-тестер бота»;
+    • выдача кастомной ачивки;
+    • управление (просмотр/редактирование/удаление) ачивок пользователя.
     """
     waiting_user_for_beta = State()
+    waiting_custom_user = State()
+    waiting_custom_title = State()
+    waiting_custom_description = State()
+    waiting_custom_icon = State()
+    waiting_custom_level = State()
+    waiting_manage_user = State()
+    waiting_edit_award_text = State()
+    waiting_edit_award_icon = State()
 
 from keyboards.common import build_admin_menu, build_back_kb
 from utils.time import get_moscow_now
@@ -160,6 +177,9 @@ async def _find_user_by_identifier(identifier: str) -> Optional[dict]:
         return user
 
     return None
+
+
+# ================= КЛАВИАТУРЫ =================
 
 
 def build_password_cancel_kb() -> InlineKeyboardMarkup:
@@ -1136,13 +1156,16 @@ async def total_users(message: Message):
     await message.answer(f"Всего пользователей в боте: <b>{total}</b>")
 
 # ================= КОНЕЦ ДРУГИХ КОМАНД ==============
+
 @router.callback_query(F.data == "admin:achievements")
 async def admin_achievements_menu(callback: CallbackQuery, state: FSMContext):
     """
     Раздел «Награды / ачивки».
 
-    Здесь админы могут выдавать особые статусы пользователям, например:
-    • 🏆 «Бета-тестер бота»
+    Здесь админы могут:
+    • выдавать особую ачивку «Бета-тестер бота»;
+    • выдавать кастомные ачивки с любым названием/текстом/смайликом;
+    • управлять ачивками конкретного пользователя (редактировать/удалять).
     """
     user = await _ensure_admin(callback)
     if user is None:
@@ -1150,9 +1173,10 @@ async def admin_achievements_menu(callback: CallbackQuery, state: FSMContext):
 
     text = (
         "<b>Награды / ачивки</b>\n\n"
-        "Пока доступна одна особая ачивка:\n"
-        "🏆 <b>Бета-тестер бота</b>\n"
-        "Описание: ты помог(ла) тестировать GlowShot до релиза.\n\n"
+        "Доступные действия:\n"
+        "• 🏆 <b>Бета-тестер бота</b> — особая статусная ачивка для ранних тестеров\n"
+        "• 🎨 Кастомная ачивка — любое название, описание и смайлик\n"
+        "• 🧾 Ачивки пользователя — посмотреть, отредактировать или удалить\n\n"
         "Выбери действие:"
     )
 
@@ -1160,6 +1184,14 @@ async def admin_achievements_menu(callback: CallbackQuery, state: FSMContext):
     kb.button(
         text="🏆 Выдать «Бета-тестер бота»",
         callback_data="admin:ach:beta:start",
+    )
+    kb.button(
+        text="🎨 Выдать кастомную ачивку",
+        callback_data="admin:ach:custom:start",
+    )
+    kb.button(
+        text="🧾 Ачивки пользователя",
+        callback_data="admin:ach:user:start",
     )
     kb.button(
         text="⬅️ В админ-меню",
@@ -1179,6 +1211,873 @@ async def admin_achievements_menu(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
+
+
+# ====== Хендлеры для выдачи кастомной ачивки ======
+
+@router.callback_query(F.data == "admin:ach:custom:start")
+async def admin_achievements_custom_start(callback: CallbackQuery, state: FSMContext):
+    """
+    Старт выдачи кастомной ачивки с любым названием/текстом/смайликом.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await state.set_state(AchievementStates.waiting_custom_user)
+    await state.update_data(
+        ach_prompt_chat_id=callback.message.chat.id,
+        ach_prompt_msg_id=callback.message.message_id,
+    )
+
+    text = (
+        "🎨 <b>Новая кастомная ачивка</b>\n\n"
+        "Шаг 1/4 — выбери пользователя.\n\n"
+        "Отправь ID или @username пользователя, которому нужно выдать ачивку.\n\n"
+        "Пример: <code>123456789</code> или <code>@username</code>."
+    )
+
+    try:
+        await callback.message.edit_text(text)
+    except Exception:
+        await callback.message.answer(text)
+
+    await callback.answer()
+
+
+@router.message(AchievementStates.waiting_custom_user, F.text)
+async def admin_achievements_custom_user(message: Message, state: FSMContext):
+    """
+    Шаг 1/4: выбор пользователя для кастомной ачивки.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    identifier = (message.text or "").strip()
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    target_user = await _find_user_by_identifier(identifier)
+    if not target_user:
+        text = (
+            "Пользователь не найден.\n\n"
+            "Убедись, что он уже запускал бота, и попробуй ещё раз.\n"
+            "Можно ввести числовой ID или @username."
+        )
+        if chat_id and msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                )
+                return
+            except Exception:
+                pass
+
+        await message.answer(text)
+        await state.clear()
+        return
+
+    target_tg_id = target_user.get("tg_id")
+    target_name = target_user.get("name") or "Без имени"
+    target_username = target_user.get("username")
+    target_internal_id = target_user.get("id")
+
+    await state.update_data(
+        custom_target_tg_id=target_tg_id,
+        custom_target_user_id=target_internal_id,
+        custom_target_name=target_name,
+        custom_target_username=target_username,
+    )
+
+    extra = f" (@{target_username})" if target_username else ""
+    text = (
+        "🎨 <b>Новая кастомная ачивка</b>\n\n"
+        "Шаг 2/4 — название.\n\n"
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}\n\n"
+        "Отправь <b>название</b> ачивки (коротко и понятно)."
+    )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+            )
+        except Exception:
+            await message.answer(text)
+    else:
+        await message.answer(text)
+
+    await state.set_state(AchievementStates.waiting_custom_title)
+
+
+@router.message(AchievementStates.waiting_custom_title, F.text)
+async def admin_achievements_custom_title(message: Message, state: FSMContext):
+    """
+    Шаг 2/4: название кастомной ачивки.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    title = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not title:
+        text = "Название не может быть пустым. Отправь, пожалуйста, название ачивки ещё раз."
+        if chat_id and msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                )
+                return
+            except Exception:
+                pass
+        await message.answer(text)
+        return
+
+    await state.update_data(custom_title=title)
+
+    target_name = data.get("custom_target_name") or "Без имени"
+    target_tg_id = data.get("custom_target_tg_id")
+    target_username = data.get("custom_target_username")
+    extra = f" (@{target_username})" if target_username else ""
+
+    text = (
+        "🎨 <b>Новая кастомная ачивка</b>\n\n"
+        "Шаг 3/4 — описание.\n\n"
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}\n"
+        f"Название: <b>{title}</b>\n\n"
+        "Отправь <b>описание</b> ачивки.\n"
+        "Если хочешь оставить без описания — напиши «-»."
+    )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+            )
+        except Exception:
+            await message.answer(text)
+    else:
+        await message.answer(text)
+
+    await state.set_state(AchievementStates.waiting_custom_description)
+
+
+@router.message(AchievementStates.waiting_custom_description, F.text)
+async def admin_achievements_custom_description(message: Message, state: FSMContext):
+    """
+    Шаг 3/4: описание кастомной ачивки.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    raw_desc = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    description = None if raw_desc in ("-", "—", "нет", "ничего") else raw_desc
+
+    await state.update_data(custom_description=description)
+
+    target_name = data.get("custom_target_name") or "Без имени"
+    target_tg_id = data.get("custom_target_tg_id")
+    target_username = data.get("custom_target_username")
+    title = data.get("custom_title") or "Без названия"
+    extra = f" (@{target_username})" if target_username else ""
+
+    text = (
+        "🎨 <b>Новая кастомная ачивка</b>\n\n"
+        "Шаг 4/4 — смайлик и уровень.\n\n"
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}\n"
+        f"Название: <b>{title}</b>\n"
+        f"Описание: {description or '—'}\n\n"
+        "Сначала отправь <b>смайлик</b> для этой ачивки.\n"
+        "Можно отправить один эмодзи. Если оставить пустым или отправить «стандарт» — будет использован 🏆."
+    )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+            )
+        except Exception:
+            await message.answer(text)
+    else:
+        await message.answer(text)
+
+    await state.set_state(AchievementStates.waiting_custom_icon)
+
+
+@router.message(AchievementStates.waiting_custom_icon, F.text)
+async def admin_achievements_custom_icon(message: Message, state: FSMContext):
+    """
+    Шаг 4/4 (часть 1): выбор смайлика для кастомной ачивки.
+    После этого спросим уровень.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    raw_icon = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not raw_icon or raw_icon.lower() in ("стандарт", "standard", "default"):
+        icon = "🏆"
+    else:
+        # Берём первый символ, чтобы не раздувать подписи
+        icon = raw_icon[0]
+
+    await state.update_data(custom_icon=icon)
+
+    target_name = data.get("custom_target_name") or "Без имени"
+    target_tg_id = data.get("custom_target_tg_id")
+    target_username = data.get("custom_target_username")
+    title = data.get("custom_title") or "Без названия"
+    description = data.get("custom_description") or "—"
+    extra = f" (@{target_username})" if target_username else ""
+
+    text = (
+        "🎨 <b>Новая кастомная ачивка</b>\n\n"
+        "Финальный шаг — уровень ачивки.\n\n"
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}\n"
+        f"Название: <b>{title}</b>\n"
+        f"Описание: {description}\n"
+        f"Смайлик: {icon}\n\n"
+        "Отправь число уровня (например: <code>1</code>, <code>2</code>, <code>8</code>, <code>10</code>).\n"
+        "Если отправишь что-то непонятное — уровень будет выбран автоматически:\n"
+        "1 — обычный пользователь\n"
+        "2 — премиум\n"
+        "8 — модератор\n"
+        "10 — админ."
+    )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+            )
+        except Exception:
+            await message.answer(text)
+    else:
+        await message.answer(text)
+
+    await state.set_state(AchievementStates.waiting_custom_level)
+
+
+@router.message(AchievementStates.waiting_custom_level, F.text)
+async def admin_achievements_custom_level(message: Message, state: FSMContext):
+    """
+    Финальный шаг: уровень ачивки + сохранение в БД.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    raw_level = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Определяем базовый уровень по роли выдавшего
+    issuer = await get_user_by_tg_id(message.from_user.id)
+    base_level = 1
+    if issuer:
+        if issuer.get("is_admin"):
+            base_level = 10
+        elif issuer.get("is_moderator"):
+            base_level = 8
+        elif issuer.get("is_premium"):
+            base_level = 2
+
+    try:
+        level = int(raw_level)
+        if level <= 0:
+            level = base_level
+    except ValueError:
+        level = base_level
+
+    # Собираем данные ачивки
+    target_tg_id = data.get("custom_target_tg_id")
+    target_user_id = data.get("custom_target_user_id")
+    target_name = data.get("custom_target_name") or "Без имени"
+    target_username = data.get("custom_target_username")
+    title = data.get("custom_title") or "Без названия"
+    description_raw = data.get("custom_description")
+    icon = data.get("custom_icon") or "🏆"
+    extra = f" (@{target_username})" if target_username else ""
+
+    # В описание добавляем уровень (пока без отдельного поля в БД).
+    if description_raw:
+        description = f"[Уровень {level}]\n\n{description_raw}"
+    else:
+        description = f"[Уровень {level}]"
+
+    # Уникальный code для кастомной ачивки
+    ts = int(datetime.utcnow().timestamp())
+    code = f"custom_l{level}_{target_user_id}_{ts}"
+
+    granted_by_user_id = issuer.get("id") if issuer else None
+
+    # Создаём запись ачивки через общий слой базы данных
+    await create_custom_award_for_user(
+        user_id=target_user_id,
+        title=title,
+        description=description,
+        icon=icon,
+        code=code,
+        is_special=False,
+        granted_by_user_id=granted_by_user_id,
+    )
+
+    # Подтверждение админу
+    result_text = (
+        "🎉 <b>Кастомная ачивка выдана!</b>\n\n"
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}\n"
+        f"Смайлик: {icon}\n"
+        f"Название: <b>{title}</b>\n"
+        f"Описание: {description}\n"
+        f"Уровень: <b>{level}</b>"
+    )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=result_text,
+            )
+        except Exception:
+            await message.answer(result_text)
+    else:
+        await message.answer(result_text)
+
+    await state.clear()
+
+    # Уведомление пользователю о новой ачивке
+    notif_kb = InlineKeyboardBuilder()
+    notif_kb.button(text="✅ Просмотрено", callback_data="user:notify_seen")
+    notif_kb.adjust(1)
+
+    notif_text = (
+        f"{icon} <b>Новая награда!</b>\n\n"
+        f"Ты получил(а) ачивку: <b>{title}</b>.\n\n"
+        f"{description}\n\n"
+        "Спасибо, что остаёшься с нами 💙"
+    )
+
+    try:
+        await message.bot.send_message(
+            chat_id=target_tg_id,
+            text=notif_text,
+            reply_markup=notif_kb.as_markup(),
+        )
+    except Exception:
+        pass
+
+
+# ====== Хендлеры для управления ачивками пользователя ======
+
+@router.callback_query(F.data == "admin:ach:user:start")
+async def admin_achievements_user_start(callback: CallbackQuery, state: FSMContext):
+    """
+    Старт управления ачивками конкретного пользователя:
+    просмотр списка, редактирование, удаление.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await state.set_state(AchievementStates.waiting_manage_user)
+    await state.update_data(
+        ach_prompt_chat_id=callback.message.chat.id,
+        ach_prompt_msg_id=callback.message.message_id,
+    )
+
+    text = (
+        "🧾 <b>Ачивки пользователя</b>\n\n"
+        "Отправь ID или @username пользователя, чьи ачивки хочешь посмотреть/изменить.\n\n"
+        "Пример: <code>123456789</code> или <code>@username</code>."
+    )
+
+    try:
+        await callback.message.edit_text(text)
+    except Exception:
+        await callback.message.answer(text)
+
+    await callback.answer()
+
+
+@router.message(AchievementStates.waiting_manage_user, F.text)
+async def admin_achievements_user_list(message: Message, state: FSMContext):
+    """
+    Поиск пользователя и показ списка его ачивок.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    identifier = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    target_user = await _find_user_by_identifier(identifier)
+    if not target_user:
+        text = (
+            "Пользователь не найден.\n\n"
+            "Убедись, что он уже запускал бота, и попробуй ещё раз.\n"
+            "Можно ввести числовой ID или @username."
+        )
+        if chat_id and msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                )
+                return
+            except Exception:
+                pass
+
+        await message.answer(text)
+        await state.clear()
+        return
+
+    target_user_id = target_user.get("id")
+    target_tg_id = target_user.get("tg_id")
+    target_name = target_user.get("name") or "Без имени"
+    target_username = target_user.get("username")
+    extra = f" (@{target_username})" if target_username else ""
+
+    awards = await get_awards_for_user(target_user_id)
+    if not awards:
+        text = (
+            "🧾 <b>Ачивки пользователя</b>\n\n"
+            f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}\n\n"
+            "У этого пользователя пока нет ачивок."
+        )
+        if chat_id and msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                )
+            except Exception:
+                await message.answer(text)
+        else:
+            await message.answer(text)
+
+        await state.clear()
+        return
+
+    await state.update_data(
+        manage_target_user_id=target_user_id,
+        manage_target_tg_id=target_tg_id,
+        manage_target_name=target_name,
+        manage_target_username=target_username,
+    )
+
+    lines = [
+        "🧾 <b>Ачивки пользователя</b>",
+        "",
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}",
+        "",
+        "Выбери ачивку, чтобы отредактировать или удалить:",
+        "",
+    ]
+    kb = InlineKeyboardBuilder()
+
+    for award in awards:
+        award_id = award["id"]
+        icon = award.get("icon") or "🏅"
+        title = award.get("title") or "Без названия"
+        short_title = title if len(title) <= 24 else title[:21] + "..."
+        lines.append(f"{icon} {title}")
+        kb.button(
+            text=f"{icon} {short_title}",
+            callback_data=f"admin:ach:award:{award_id}",
+        )
+
+    kb.button(
+        text="⬅️ В раздел ачивок",
+        callback_data="admin:achievements",
+    )
+    kb.adjust(1)
+
+    text = "\n".join(lines)
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=kb.as_markup(),
+            )
+        except Exception:
+            await message.answer(text, reply_markup=kb.as_markup())
+    else:
+        await message.answer(text, reply_markup=kb.as_markup())
+
+    # Остаёмся в этом же состоянии или выходим? Для простоты выходим из FSM.
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("admin:ach:award:"))
+async def admin_achievements_award_menu(callback: CallbackQuery, state: FSMContext):
+    """
+    Меню конкретной ачивки: редактирование и удаление.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        award_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный ID ачивки.", show_alert=True)
+        return
+
+    award = await get_award_by_id(award_id)
+    if not award:
+        await callback.answer("Ачивка не найдена (возможно, уже удалена).", show_alert=True)
+        return
+
+    title = award.get("title") or "Без названия"
+    description = award.get("description") or "—"
+    icon = award.get("icon") or "🏅"
+    code = award.get("code") or "—"
+    created_at = award.get("created_at") or "—"
+
+    text = (
+        "⚙️ <b>Управление ачивкой</b>\n\n"
+        f"{icon} <b>{title}</b>\n\n"
+        f"{description}\n\n"
+        f"<code>code:</code> <code>{code}</code>\n"
+        f"<code>created_at:</code> <code>{created_at}</code>\n\n"
+        "Что сделать с этой ачивкой?"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="✏️ Изменить текст",
+        callback_data=f"admin:ach:award_edit_text:{award_id}",
+    )
+    kb.button(
+        text="🎨 Сменить смайлик",
+        callback_data=f"admin:ach:award_edit_icon:{award_id}",
+    )
+    kb.button(
+        text="🗑 Удалить ачивку",
+        callback_data=f"admin:ach:award_delete:{award_id}",
+    )
+    kb.button(
+        text="⬅️ В раздел ачивок",
+        callback_data="admin:achievements",
+    )
+    kb.adjust(1)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        await callback.message.answer(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:ach:award_delete:"))
+async def admin_achievements_award_delete(callback: CallbackQuery):
+    """
+    Удаление ачивки по ID.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        award_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный ID ачивки.", show_alert=True)
+        return
+
+    await delete_award_by_id(award_id)
+
+    text = (
+        "🗑 <b>Ачивка удалена.</b>\n\n"
+        "Ты можешь вернуться в раздел ачивок или выбрать другие действия."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="⬅️ В раздел ачивок",
+        callback_data="admin:achievements",
+    )
+    kb.adjust(1)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:ach:award_edit_text:"))
+async def admin_achievements_award_edit_text_start(callback: CallbackQuery, state: FSMContext):
+    """
+    Старт редактирования текста ачивки (название + описание).
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        award_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный ID ачивки.", show_alert=True)
+        return
+
+    await state.set_state(AchievementStates.waiting_edit_award_text)
+    await state.update_data(
+        ach_prompt_chat_id=callback.message.chat.id,
+        ach_prompt_msg_id=callback.message.message_id,
+        edit_award_id=award_id,
+    )
+
+    text = (
+        "✏️ <b>Изменение текста ачивки</b>\n\n"
+        "Отправь новое название и описание ачивки.\n"
+        "Формат: первая строка — название, остальные строки — описание."
+    )
+
+    try:
+        await callback.message.edit_text(text)
+    except Exception:
+        await callback.message.answer(text)
+
+    await callback.answer()
+
+
+@router.message(AchievementStates.waiting_edit_award_text, F.text)
+async def admin_achievements_award_edit_text_save(message: Message, state: FSMContext):
+    """
+    Сохранение нового названия и описания ачивки.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+    award_id = data.get("edit_award_id")
+
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not award_id:
+        await state.clear()
+        await message.answer("Сессия редактирования потерялась. Открой управление ачивками заново.")
+        return
+
+    if not raw:
+        text = "Текст не может быть пустым. Попробуй ещё раз."
+        if chat_id and msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                )
+                return
+            except Exception:
+                pass
+        await message.answer(text)
+        return
+
+    lines = raw.splitlines()
+    title = lines[0].strip()
+    description = "\n".join(lines[1:]).strip() if len(lines) > 1 else None
+
+    await update_award_text(award_id, title, description)
+
+    award = await get_award_by_id(award_id)
+    if not award:
+        # На всякий случай, если ачивку удалили параллельно
+        result_text = "Ачивка была изменена или удалена."
+    else:
+        icon = award.get("icon") or "🏅"
+        description = award.get("description") or "—"
+
+        result_text = (
+            "✅ <b>Текст ачивки обновлён.</b>\n\n"
+            f"{icon} <b>{title}</b>\n\n"
+            f"{description}"
+        )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=result_text,
+            )
+        except Exception:
+            await message.answer(result_text)
+    else:
+        await message.answer(result_text)
+
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("admin:ach:award_edit_icon:"))
+async def admin_achievements_award_edit_icon_start(callback: CallbackQuery, state: FSMContext):
+    """
+    Старт изменения смайлика ачивки.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        award_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный ID ачивки.", show_alert=True)
+        return
+
+    await state.set_state(AchievementStates.waiting_edit_award_icon)
+    await state.update_data(
+        ach_prompt_chat_id=callback.message.chat.id,
+        ach_prompt_msg_id=callback.message.message_id,
+        edit_award_id=award_id,
+    )
+
+    text = (
+        "🎨 <b>Изменение смайлика ачивки</b>\n\n"
+        "Отправь новый смайлик для этой ачивки.\n"
+        "Если отправишь несколько символов — будет использован первый."
+    )
+
+    try:
+        await callback.message.edit_text(text)
+    except Exception:
+        await callback.message.answer(text)
+
+    await callback.answer()
+
+
+@router.message(AchievementStates.waiting_edit_award_icon, F.text)
+async def admin_achievements_award_edit_icon_save(message: Message, state: FSMContext):
+    """
+    Сохранение нового смайлика ачивки.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+    award_id = data.get("edit_award_id")
+
+    raw_icon = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not award_id:
+        await state.clear()
+        await message.answer("Сессия редактирования потерялась. Открой управление ачивками заново.")
+        return
+
+    if not raw_icon:
+        icon = "🏅"
+    else:
+        # Берём только первый символ (один emoji / символ)
+        icon = raw_icon[0]
+
+    await update_award_icon(award_id, icon)
+
+    award = await get_award_by_id(award_id)
+    if not award:
+        result_text = "Ачивка была изменена или удалена."
+    else:
+        title = award.get("title") or "Без названия"
+        description = award.get("description") or "—"
+
+        result_text = (
+            "✅ <b>Смайлик ачивки обновлён.</b>\n\n"
+            f"{icon} <b>{title}</b>\n\n"
+            f"{description}"
+        )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=result_text,
+            )
+        except Exception:
+            await message.answer(result_text)
+    else:
+        await message.answer(result_text)
+
+    await state.clear()
 
 
 @router.callback_query(F.data == "admin:ach:beta:start")
@@ -1254,7 +2153,7 @@ async def admin_achievements_beta_grant(message: Message, state: FSMContext):
     target_name = target_user.get("name") or "Без имени"
     target_username = target_user.get("username")
 
-    # Пытаемся выдать ачивку через базу
+    # Пытаемся выдать ачивку через локальную функцию
     granted = await give_achievement_to_user_by_code(
         user_tg_id=target_tg_id,
         code="beta_tester",

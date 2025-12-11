@@ -267,6 +267,225 @@ async def init_db():
             pass
 
 
+# ====== AWARDS / ACHIEVEMENTS HELPERS ======
+
+async def give_achievement_to_user_by_code(
+    user_tg_id: int,
+    code: str,
+    granted_by_tg_id: int | None = None,
+) -> bool:
+    """
+    Выдать пользователю ачивку по коду (например, «beta_tester»).
+
+    Работает поверх таблицы awards и старается не дублировать награды с тем же code.
+
+    Возвращает:
+    - True, если награда была выдана впервые;
+    - False, если у пользователя уже есть награда с таким code или пользователь не найден.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Ищем пользователя по Telegram ID
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE tg_id = ? AND is_deleted = 0",
+            (user_tg_id,),
+        )
+        user_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not user_row:
+            return False
+
+        user_id = int(user_row["id"])
+
+        # Проверяем, нет ли уже награды с таким code
+        cursor = await db.execute(
+            "SELECT id FROM awards WHERE user_id = ? AND code = ? LIMIT 1",
+            (user_id, code),
+        )
+        existing = await cursor.fetchone()
+        await cursor.close()
+
+        if existing:
+            return False
+
+        # Опционально находим, кто выдал награду (по tg_id)
+        granted_by_user_id: int | None = None
+        if granted_by_tg_id is not None:
+            cursor = await db.execute(
+                "SELECT id FROM users WHERE tg_id = ? AND is_deleted = 0",
+                (granted_by_tg_id,),
+            )
+            gb_row = await cursor.fetchone()
+            await cursor.close()
+            if gb_row:
+                granted_by_user_id = int(gb_row["id"])
+
+        # Маппинг code → человекочитаемые поля
+        if code == "beta_tester":
+            title = "Бета-тестер бота"
+            description = "Ты помог(ла) тестировать GlowShot на ранних стадиях до релиза."
+            icon = "🏆"
+            is_special = 1
+        else:
+            # Фоллбек, если появится другой код
+            title = code
+            description = None
+            icon = "🏅"
+            is_special = 0
+
+        now_iso = datetime.utcnow().isoformat(timespec="seconds")
+
+        # Вставляем награду
+        await db.execute(
+            """
+            INSERT INTO awards (
+                user_id,
+                code,
+                title,
+                description,
+                icon,
+                is_special,
+                granted_by_user_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, code, title, description, icon, is_special, granted_by_user_id, now_iso),
+        )
+        await db.commit()
+
+        return True
+
+
+async def get_awards_for_user(user_id: int) -> list[dict]:
+    """
+    Получить список всех наград пользователя из таблицы awards.
+    user_id — внутренний ID (users.id).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM awards
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]
+
+
+async def get_award_by_id(award_id: int) -> dict | None:
+    """
+    Получить одну награду по её ID.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM awards WHERE id = ?",
+            (award_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    if not row:
+        return None
+    return dict(row)
+
+
+async def delete_award_by_id(award_id: int) -> None:
+    """
+    Удалить награду по её ID.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM awards WHERE id = ?",
+            (award_id,),
+        )
+        await db.commit()
+
+
+async def update_award_text(award_id: int, title: str, description: str | None) -> None:
+    """
+    Обновить название и описание награды.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE awards
+            SET title = ?, description = ?
+            WHERE id = ?
+            """,
+            (title, description, award_id),
+        )
+        await db.commit()
+
+
+async def update_award_icon(award_id: int, icon: str | None) -> None:
+    """
+    Обновить смайлик/иконку награды.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE awards
+            SET icon = ?
+            WHERE id = ?
+            """,
+            (icon, award_id),
+        )
+        await db.commit()
+
+
+async def create_custom_award_for_user(
+    user_id: int,
+    title: str,
+    description: str | None,
+    icon: str | None,
+    code: str | None = None,
+    is_special: bool = False,
+    granted_by_user_id: int | None = None,
+) -> int:
+    """
+    Создать кастомную ачивку для пользователя.
+
+    user_id — внутренний ID (users.id).
+    code — произвольный код (если не указан, будет сгенерирован автоматически).
+    Возвращает ID созданной записи в таблице awards.
+    """
+    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+
+    if code is None:
+        ts = int(datetime.utcnow().timestamp())
+        code = f"custom_{user_id}_{ts}"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO awards (
+                user_id,
+                code,
+                title,
+                description,
+                icon,
+                is_special,
+                granted_by_user_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, code, title, description, icon, 1 if is_special else 0, granted_by_user_id, now_iso),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
 # ====== PHOTOS COUNT BY USER ======
 
 async def count_photos_by_user(user_id: int) -> int:
