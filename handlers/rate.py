@@ -30,6 +30,7 @@ from database import (
     update_daily_skip_info,
 )
 from handlers.upload import build_my_photo_caption
+from html import escape
 
 router = Router()
 
@@ -67,12 +68,18 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False) -> InlineKeyboa
     rows = [row1, row2, row3]
 
     if is_premium:
+        # Для премиум-пользователя добавляем строку:
+        # «Супер-оценка / Ачивка»
         rows.append(
             [
                 InlineKeyboardButton(
                     text="💥 Супер-оценка",
                     callback_data=f"rate:super:{photo_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🏆 Ачивка",
+                    callback_data=f"rate:award:{photo_id}",
+                ),
             ]
         )
 
@@ -97,37 +104,41 @@ def build_rate_caption(photo: dict) -> str:
     """
     Подпись для раздела оценивания.
 
-    Добавляем:
-    - 💎 прямо перед именем автора (в строке "Автор:"), если автор с премиумом;
-    - ссылку на его канал (если есть tg_channel_link), используя формат @username.
-    """
-    base_caption = build_my_photo_caption(photo)
+    Формат:
+    (фото)
+    💎 "Название" • устройство    — если автор с премиумом, иначе без 💎
+    Категория: обычная фотография
 
-    # Признак, что автор фотографии — премиум
+    Снизу — ссылка на канал, если указана.
+    Имя автора здесь не показываем.
+    """
+    title = (photo.get("title") or "").strip() or "Без названия"
+    device_info = (photo.get("device_info") or photo.get("device_type") or "").strip() or "устройство не указано"
+
+    # Экранируем текст для HTML-подписи
+    safe_title = escape(title)
+    safe_device = escape(device_info)
+
     is_premium_author = bool(photo.get("user_is_premium"))
 
-    # Ссылка на канал автора (идёт из get_random_photo_for_rating / профиля)
-    raw_link = photo.get("user_tg_channel_link") or photo.get("tg_channel_link")
+    first_line = f"\"{safe_title}\" • {safe_device}"
+    if is_premium_author:
+        first_line = f"💎 {first_line}"
 
-    # Разбиваем базовую подпись на строки, чтобы можно было точечно поменять строку с автором
-    lines = base_caption.split("\n")
+    # Категория
+    raw_category = (photo.get("category") or "").strip() or "photo"
+    if raw_category == "photo":
+        category_label = "обычная фотография"
+    else:
+        category_label = raw_category
 
-    # Для раздела оценивания имя автора не показываем:
-    # - бриллиант ставим в заголовок (первую строку), если автор с премиумом;
-    # - строку "Автор: ..." полностью убираем из подписи.
-    if is_premium_author and lines:
-        # Добавляем 💎 перед первой строкой (обычно: "Название" (устройство))
-        first_line = lines[0]
-        # Чтобы не дублировать, проверяем, нет ли уже бриллианта
-        if not first_line.lstrip().startswith("💎"):
-            lines[0] = f"💎 {first_line}"
-
-    # Убираем строку "Автор: ..." из подписи, чтобы не палить автора при оценке
-    lines = [
-        line for line in lines
-        if not line.lstrip().startswith("Автор:")
+    lines: list[str] = [
+        first_line,
+        f"Категория: {category_label}",
     ]
 
+    # Ссылка на канал/аккаунт
+    raw_link = photo.get("user_tg_channel_link") or photo.get("tg_channel_link")
     href = None
     display = None
 
@@ -160,19 +171,15 @@ def build_rate_caption(photo: dict) -> str:
             href = link
             display = link
 
-    extra_lines: list[str] = []
-
     if href and display:
-        extra_lines.append(
-            f"🔗 Ссылка: <a href=\"{href}\">{display}</a>"
+        lines.extend(
+            [
+                "",
+                f"🔗 Ссылка: <a href=\"{href}\">{display}</a>",
+            ]
         )
 
-    # Если нет дополнительных строк — возвращаем исходную подпись
-    if not extra_lines:
-        return "\n".join(lines)
-
-    # Иначе добавляем ссылку в конец подписи, отделяя пустой строкой
-    return "\n".join(lines + [""] + extra_lines)
+    return "\n".join(lines)
 
 async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> None:
     """
@@ -1013,3 +1020,34 @@ async def comment_seen(callback: CallbackQuery) -> None:
     except TelegramBadRequest:
         # Если callback-query уже протухла — тоже просто игнорируем.
         pass
+@router.callback_query(F.data.startswith("rate:award:"))
+async def rate_award(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Заглушка для кнопки «Ачивка» в разделе оценивания.
+    В дальнейшем здесь можно будет реализовать выдачу ачивок.
+    """
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+
+    # Дополнительно проверяем премиум, на всякий случай
+    is_premium = False
+    try:
+        tg_id = user.get("tg_id")
+        if tg_id:
+            is_premium = await is_user_premium_active(tg_id)
+    except Exception:
+        is_premium = False
+
+    if not is_premium:
+        await callback.answer(
+            "Выдавать ачивки из оценивания можно только с GlowShot Premium 💎.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer(
+        "Функция выдачи ачивок из оценивания скоро будет доступна 💎.",
+        show_alert=True,
+    )

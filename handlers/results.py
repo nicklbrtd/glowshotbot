@@ -183,9 +183,20 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
 
     # ---------- ШАГ 0: заставка ----------
     if step <= 0:
+        # Преобразуем ключ дня в человекочитаемую дату
+        try:
+            day_dt = datetime.fromisoformat(day_key)
+            day_str = day_dt.strftime("%d.%m.%Y")
+        except Exception:
+            day_str = day_key
+
+        today_dt = get_moscow_now().date()
+        today_str = today_dt.strftime("%d.%m.%Y")
+
         text = (
-            f"📅 <b>Итоги {label}</b>\n\n"
-            "Нажимай «Вперёд», чтобы увидеть итоги:\n"
+            f"📅 <b>Итоги дня ({day_str})</b>\n"
+            f"Сегодня: {today_str}\n\n"
+            "Нажимай «Вперёд», чтобы увидеть:\n"
             "• 🥉 3 место дня\n"
             "• 🥈 2 место дня\n"
             "• 🥇 1 место дня\n"
@@ -308,13 +319,13 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
 
 @router.callback_query(F.data == "results:day")
 async def results_day(callback: CallbackQuery):
+    """
+    Итоги дня всегда считаем за вчерашний календарный день по Москве.
+    Весь день пользователи оценивают сегодняшние работы, а итоги показываем
+    для прошедшего дня.
+    """
     now = get_moscow_now()
-
-    if (now.hour, now.minute) < (20, 45):
-        day_key = (now.date() - timedelta(days=1)).isoformat()
-    else:
-        day_key = get_moscow_today()
-
+    day_key = (now.date() - timedelta(days=1)).isoformat()
     await _render_results_day(callback, day_key, step=0)
 
 

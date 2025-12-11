@@ -111,19 +111,20 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
 def _format_time_until_next_upload() -> str:
     """
     Вернуть человекочитаемую строку, через сколько можно будет загрузить новый кадр.
-    Логика: новая фотография доступна через 30 минут после итогов дня, то есть с 21:15 по Москве.
+    Новая фотография доступна с полуночи следующего дня по Москве.
     Пример: 'через 3 часа 15 минут'.
     """
     now = get_moscow_now()
 
-    # Время, когда открывается окно загрузки нового кадра: 21:15 по Москве.
-    today_upload_start = now.replace(hour=21, minute=15, second=0, microsecond=0)
+    # Время, когда открывается окно загрузки нового кадра: полночь следующего дня по Москве.
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    next_upload_start = today_midnight + timedelta(days=1)
 
-    if now >= today_upload_start:
+    if now >= next_upload_start:
         # Формально уже наступило время новой загрузки — показываем, что ждать почти не нужно.
         return "совсем скоро"
 
-    delta = today_upload_start - now
+    delta = next_upload_start - now
     total_seconds = int(delta.total_seconds())
     if total_seconds <= 60:
         return "через минуту"
@@ -356,7 +357,7 @@ async def _compute_can_promote(photo: dict) -> bool:
     """Можно ли показывать кнопку «Продвигать» для этой фотографии.
 
     Условие:
-    • время >= 21:30 по дню фото (или день уже прошёл);
+    • текущая дата строго позже дня фотографии;
     • фотография входит в топ-5 дня;
     • её ещё нет в недельном отборе.
     """
@@ -373,11 +374,8 @@ async def _compute_can_promote(photo: dict) -> bool:
     except Exception:
         day = now.date()
 
-    # Итоги дня считаем «открытыми» после 21:30 этого дня
-    if not (
-        now.date() > day
-        or (now.date() == day and (now.hour, now.minute) >= (20, 45))
-    ):
+    # Продвигать можно только, когда день фотографии уже полностью прошёл
+    if now.date() <= day:
         return False
 
     top5 = await get_daily_top_photos(day_key, limit=5)
@@ -463,18 +461,16 @@ async def build_my_photo_main_text(photo: dict) -> str:
         except Exception:
             day = now.date()
 
-        if now.date() > day:
-            results_time_reached = True
-        elif now.date() < day:
+        # Итоги по этой работе считаем подведёнными, когда день фотографии полностью прошёл.
+        if now.date() <= day:
             results_time_reached = False
         else:
-            # Итоги дня считаем подведёнными после 20:45 по Москве
-            results_time_reached = (now.hour, now.minute) >= (20, 45)
+            results_time_reached = True
 
         if not results_time_reached:
             lines.append(
                 "Итог этой фотографии: пока не подведён.\n"
-                "Итоги дня появятся после 20:45 по Москве."
+                "Итоги по этому дню появятся на следующий день."
             )
         else:
             top = await get_daily_top_photos(day_key, limit=50)
