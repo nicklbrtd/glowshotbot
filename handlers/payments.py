@@ -1,0 +1,357 @@
+from datetime import timedelta
+
+from aiogram import Router, F
+from aiogram.types import (
+    CallbackQuery,
+    LabeledPrice,
+    PreCheckoutQuery,
+    Message,
+    InlineKeyboardMarkup,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from keyboards.common import build_viewed_kb, build_back_kb
+
+from config import PAYMENT_PROVIDER_TOKEN
+from database import set_user_premium_status
+from utils.time import get_moscow_now
+
+router = Router(name="payments")
+
+# Базовые тарифы премиума.
+# Для каждого тарифа указываем цену и в рублях, и в Stars.
+TARIFFS = {
+    "7d": {
+        "days": 7,
+        "price_rub": 99,
+        "price_stars": 5,
+        "title": "GlowShot Premium — 7 дней",
+        "label": "Премиум на 7 дней",
+        "description": "Доступ ко всем премиум-функциям на 7 дней.",
+    },
+    "30d": {
+        "days": 30,
+        "price_rub": 249,
+        "price_stars": 15,
+        "title": "GlowShot Premium — 30 дней",
+        "label": "Премиум на 30 дней",
+        "description": "Доступ ко всем премиум-функциям на 30 дней.",
+    },
+    "90d": {
+        "days": 90,
+        "price_rub": 599,
+        "price_stars": 40,
+        "title": "GlowShot Premium — 90 дней",
+        "label": "Премиум на 90 дней",
+        "description": "Доступ ко всем премиум-функциям на 90 дней.",
+    },
+}
+
+
+def _build_tariffs_kb_rub() -> InlineKeyboardMarkup:
+    """
+    Клавиатура с выбором тарифа премиума для оплаты в рублях.
+    """
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=f"💳 7 дней — {TARIFFS['7d']['price_rub']} ₽",
+        callback_data="premium:order:rub:7d",
+    )
+    kb.button(
+        text=f"💳 30 дней — {TARIFFS['30d']['price_rub']} ₽",
+        callback_data="premium:order:rub:30d",
+    )
+    kb.button(
+        text=f"💳 90 дней — {TARIFFS['90d']['price_rub']} ₽",
+        callback_data="premium:order:rub:90d",
+    )
+    kb.button(
+        text="⬅️ Назад",
+        callback_data="profile:premium",
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _build_tariffs_kb_stars() -> InlineKeyboardMarkup:
+    """
+    Клавиатура с выбором тарифа премиума для оплаты Telegram Stars.
+    """
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=f"⭐ 7 дней — {TARIFFS['7d']['price_stars']} ⭐",
+        callback_data="premium:order:stars:7d",
+    )
+    kb.button(
+        text=f"⭐ 30 дней — {TARIFFS['30d']['price_stars']} ⭐",
+        callback_data="premium:order:stars:30d",
+    )
+    kb.button(
+        text=f"⭐ 90 дней — {TARIFFS['90d']['price_stars']} ⭐",
+        callback_data="premium:order:stars:90d",
+    )
+    kb.button(
+        text="⬅️ Назад",
+        callback_data="profile:premium",
+    )
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+@router.callback_query(F.data == "profile:premium_buy")
+async def premium_buy_menu(callback: CallbackQuery):
+    """
+    Экран выбора способа оплаты (рубли / Stars) и дальнейшего выбора тарифа.
+
+    Логика:
+    - Если есть PAYMENT_PROVIDER_TOKEN → доступны и рубли, и Stars.
+    - Если токена нет → показываем сразу Stars-тарифы.
+    """
+    has_rub_payments = bool(PAYMENT_PROVIDER_TOKEN)
+
+    if has_rub_payments:
+        kb = InlineKeyboardBuilder()
+        kb.button(
+            text="💳 Оплата картой (RUB)",
+            callback_data="premium:buy:rub",
+        )
+        kb.button(
+            text="⭐ Оплата Stars",
+            callback_data="premium:buy:stars",
+        )
+        kb.button(
+            text="⬅️ Назад",
+            callback_data="profile:premium",
+        )
+        kb.adjust(1)
+
+        text = (
+            "💳 <b>Оплата GlowShot Premium</b>\n\n"
+            "Выбери, как тебе удобнее оплатить подписку:\n\n"
+            "• 💳 картой в рублях (через встроенные платежи Telegram);\n"
+            "• ⭐ Telegram Stars.\n\n"
+            "После выбора способа оплаты появятся доступные тарифы."
+        )
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    # Если провайдера для рублей нет — сразу ведём в Stars.
+    text = (
+        "💳 <b>Оплата GlowShot Premium</b>\n\n"
+        "Онлайн-оплата картой пока недоступна.\n\n"
+        "Зато можно оплатить подписку через Telegram Stars (⭐).\n"
+        "Выбери тариф из списка ниже."
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=_build_tariffs_kb_stars(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "premium:buy:rub")
+async def premium_buy_rub(callback: CallbackQuery):
+    """
+    Экран выбора тарифа при оплате в рублях.
+    """
+    if not PAYMENT_PROVIDER_TOKEN:
+        await callback.answer(
+            "Оплата картой временно недоступна 😔", show_alert=True
+        )
+        return
+
+    text = (
+        "💳 <b>Оплата картой (RUB)</b>\n\n"
+        "Выбери тариф GlowShot Premium.\n\n"
+        "Оплата пройдёт через встроенные платежи Telegram."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=_build_tariffs_kb_rub(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "premium:buy:stars")
+async def premium_buy_stars(callback: CallbackQuery):
+    """
+    Экран выбора тарифа при оплате через Telegram Stars.
+    """
+    text = (
+        "⭐ <b>Оплата через Telegram Stars</b>\n\n"
+        "Выбери тариф GlowShot Premium.\n\n"
+        "Оплата будет списана с твоего баланса Stars."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=_build_tariffs_kb_stars(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("premium:order:"))
+async def premium_create_invoice(callback: CallbackQuery):
+    """
+    Создание инвойса на оплату премиума.
+    Поддерживаются оба способа:
+    - RUB (через провайдера и PAYMENT_PROVIDER_TOKEN)
+    - XTR (Telegram Stars)
+    """
+    parts = (callback.data or "").split(":")
+    # ожидаем "premium:order:METHOD:PERIOD"
+    if len(parts) != 4:
+        await callback.answer("Некорректный тариф.", show_alert=True)
+        return
+
+    _, _, method, period_code = parts
+    if method not in ("rub", "stars"):
+        await callback.answer("Некорректный способ оплаты.", show_alert=True)
+        return
+
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    if method == "rub":
+        if not PAYMENT_PROVIDER_TOKEN:
+            await callback.answer(
+                "Оплата картой временно недоступна 😔", show_alert=True
+            )
+            return
+
+        amount = int(tariff["price_rub"] * 100)
+        currency = "RUB"
+        provider_token = PAYMENT_PROVIDER_TOKEN
+        label = tariff["label"]
+    else:
+        # Stars — просто количество звёзд, без умножения
+        amount = int(tariff["price_stars"])  # 5, 15, 40 и т.д.
+        currency = "XTR"
+        provider_token = ""  # Для Stars внешний провайдер не нужен
+        label = tariff["label"]
+
+    prices = [
+        LabeledPrice(
+            label=label,
+            amount=amount,
+        )
+    ]
+
+    try:
+        await callback.bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title=tariff["title"],
+            description=tariff["description"],
+            provider_token=provider_token,
+            currency=currency,
+            prices=prices,
+            payload=f"premium:{method}:{period_code}",
+            start_parameter="premium-subscription",
+        )
+    except Exception as e:
+        await callback.answer(
+            f"Не удалось создать счёт. Попробуй позже.\n\n{e}", show_alert=True
+        )
+        return
+
+    await callback.answer("Отправил счёт в чат с ботом 💳")
+
+
+@router.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
+    """
+    Подтверждаем pre-checkout запрос, чтобы Telegram продолжил оплату.
+    """
+    await pre_checkout_query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    """
+    Обработка успешной оплаты: активируем премиум пользователю.
+    """
+    successful_payment = message.successful_payment
+    payload = successful_payment.invoice_payload or ""
+
+    # Ожидаем payload формата 'premium:rub:7d' или 'premium:stars:7d'
+    parts = payload.split(":")
+    if len(parts) != 3 or parts[0] != "premium":
+        await message.answer(
+            "Оплата получена, но тариф не распознан.\n"
+            "Напиши, пожалуйста, в поддержку, чтобы мы проверили вручную."
+        )
+        return
+
+    _, method, period_code = parts
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await message.answer(
+            "Оплата получена, но тариф не найден.\n"
+            "Напиши, пожалуйста, в поддержку, чтобы мы проверили вручную."
+        )
+        return
+
+    days = tariff["days"]
+    now = get_moscow_now()
+    until_dt = now + timedelta(days=days)
+    premium_until_iso = until_dt.isoformat(timespec="seconds")
+    human_until = until_dt.strftime("%d.%m.%Y")
+
+    await set_user_premium_status(
+        message.from_user.id,
+        True,
+        premium_until=premium_until_iso,
+    )
+
+    # Текст чуть-чуть различаем по способу оплаты чисто косметически
+    if method == "rub":
+        pay_method_line = "Способ оплаты: 💳 карта (RUB)."
+    else:
+        pay_method_line = "Способ оплаты: ⭐ Telegram Stars."
+
+    success_text = (
+        "💎 <b>Оплата успешно получена!</b>\n\n"
+        f"Твой GlowShot Premium активен до <b>{human_until}</b> "
+        f"(на {days} дн.).\n"
+        f"{pay_method_line}\n\n"
+        "Спасибо, что поддерживаешь проект 💙"
+    )
+
+    kb = build_viewed_kb("premium:success_read")
+
+    # Пытаемся по максимуму не плодить новые сообщения: сначала пробуем отредактировать
+    # сам инвойс. Если Telegram не даст это сделать — тогда уже отправим новое сообщение.
+    try:
+        await message.edit_text(
+            success_text,
+            reply_markup=kb,
+        )
+    except Exception:
+        await message.answer(
+            success_text,
+            reply_markup=kb,
+        )
+
+
+@router.callback_query(F.data == "premium:success_read")
+async def premium_success_read(callback: CallbackQuery):
+    """
+    Пользователь отметил, что уведомление об оплате прочитано.
+    По возможности удаляем сообщение, чтобы не засорять чат.
+    """
+    try:
+        await callback.message.delete()
+    except Exception:
+        # Если удалить нельзя (например, в каком-то типе чата), просто убираем кнопки.
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    await callback.answer()

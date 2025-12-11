@@ -1,0 +1,907 @@
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from datetime import datetime, timedelta
+
+from database import (
+    get_user_by_tg_id,
+    update_user_name,
+    update_user_gender,
+    update_user_age,
+    update_user_bio,
+    update_user_channel_link,
+    soft_delete_user,
+    count_photos_by_user,
+    get_user_rating_summary,
+    get_most_popular_photo_for_user,
+    get_weekly_rank_for_user,
+    get_user_premium_status,
+    is_user_premium_active,
+    get_today_photo_for_user,
+)
+from keyboards.common import build_back_kb, build_confirm_kb
+from utils.validation import has_links_or_usernames, has_promo_channel_invite
+
+router = Router()
+
+
+class ProfileEditStates(StatesGroup):
+    waiting_new_name = State()
+    waiting_new_age = State()
+    waiting_new_bio = State()
+    waiting_new_channel = State()
+
+
+def _plural_ru(value: int, one: str, few: str, many: str) -> str:
+    """
+    Простое склонение русских слов по числу:
+    1 час, 2 часа, 5 часов и т.п.
+    """
+    v = abs(value) % 100
+    if 11 <= v <= 19:
+        return many
+    v = v % 10
+    if v == 1:
+        return one
+    if 2 <= v <= 4:
+        return few
+    return many
+
+
+def _format_time_until_next_upload() -> str:
+    now = datetime.now()
+
+    # Время, когда открывается окно загрузки нового кадра: 21:15.
+    today_upload_start = now.replace(hour=21, minute=15, second=0, microsecond=0)
+
+    if now >= today_upload_start:
+        # Формально уже наступило время новой загрузки — показываем, что ждать почти не нужно.
+        return "совсем скоро"
+
+    delta = today_upload_start - now
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 60:
+        return "через минуту"
+
+    total_minutes = total_seconds // 60
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+
+    parts: list[str] = []
+    if hours > 0:
+        parts.append(f"{hours} {_plural_ru(hours, 'час', 'часа', 'часов')}")
+    if minutes > 0:
+        parts.append(f"{minutes} {_plural_ru(minutes, 'минута', 'минуты', 'минут')}")
+
+    if not parts:
+        return "совсем скоро"
+
+    return "через " + " ".join(parts)
+
+
+
+
+async def build_profile_view(user: dict):
+    """
+    Собирает основной вид профиля с новой структурой и реальными данными.
+    """
+    name = user.get("name") or "—"
+    age = user.get("age")
+    age_part = f", {age}" if age else ""
+
+    # Пол смайликом
+    gender_raw = user.get("gender")
+    if gender_raw == "Парень":
+        gender_icon = "🚹"
+    elif gender_raw == "Девушка":
+        gender_icon = "🚺"
+    elif gender_raw in ("Другое", "Other"):
+        gender_icon = "⚧️"
+    elif gender_raw in ("Не важно", None, ""):
+        gender_icon = "❔"
+    else:
+        gender_icon = "❔"
+
+    # Дни в боте по created_at, если есть
+    days_in_bot = "—"
+    created_at = user.get("created_at")
+    if created_at:
+        try:
+            # Пытаемся разобрать ISO-дату или стандартный формат
+            try:
+                dt = datetime.fromisoformat(created_at)
+            except ValueError:
+                dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+            delta = datetime.now() - dt
+            days = max(1, delta.days + 1)
+            days_in_bot = str(days)
+        except Exception:
+            days_in_bot = "—"
+
+    # Реальная статистика по фото
+    total_photos = "—"
+    avg_rating_text = "—"
+    popular_photo_title = "—"
+    popular_photo_metric = "—"
+    weekly_top_position = "—"
+
+    user_id = user.get("id")
+    tg_id = user.get("tg_id")
+
+    if user_id:
+        # Всего загружено фото
+        try:
+            total = await count_photos_by_user(user_id)
+            total_photos = str(total)
+        except Exception:
+            total_photos = "—"
+
+        # Средняя оценка и количество оценок
+        try:
+            summary = await get_user_rating_summary(user_id)
+            avg = summary.get("avg_rating")
+            cnt = summary.get("ratings_count") or 0
+            if avg is not None and cnt > 0:
+                avg_rating_text = f"{avg:.1f} ({cnt} оценок)"
+            elif cnt > 0:
+                avg_rating_text = f"{cnt} оценок"
+            else:
+                avg_rating_text = "—"
+        except Exception:
+            avg_rating_text = "—"
+
+        # Самое популярное фото
+        try:
+            popular = await get_most_popular_photo_for_user(user_id)
+            if popular:
+                popular_photo_title = popular.get("title") or "Без названия"
+                ratings_count = popular.get("ratings_count") or 0
+                avg_pop = popular.get("avg_rating")
+                if avg_pop is not None:
+                    popular_photo_metric = f"{avg_pop:.1f}★, {ratings_count} оценок"
+                else:
+                    popular_photo_metric = f"{ratings_count} оценок"
+        except Exception:
+            pass
+
+        # Позиция в топе недели
+        try:
+            rank = await get_weekly_rank_for_user(user_id)
+            if rank is not None:
+                weekly_top_position = str(rank)
+        except Exception:
+            weekly_top_position = "—"
+
+    # GlowShot Premium статус
+    premium_status_line = "нет (доступно для покупки)"
+    premium_badge = ""
+    premium_extra_line = ""
+    premium_active = False
+
+    if tg_id:
+        try:
+            raw_status = await get_user_premium_status(tg_id)
+            is_active = await is_user_premium_active(tg_id)
+            had_premium = bool(raw_status and raw_status.get("is_premium"))
+
+            if is_active:
+                premium_active = True
+                until = raw_status.get("premium_until")
+                if until:
+                    try:
+                        dt = datetime.fromisoformat(until)
+                        human_until = dt.strftime("%d.%m.%Y")
+                        premium_status_line = f"активен до {human_until}"
+
+                        # Считаем, сколько дней осталось, если дата в будущем
+                        try:
+                            days_left = (dt.date() - datetime.now().date()).days
+                            if days_left >= 0:
+                                days_text = _plural_ru(
+                                    days_left,
+                                    "день",
+                                    "дня",
+                                    "дней",
+                                )
+                                premium_extra_line = f"Осталось: {days_left} {days_text}."
+                        except Exception:
+                            # Дополнительную строку можно не показывать, если что-то пошло не так
+                            pass
+                    except Exception:
+                        premium_status_line = f"активен до {until}"
+                else:
+                    premium_status_line = "активен (бессрочно)"
+                    premium_extra_line = "Подписка без ограничения по дате."
+                premium_badge = " 💎"
+            else:
+                # Если флаг стоит, но срок истёк
+                if had_premium and raw_status.get("premium_until"):
+                    premium_status_line = "срок действия истёк"
+                    premium_extra_line = "Ты можешь продлить подписку через кнопку ниже."
+                elif had_premium:
+                    premium_status_line = "срок действия истёк"
+                    premium_extra_line = "Ты можешь заново оформить подписку через кнопку ниже."
+                else:
+                    premium_extra_line = "Оформить премиум можно через кнопку ниже."
+        except Exception:
+            # В случае ошибки не ломаем профиль
+            pass
+
+
+    text_lines = [
+        f"👤 <b>Твой профиль</b>{premium_badge}",
+        "",
+        f"<b>Имя:</b> {name}{age_part}",
+        f"<b>Пол:</b> {gender_icon}",
+    ]
+
+    # Ссылка (для премиум-пользователей, если указана) — сразу под именем и полом
+    tg_link = user.get("tg_channel_link")
+    if tg_link:
+        display_link = tg_link.strip()
+        lower = display_link.lower()
+        username = None
+
+        # Если уже @username — просто нормализуем
+        if display_link.startswith("@"):
+            username = display_link[1:].strip() or None
+        else:
+            # Пытаемся вытащить username из ссылки вида t.me/username или telegram.me/username
+            if "t.me/" in lower:
+                part = display_link.split("t.me/", 1)[1]
+                part = part.split("/", 1)[0]
+                part = part.split("?", 1)[0]
+                username = part.strip() or None
+            elif "telegram.me/" in lower:
+                part = display_link.split("telegram.me/", 1)[1]
+                part = part.split("/", 1)[0]
+                part = part.split("?", 1)[0]
+                username = part.strip() or None
+
+        if username:
+            display_link = f"@{username}"
+
+        text_lines.append(f"📡 <b>Ссылка:</b> {display_link}")
+
+    # Описание профиля — тоже наверху, сразу после ссылки (если есть)
+    text_lines.extend(
+        [
+            "",
+            "📝 <b>Описание:</b>",
+            user.get("bio") or "—",
+            "",
+            f"<b>Всего загрузил:</b> {total_photos} 📷",
+            f"<b>Дней в боте:</b> {days_in_bot} 📆",
+            "",
+            "📊 <b>Твоя статистика:</b>",
+            f"• ⭐ Средняя оценка по фото: {avg_rating_text}",
+            f"• 🔝 Самое популярное фото: {popular_photo_title} ({popular_photo_metric})",
+            f"• 📈 Позиция в топ недели: #{weekly_top_position}",
+            "",
+            "💎 <b>GlowShot Premium</b>",
+            f"Статус: {premium_status_line}",
+        ]
+    )
+
+    if premium_extra_line:
+        text_lines.append(premium_extra_line)
+    text = "\n".join(text_lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏆 Награды", callback_data="profile:awards")
+    kb.button(text="✏️ Редактировать профиль", callback_data="profile:edit")
+    kb.button(text="⚙️ Настройки", callback_data="profile:settings")
+
+    premium_button_text = "💎 Оформить премиум" if not premium_active else "💎 Мой премиум"
+    kb.button(text=premium_button_text, callback_data="profile:premium")
+
+    kb.button(text="⬅️ В меню", callback_data="menu:back")
+    kb.adjust(1)
+    return text, kb.as_markup()
+
+
+@router.callback_query(F.data == "profile:open")
+async def profile_menu(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
+        return
+
+    text, markup = await build_profile_view(user)
+    chat_id = callback.message.chat.id
+
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=markup,
+            disable_notification=True,
+        )
+    else:
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=markup,
+            )
+        except Exception:
+            # В крайнем случае — отправляем новое сообщение
+            await callback.message.answer(
+                text,
+                reply_markup=markup,
+            )
+
+    await callback.answer()
+
+
+# Handler for menu:profile to return to profile view from nested sections
+@router.callback_query(F.data == "menu:profile")
+async def profile_back_to_profile(callback: CallbackQuery):
+    """
+    Возврат к просмотру профиля из вложенных разделов (награды, настройки и т.п.).
+    """
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
+        return
+
+    text, markup = await build_profile_view(user)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=markup,
+        )
+    except Exception:
+        # В крайнем случае — отправляем новое сообщение
+        await callback.message.answer(
+            text,
+            reply_markup=markup,
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:edit")
+async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖼 Фото профиля", callback_data="profile:edit_avatar")
+    kb.button(text="🪪 Имя", callback_data="profile:edit_name")
+    kb.button(text="🎂 Возраст", callback_data="profile:edit_age")
+    kb.button(text="📝 Описание", callback_data="profile:edit_bio")
+    kb.button(text="⚧️ Пол", callback_data="profile:edit_gender")
+    kb.button(text="📡 Ссылка", callback_data="profile:edit_channel")
+    kb.button(text="🗑 Удалить аккаунт", callback_data="profile:delete")
+    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.adjust(2, 2, 2, 1, 1)
+
+    await callback.message.edit_text(
+        "✏️ Что хочешь изменить в профиле?",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:edit_name")
+async def profile_edit_name(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileEditStates.waiting_new_name)
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+    await callback.message.edit_text(
+        "🪪 Введи новое имя для профиля.",
+        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:edit_avatar")
+async def profile_edit_avatar(callback: CallbackQuery):
+    """
+    Заглушка для изменения/добавления аватара профиля.
+    """
+    await callback.message.edit_text(
+        "Добавление фотографии профиля пока в разработке.\n\n"
+        "Скоро здесь можно будет загрузить или поменять свой аватар.",
+        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+
+@router.callback_query(F.data == "profile:edit_channel")
+async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
+    """
+    Настройка ссылки на Telegram для профиля (доступно только с премиумом).
+    Принимаем только телеграм-ссылки или @username.
+    """
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    tg_id = user.get("tg_id")
+    is_active = False
+    if tg_id:
+        try:
+            is_active = await is_user_premium_active(tg_id)
+        except Exception:
+            is_active = False
+
+    if not is_active:
+        await callback.answer(
+            "Привязка ссылки доступна только с GlowShot Premium 💎",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(ProfileEditStates.waiting_new_channel)
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
+    await callback.message.edit_text(
+        "📡 Отправь ссылку на свой Telegram-канал или страницу.\n\n"
+        "Принимаются только Telegram-ссылки:\n"
+        "• <code>https://t.me/username</code>\n"
+        "• <code>https://telegram.me/username</code>\n"
+        "• или просто <code>@username</code> — я сам превращу её в ссылку.\n\n"
+        "Если хочешь убрать ссылку — отправь слово <code>удалить</code>.",
+        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+# Handler to set channel link for premium users
+@router.message(ProfileEditStates.waiting_new_channel, F.text)
+async def profile_set_channel(message: Message, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id")
+    edit_chat_id = data.get("edit_chat_id")
+
+    raw = (message.text or "").strip()
+
+    # Удаление ссылки
+    if raw.lower() in ("удалить", "delete", "remove"):
+        await update_user_channel_link(message.from_user.id, None)
+        await state.clear()
+        await message.delete()
+
+        user = await get_user_by_tg_id(message.from_user.id)
+        text, markup = await build_profile_view(user)
+        await message.bot.edit_message_text(
+            chat_id=edit_chat_id,
+            message_id=edit_msg_id,
+            text=text,
+            reply_markup=markup,
+        )
+        return
+
+    value = raw
+
+    # Нормализация: если человек прислал @username — превращаем в ссылку
+    if value.startswith("@"):
+        username = value[1:].strip()
+        if not username:
+            await message.delete()
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=edit_chat_id,
+                    message_id=edit_msg_id,
+                    text=(
+                        "Это не похоже на корректный @username.\n\n"
+                        "Отправь ссылку вида <code>https://t.me/username</code> "
+                        "или просто <code>@username</code>."
+                    ),
+                    reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise
+            return
+        value = f"https://t.me/{username}"
+
+    # Добавляем схему, если человек прислал t.me/username без https://
+    lower = value.lower().strip()
+    if lower.startswith("t.me/"):
+        value = "https://" + value.lstrip()
+
+    if lower.startswith("telegram.me/"):
+        value = "https://" + value.lstrip()
+
+    # Проверяем, что это именно телеграм-ссылка
+    lower = value.lower().strip()
+    if not (
+        lower.startswith("https://t.me/")
+        or lower.startswith("http://t.me/")
+        or lower.startswith("https://telegram.me/")
+        or lower.startswith("http://telegram.me/")
+        or lower.startswith("tg://")
+    ):
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=edit_chat_id,
+                message_id=edit_msg_id,
+                text=(
+                    "Можно указать только ссылку на Telegram.\n\n"
+                    "Подойдёт:\n"
+                    "• <code>https://t.me/username</code>\n"
+                    "• <code>https://telegram.me/username</code>\n"
+                    "• или просто <code>@username</code>."
+                ),
+                reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    # Всё ок — сохраняем
+    await update_user_channel_link(message.from_user.id, value)
+    await state.clear()
+    await message.delete()
+
+    user = await get_user_by_tg_id(message.from_user.id)
+    text, markup = await build_profile_view(user)
+    await message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+    )
+
+
+@router.message(ProfileEditStates.waiting_new_name, F.text)
+async def profile_set_name(message: Message, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id")
+    edit_chat_id = data.get("edit_chat_id")
+
+    new_name = message.text.strip()
+
+    # Пустое имя
+    if not new_name:
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=edit_chat_id,
+                message_id=edit_msg_id,
+                text=(
+                    "Имя не может быть пустым.\n\n"
+                    "Напиши, как тебя записать в профиле — имя или творческий псевдоним."
+                ),
+                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    # Запрет ссылок, доменов, @username и рекламы каналов
+    if has_links_or_usernames(new_name) or has_promo_channel_invite(new_name):
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=edit_chat_id,
+                message_id=edit_msg_id,
+                text=(
+                    "В имени нельзя оставлять @username, ссылки на Telegram, соцсети или сайты, "
+                    "а также рекламировать каналы.\n\n"
+                    "Напиши имя или свой псевдоним <b>без контактов</b>."
+                ),
+                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    await update_user_name(message.from_user.id, new_name)
+    await state.clear()
+    await message.delete()
+
+    user = await get_user_by_tg_id(message.from_user.id)
+    text, markup = await build_profile_view(user)
+    await message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+    )
+
+
+@router.callback_query(F.data == "profile:edit_gender")
+async def profile_edit_gender(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Парень", callback_data="profile:set_gender:male")
+    kb.button(text="Девушка", callback_data="profile:set_gender:female")
+    kb.button(text="Другое", callback_data="profile:set_gender:other")
+    kb.button(text="Не важно", callback_data="profile:set_gender:na")
+    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.adjust(2, 2, 1)
+
+    await callback.message.edit_text(
+        "Выбери, как тебя указать в профиле.\n\n",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("profile:set_gender:"))
+async def profile_set_gender(callback: CallbackQuery):
+    _, _, code = callback.data.split(":", 2)
+    mapping = {
+        "male": "Парень",
+        "female": "Девушка",
+        "na": "Не важно",
+    }
+    gender = mapping.get(code, "Не важно")
+    await update_user_gender(callback.from_user.id, gender)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    text, markup = await build_profile_view(user)
+    await callback.message.edit_text(
+        text,
+        reply_markup=markup,
+    )
+    await callback.answer("Пол обновлён.")
+
+
+@router.callback_query(F.data == "profile:edit_age")
+async def profile_edit_age(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileEditStates.waiting_new_age)
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пропустить / убрать возраст", callback_data="profile:age_clear")
+    kb.adjust(1)
+    await callback.message.edit_text(
+        "📅 Введи новый возраст числом или нажми «Пропустить / убрать возраст».",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:age_clear")
+async def profile_age_clear(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id", callback.message.message_id)
+    edit_chat_id = data.get("edit_chat_id", callback.message.chat.id)
+
+    await update_user_age(callback.from_user.id, None)
+    await state.clear()
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    text, markup = await build_profile_view(user)
+    await callback.message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+    )
+    await callback.answer("Возраст убран.")
+
+
+@router.message(ProfileEditStates.waiting_new_age, F.text)
+async def profile_set_age(message: Message, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id")
+    edit_chat_id = data.get("edit_chat_id")
+
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.delete()
+        await message.bot.edit_message_text(
+            chat_id=edit_chat_id,
+            message_id=edit_msg_id,
+            text=(
+                "Возраст должен быть числом.\n\n"
+                "Напиши только цифры, например: <code>18</code>."
+            ),
+            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+        )
+        return
+
+    age = int(text)
+    if age < 5 or age > 120:
+        await message.delete()
+        await message.bot.edit_message_text(
+            chat_id=edit_chat_id,
+            message_id=edit_msg_id,
+            text=(
+                "Ты уверен(а), что это твой реальный возраст?\n\n"
+                "Введи реальный возраст или нажми «Пропустить / убрать возраст»."
+            ),
+            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+        )
+        return
+
+    await update_user_age(message.from_user.id, age)
+    await state.clear()
+    await message.delete()
+
+    user = await get_user_by_tg_id(message.from_user.id)
+    text, markup = await build_profile_view(user)
+    await message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+    )
+
+
+@router.callback_query(F.data == "profile:edit_bio")
+async def profile_edit_bio(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileEditStates.waiting_new_bio)
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+    await callback.message.edit_text(
+        "📝 Напиши пж новое описание одним сообщением.",
+        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+@router.message(ProfileEditStates.waiting_new_bio, F.text)
+async def profile_set_bio(message: Message, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id")
+    edit_chat_id = data.get("edit_chat_id")
+
+    bio = message.text.strip()
+
+    # Пустое описание
+    if not bio:
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=edit_chat_id,
+                message_id=edit_msg_id,
+                text=(
+                    "Описание не может быть пустым.\n\n"
+                    "Напиши пару слов о себе: что любишь снимать и какой у тебя стиль."
+                ),
+                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    # Запрет ссылок, доменов, @username и рекламы каналов
+    if has_links_or_usernames(bio) or has_promo_channel_invite(bio):
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=edit_chat_id,
+                message_id=edit_msg_id,
+                text=(
+                    "В описании профиля нельзя оставлять @username, ссылки на Telegram, соцсети или сайты, "
+                    "а также рекламировать каналы.\n\n"
+                    "Напиши пару слов о себе как о фотографе <b>без контактов</b>."
+                ),
+                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    await update_user_bio(message.from_user.id, bio)
+    await state.clear()
+    await message.delete()
+
+    user = await get_user_by_tg_id(message.from_user.id)
+    text, markup = await build_profile_view(user)
+    await message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+    )
+
+
+@router.callback_query(F.data == "profile:awards")
+async def profile_awards_menu(callback: CallbackQuery):
+    """
+    Раздел наград (пока заглушка).
+    """
+    text = (
+        "🏆 <b>Награды</b>\n\n"
+        "Здесь будет отображаться список всех выданных тебе наград, достижений и ачивок.\n"
+        "Скоро здесь появятся первые трофеи за активность и участие в жизни GlowShot."
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:settings")
+async def profile_settings_menu(callback: CallbackQuery):
+    """
+    Раздел настроек (пока заглушка для уведомлений).
+    """
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        "Скоро здесь появятся удобные переключатели:\n"
+        "• вкл/выкл уведомления о лайках ❤️\n"
+        "• вкл/выкл уведомления о комментариях 💬\n"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:premium_benefits")
+async def profile_premium_benefits(callback: CallbackQuery):
+    """
+    Список преимуществ премиум-аккаунта (пока статический текст).
+    """
+    text = (
+        "✨ <b>Преимущества GlowShot Premium</b>\n\n"
+        "Планируемые фичи для премиум-подписки:\n"
+        "• Прикрепить свой TG-канал (ТГК) в профиль\n"
+        "• Расширенные лимиты на загрузку фото\n"
+        "• Приоритет в показе фотографий в ленте\n"
+        "• Бейдж 'Premium' в профиле\n"
+        "• Дополнительная аналитика по лайкам и просмотрам\n\n"
+        "Список будет дополняться."
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=build_back_kb(callback_data="profile:premium", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+
+
+@router.callback_query(F.data == "profile:delete")
+async def profile_delete_confirm(callback: CallbackQuery):
+    kb = build_confirm_kb(
+        yes_callback="profile:delete_confirm",
+        no_callback="menu:profile",
+        yes_text="❌ Да, удалить аккаунт",
+        no_text="⬅️ Отмена",
+    )
+
+    await callback.message.edit_text(
+        "⚠️ Точно удалить аккаунт?\n\n"
+        "Твой профиль будет деактивирован, участие в рейтинках остановится. "
+        "Фотографии и оценки могут остаться в общей статистике, но новый контент от тебя "
+        "появляться не будет.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:delete_confirm")
+async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
+    await soft_delete_user(callback.from_user.id)
+    await state.clear()
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Зарегистрироваться заново", callback_data="auth:start")
+    kb.adjust(1)
+
+    await callback.message.edit_text(
+        "✅ Аккаунт деактивирован.\n\nЕсли захочешь вернуться, "
+        "нажми «Зарегистрироваться заново».",
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer("Аккаунт удалён.")

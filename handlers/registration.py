@@ -1,0 +1,412 @@
+from aiogram import Router, F
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
+
+from database import create_user, get_user_by_tg_id
+from keyboards.common import build_main_menu
+
+from utils.validation import has_links_or_usernames, has_promo_channel_invite
+
+router = Router()
+
+
+class RegistrationStates(StatesGroup):
+    waiting_name = State()
+    waiting_gender = State()
+    waiting_age = State()
+    waiting_bio = State()
+
+
+async def _get_reg_context(state: FSMContext) -> tuple[int | None, int | None]:
+    data = await state.get_data()
+    return data.get("reg_chat_id"), data.get("reg_msg_id")
+
+
+
+
+@router.callback_query(F.data == "auth:start")
+async def registration_start(callback: CallbackQuery, state: FSMContext):
+
+    existing = await get_user_by_tg_id(callback.from_user.id)
+    if existing is not None:
+        await callback.answer("Ты уже зарегистрирован.", show_alert=True)
+        await callback.message.edit_text(
+            "Ты уже в системе. Вот главное меню:",
+            reply_markup=build_main_menu(),
+        )
+        return
+
+    await state.update_data(
+        reg_msg_id=callback.message.message_id,
+        reg_chat_id=callback.message.chat.id,
+    )
+
+    await state.set_state(RegistrationStates.waiting_name)
+    await callback.message.edit_text(
+        "Напиши имя или свой псевдоним.",
+    )
+    await callback.answer()
+
+
+@router.message(RegistrationStates.waiting_name, F.text)
+async def registration_name(message: Message, state: FSMContext):
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await message.answer(
+            "Сессия регистрации сбилась.\n\n"
+            "Отправь /start и нажми «Зарегистрироваться», чтобы начать заново.",
+        )
+        return
+
+    name = (message.text or "").strip()
+
+    if has_links_or_usernames(name) or has_promo_channel_invite(name):
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=reg_chat_id,
+                message_id=reg_msg_id,
+                text=(
+                    "В имени нельзя оставлять @username, ссылки на Telegram, соцсети или сайты.\n\n"
+                    "Напиши имя или свой псевдоним <b>без контактов</b>."
+                ),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    if not name:
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=reg_chat_id,
+                message_id=reg_msg_id,
+                text=(
+                    "Имя не может быть пустым.\n\n"
+                    "Напиши имя или свой псевдоним!"
+                ),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    await state.update_data(name=name)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Парень 🚹", callback_data="gender:male")
+    kb.button(text="Девушка 🚺", callback_data="gender:female")
+    kb.button(text="Другое ⚧️", callback_data="gender:other")
+    kb.button(text="Не важно", callback_data="gender:na")
+    kb.adjust(2, 2)
+
+    await state.set_state(RegistrationStates.waiting_gender)
+    await message.delete()
+    await message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Выбери, как тебя указать в профиле.\n\n"
+            "Это нужно только для статистики.\n"
+            "Если не хочешь уточнять — жми «Не важно»."
+        ),
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(RegistrationStates.waiting_gender, F.data.startswith("gender:"))
+async def registration_gender(callback: CallbackQuery, state: FSMContext):
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await callback.answer(
+            "Сессия регистрации сбилась. Нажми /start и попробуй ещё раз.",
+            show_alert=True,
+        )
+        return
+
+    gender_code = callback.data.split(":", 1)[1]
+    mapping = {
+        "male": "Парень",
+        "female": "Девушка",
+        "other": "Другое",
+        "na": "Не важно",
+    }
+    gender = mapping.get(gender_code, "Не важно")
+    await state.update_data(gender=gender)
+
+    await state.set_state(RegistrationStates.waiting_age)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пропустить", callback_data="age:skip")
+    kb.adjust(1)
+
+    await callback.message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Сколько тебе лет?\n\n"
+            "Напиши число (только цифры) или нажми «Пропустить».\n"
+            "Это тоже нужно только для статистики."
+        ),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(RegistrationStates.waiting_age, F.data == "age:skip")
+async def registration_age_skip(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(age=None)
+    await state.set_state(RegistrationStates.waiting_bio)
+
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await callback.answer(
+            "Сессия регистрации сбилась. Нажми /start и попробуй ещё раз.",
+            show_alert=True,
+        )
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пропустить", callback_data="bio:skip")
+    kb.adjust(1)
+
+    await callback.message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Теперь можешь добавить описание.\n"
+            "Напиши это <b>одним</b> сообщением или нажми «Пропустить»."
+        ),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.message(RegistrationStates.waiting_age, F.text)
+async def registration_age_value(message: Message, state: FSMContext):
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await message.answer(
+            "Сессия регистрации сбилась.\n\n"
+            "Отправь /start и нажми «Зарегистрироваться», чтобы начать заново.",
+        )
+        return
+
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=reg_chat_id,
+                message_id=reg_msg_id,
+                text=(
+                    "Возраст должен быть числом.\n\n"
+                    "Напиши только цифры, например: <code>18</code>.\n"
+                    "Или нажми кнопку «Пропустить»."
+                ),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    age = int(text)
+    if age < 6  or age > 90:
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=reg_chat_id,
+                message_id=reg_msg_id,
+                text=(
+                    "Ты уверен(а), что это твой реальный возраст?\n"
+                    "Напиши реальный возраст или нажми «Пропустить»."
+                ),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    await state.update_data(age=age)
+    await state.set_state(RegistrationStates.waiting_bio)
+    await message.delete()
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пропустить", callback_data="bio:skip")
+    kb.adjust(1)
+
+    await message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Теперь можешь добавить описание для профиля.\n"
+            "Напиши это одним сообщением или нажми «Пропустить»."
+        ),
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(RegistrationStates.waiting_bio, F.text)
+async def registration_bio(message: Message, state: FSMContext):
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await message.answer(
+            "Сессия регистрации сбилась.\n\n"
+            "Отправь /start и нажми «Зарегистрироваться», чтобы начать заново.",
+            disable_notification=True,
+        )
+        return
+
+    bio = (message.text or "").strip()
+
+    if has_links_or_usernames(bio) or has_promo_channel_invite(bio):
+        await message.delete()
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Пропустить", callback_data="bio:skip")
+        kb.adjust(1)
+
+        try:
+            await message.bot.edit_message_text(
+                chat_id=reg_chat_id,
+                message_id=reg_msg_id,
+                text=(
+                    "Добавь описание для профиля одним сообщением\n"
+                    "или нажми «Пропустить»."
+                ),
+                reply_markup=kb.as_markup(),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Пропустить", callback_data="bio:skip")
+    kb.adjust(1)
+
+    if not bio:
+        await message.delete()
+        try:
+            await message.bot.edit_message_text(
+                chat_id=reg_chat_id,
+                message_id=reg_msg_id,
+                text=(
+                    "Описание пустое. Напиши хотя бы пару слов про себя\n"
+                    "или нажми «Пропустить»."
+                ),
+                reply_markup=kb.as_markup(),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+        return
+
+    data = await state.get_data()
+    name = data.get("name")
+    gender = data.get("gender")
+    age = data.get("age")
+
+    await state.clear()
+
+    tg_user = message.from_user
+
+    await create_user(
+        tg_id=tg_user.id,
+        username=tg_user.username,
+        name=name,
+        gender=gender,
+        age=age,
+        bio=bio,
+    )
+
+    await message.delete()
+    await message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Регистрация завершена 🎉\n\n"
+            "Теперь ты можешь пользоваться GlowShot.\n"
+            "Все данные — имя, пол, возраст и описание — можно менять позже в разделе «Профиль».\n\n"
+            "Вот главное меню:"
+        ),
+        reply_markup=build_main_menu(),
+    )
+
+
+@router.callback_query(RegistrationStates.waiting_bio, F.data == "bio:skip")
+async def registration_bio_skip(callback: CallbackQuery, state: FSMContext):
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await callback.answer(
+            "Сессия регистрации сбилась. Нажми /start и попробуй ещё раз.",
+            show_alert=True,
+        )
+        return
+
+    data = await state.get_data()
+    name = data.get("name")
+    gender = data.get("gender")
+    age = data.get("age")
+
+    await state.clear()
+
+    tg_user = callback.from_user
+
+    await create_user(
+        tg_id=tg_user.id,
+        username=tg_user.username,
+        name=name,
+        gender=gender,
+        age=age,
+        bio=None,
+    )
+
+    await callback.message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Регистрация завершена 🎉\n\n"
+            "Описание ты решил(а) пропустить — ничего страшного, его можно заполнить позже в разделе «Профиль».\n\n"
+            "Вот главное меню:"
+        ),
+        reply_markup=build_main_menu(),
+    )
+    await callback.answer()
+
+
+# --- Удаляем не-текстовые сообщения во время регистрации ---
+
+
+@router.message(RegistrationStates.waiting_name, ~F.text)
+async def registration_name_non_text(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.message(RegistrationStates.waiting_age, ~F.text)
+async def registration_age_non_text(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.message(RegistrationStates.waiting_bio, ~F.text)
+async def registration_bio_non_text(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except Exception:
+        pass
