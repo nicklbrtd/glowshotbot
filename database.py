@@ -106,8 +106,11 @@ async def init_db():
                 title TEXT NOT NULL,
                 description TEXT,
                 icon TEXT,
+                is_special INTEGER NOT NULL DEFAULT 0,
+                granted_by_user_id INTEGER,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (granted_by_user_id) REFERENCES users(id) ON DELETE SET NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_awards_user
@@ -246,6 +249,19 @@ async def init_db():
         try:
             await db.execute(
                 "ALTER TABLE users ADD COLUMN blocked_reason TEXT"
+            )
+        except aiosqlite.OperationalError:
+            pass
+
+        try:
+            await db.execute(
+                "ALTER TABLE awards ADD COLUMN is_special INTEGER NOT NULL DEFAULT 0"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE awards ADD COLUMN granted_by_user_id INTEGER"
             )
         except aiosqlite.OperationalError:
             pass
@@ -1726,20 +1742,45 @@ async def give_award(
     title: str,
     description: str | None = None,
     icon: str | None = None,
+    is_special: bool = False,
+    granted_by_user_id: int | None = None,
 ) -> int:
     """
     Выдать награду пользователю.
+
     code — внутренний код награды (можно использовать для проверки дублей),
     title — заголовок, icon — эмодзи или короткий маркер.
+    is_special — «особая»/статусная награда (например, админская или бета-тестер),
+    granted_by_user_id — внутренний ID пользователя, который выдал награду (users.id).
+
+    TODO: часть наград могут выдавать не только админы, но и премиум-аккаунты.
     """
     now = get_moscow_now_iso()
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             """
-            INSERT INTO awards (user_id, code, title, description, icon, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO awards (
+                user_id,
+                code,
+                title,
+                description,
+                icon,
+                is_special,
+                granted_by_user_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, code, title, description, icon, now),
+            (
+                user_id,
+                code,
+                title,
+                description,
+                icon,
+                1 if is_special else 0,
+                granted_by_user_id,
+                now,
+            ),
         )
         await db.commit()
         return cursor.lastrowid
@@ -1748,6 +1789,10 @@ async def give_award(
 async def get_awards_for_user(user_id: int) -> list[dict]:
     """
     Получить список всех наград пользователя.
+
+    Сортировка:
+    - сначала «особые» (is_special = 1),
+    - затем по дате выдачи (created_at DESC, id DESC).
     """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1756,7 +1801,7 @@ async def get_awards_for_user(user_id: int) -> list[dict]:
             SELECT *
             FROM awards
             WHERE user_id = ?
-            ORDER BY created_at DESC, id DESC
+            ORDER BY is_special DESC, created_at DESC, id DESC
             """,
             (user_id,),
         )
@@ -1764,3 +1809,24 @@ async def get_awards_for_user(user_id: int) -> list[dict]:
         await cursor.close()
 
     return [dict(r) for r in rows]
+
+
+# Подсчитать количество «особых» наград пользователя.
+async def count_special_awards_for_user(user_id: int) -> int:
+    """
+    Подсчитать количество «особых» (is_special = 1) наград пользователя.
+    Это можно использовать, чтобы в интерфейсе показать, например: «🏆 100 ачивок».
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM awards
+            WHERE user_id = ? AND is_special = 1
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    return int(row[0]) if row and row[0] is not None else 0

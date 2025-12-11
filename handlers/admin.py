@@ -24,7 +24,15 @@ from database import (
     get_premium_users,
     set_user_premium_role_by_tg_id,
     set_user_premium_status,
+    give_achievement_to_user_by_code,
 )
+# ====== AchievementStates: FSM для работы с ачивками ======
+class AchievementStates(StatesGroup):
+    """
+    Состояния для работы с ачивками / наградами в админке.
+    Пока есть только выдача статуса «Бета-тестер бота».
+    """
+    waiting_user_for_beta = State()
 
 from keyboards.common import build_admin_menu, build_back_kb
 from utils.time import get_moscow_now
@@ -1128,3 +1136,177 @@ async def total_users(message: Message):
     await message.answer(f"Всего пользователей в боте: <b>{total}</b>")
 
 # ================= КОНЕЦ ДРУГИХ КОМАНД ==============
+@router.callback_query(F.data == "admin:achievements")
+async def admin_achievements_menu(callback: CallbackQuery, state: FSMContext):
+    """
+    Раздел «Награды / ачивки».
+
+    Здесь админы могут выдавать особые статусы пользователям, например:
+    • 🏆 «Бета-тестер бота»
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    text = (
+        "<b>Награды / ачивки</b>\n\n"
+        "Пока доступна одна особая ачивка:\n"
+        "🏆 <b>Бета-тестер бота</b>\n"
+        "Описание: ты помог(ла) тестировать GlowShot до релиза.\n\n"
+        "Выбери действие:"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text="🏆 Выдать «Бета-тестер бота»",
+        callback_data="admin:ach:beta:start",
+    )
+    kb.button(
+        text="⬅️ В админ-меню",
+        callback_data="admin:menu",
+    )
+    kb.adjust(1)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        await callback.message.answer(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:ach:beta:start")
+async def admin_achievements_beta_start(callback: CallbackQuery, state: FSMContext):
+    """
+    Старт выдачи ачивки «Бета-тестер бота».
+
+    TODO: ачивки могут и премиум-аккаунты выдавать, не только админ.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await state.set_state(AchievementStates.waiting_user_for_beta)
+    await state.update_data(
+        ach_prompt_chat_id=callback.message.chat.id,
+        ach_prompt_msg_id=callback.message.message_id,
+    )
+
+    text = (
+        "🏆 Выдача награды «Бета-тестер бота».\n\n"
+        "Отправь ID или @username пользователя, которому нужно выдать эту ачивку.\n\n"
+        "Пример: <code>123456789</code> или <code>@username</code>."
+    )
+
+    try:
+        await callback.message.edit_text(text)
+    except Exception:
+        await callback.message.answer(text)
+
+    await callback.answer()
+
+
+@router.message(AchievementStates.waiting_user_for_beta, F.text)
+async def admin_achievements_beta_grant(message: Message, state: FSMContext):
+    """
+    Выдача ачивки «Бета-тестер бота» по введённому ID или @username.
+    """
+    data = await state.get_data()
+    chat_id = data.get("ach_prompt_chat_id")
+    msg_id = data.get("ach_prompt_msg_id")
+
+    identifier = (message.text or "").strip()
+    # Стараемся не плодить новых сообщений — удаляем ввод админа
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    target_user = await _find_user_by_identifier(identifier)
+    if not target_user:
+        text = (
+            "Пользователь не найден.\n\n"
+            "Убедись, что он уже запускал бота, и попробуй ещё раз.\n"
+            "Можно ввести числовой ID или @username."
+        )
+        if chat_id and msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                )
+                return
+            except Exception:
+                pass
+
+        await message.answer(text)
+        await state.clear()
+        return
+
+    target_tg_id = target_user.get("tg_id")
+    target_name = target_user.get("name") or "Без имени"
+    target_username = target_user.get("username")
+
+    # Пытаемся выдать ачивку через базу
+    granted = await give_achievement_to_user_by_code(
+        user_tg_id=target_tg_id,
+        code="beta_tester",
+        granted_by_tg_id=message.from_user.id,
+    )
+
+    if granted:
+        status_line = "Ачивка выдана ✅"
+    else:
+        status_line = "У этого пользователя уже есть эта ачивка."
+
+    extra = f" (@{target_username})" if target_username else ""
+    result_text = (
+        f"🏆 Награда «Бета-тестер бота»\n\n"
+        f"{status_line}\n\n"
+        f"Пользователь: {target_name} — ID <code>{target_tg_id}</code>{extra}"
+    )
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=result_text,
+            )
+        except Exception:
+            await message.answer(result_text)
+    else:
+        await message.answer(result_text)
+
+    await state.clear()
+
+    # Уведомление самому пользователю о новой ачивке
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    notif_kb = InlineKeyboardBuilder()
+    notif_kb.button(text="✅ Просмотрено", callback_data="user:notify_seen")
+    notif_kb.adjust(1)
+
+    notif_text = (
+        "🏆 <b>Новая награда!</b>\n\n"
+        "Ты получил(а) ачивку: <b>Бета-тестер бота</b>.\n\n"
+        "Описание: ты помог(ла) тестировать GlowShot на ранних стадиях до релиза.\n\n"
+        "Спасибо, что был(а) с нами с самого начала 💙"
+    )
+
+    try:
+        await message.bot.send_message(
+            chat_id=target_tg_id,
+            text=notif_text,
+            reply_markup=notif_kb.as_markup(),
+        )
+    except Exception:
+        # Не кричим, если не получилось отправить (например, пользователь закрыл ЛС)
+        pass
