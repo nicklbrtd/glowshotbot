@@ -534,7 +534,7 @@ async def get_user_rating_summary(user_id: int) -> dict:
                     ) = 0
                     THEN NULL
                     ELSE
-                        SUM(
+                        1.0 * SUM(
                             CASE
                                 WHEN r.value IS NOT NULL AND r.value != 0
                                     THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
@@ -596,7 +596,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     ) = 0
                     THEN NULL
                     ELSE
-                        SUM(
+                        1.0 * SUM(
                             CASE
                                 WHEN r.value IS NOT NULL AND r.value != 0
                                     THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
@@ -664,7 +664,7 @@ async def get_weekly_rank_for_user(user_id: int) -> int | None:
                     ) = 0
                     THEN NULL
                     ELSE
-                        SUM(
+                        1.0 * SUM(
                             CASE
                                 WHEN r.value IS NOT NULL AND r.value != 0
                                     THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
@@ -1127,7 +1127,7 @@ async def get_photo_stats(photo_id: int) -> dict:
                     ) = 0
                     THEN NULL
                     ELSE
-                        SUM(
+                        1.0 * SUM(
                             CASE
                                 WHEN r.value > 0
                                     THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
@@ -1354,7 +1354,7 @@ async def get_daily_best_photo(day_key: str) -> dict | None:
                     ) = 0
                     THEN NULL
                     ELSE
-                        SUM(
+                        1.0 * SUM(
                             CASE
                                 WHEN r.value > 0
                                     THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
