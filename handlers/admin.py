@@ -24,7 +24,7 @@ from database import (
     get_premium_users,
     set_user_premium_role_by_tg_id,
     set_user_premium_status,
-    ive_achievement_to_user_by_code,
+    give_achievement_to_user_by_code,
     get_awards_for_user,
     get_award_by_id,
     delete_award_by_id,
