@@ -7,6 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def build_main_menu(
     is_admin: bool = False,
     is_moderator: bool = False,
+    is_premium: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
@@ -21,6 +22,9 @@ def build_main_menu(
 
     if is_admin:
         kb.button(text="⚙️ Админ-панель", callback_data="admin:menu")
+
+    if is_premium:
+        kb.button(text="✨ Премиум-панель", callback_data="profile:premium")
 
     kb.adjust(2, 2, 2)
     return kb.as_markup()
