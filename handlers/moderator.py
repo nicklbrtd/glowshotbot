@@ -20,6 +20,7 @@ from database import (
     get_photo_report_stats,
     add_moderator_review,
     get_next_photo_for_self_moderation,
+    get_next_photo_for_detailed_moderation,
 )
 
 # Роутер раздела модерации
@@ -30,6 +31,10 @@ class ModeratorStates(StatesGroup):
     """Состояния FSM для модератора."""
     # Ввод причины удаления/бана
     waiting_ban_reason = State()
+    # Поиск пользователя
+    waiting_user_search_query = State()
+    # Поиск пользователя для бана / разбана
+    waiting_user_block_query = State()
 
 
 def build_moderator_menu() -> InlineKeyboardMarkup:
@@ -38,13 +43,35 @@ def build_moderator_menu() -> InlineKeyboardMarkup:
 
     Здесь:
     - очередь жалоб (фото со статусом under_review),
+    - детальная проверка (фото со статусом under_detailed_review),
     - самостоятельная проверка (любой активный контент),
+    - раздел пользователей,
     - выход обратно в главное меню.
     """
     kb = InlineKeyboardBuilder()
     kb.button(text="🔍 Модерация жалоб", callback_data="mod:queue")
+    kb.button(text="🧪 Детальная проверка", callback_data="mod:deep")
     kb.button(text="🧾 Проверять самостоятельно", callback_data="mod:self")
+    kb.button(text="👥 Пользователи", callback_data="mod:users")
     kb.button(text="⬅️ В меню", callback_data="menu:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_moderator_users_menu() -> InlineKeyboardMarkup:
+    """
+    Подменю работы с пользователями.
+
+    Здесь:
+    - поиск пользователя;
+    - блок / разбан по ID или username (интерфейс);
+    - список заблокированных (интерфейсная заглушка, пока не реализована в БД).
+    """
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔍 Найти пользователя", callback_data="mod:users_search")
+    kb.button(text="🚫 Блок / разбан", callback_data="mod:users_block")
+    kb.button(text="🧾 Список заблокированных", callback_data="mod:users_blocked")
+    kb.button(text="⬅️ Назад", callback_data="mod:menu")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -63,13 +90,35 @@ def build_moderation_photo_keyboard(photo_id: int, source: str) -> InlineKeyboar
         callback_data=f"mod:photo_ok:{source}:{photo_id}",
     )
     kb.button(
-        text="⛔ Забанить",
-        callback_data=f"mod:photo_block:{source}:{photo_id}",
-    )
-    kb.button(
         text="⏭ Пропустить",
         callback_data=f"mod:photo_skip:{source}:{photo_id}",
     )
+    if source == "queue":
+        kb.button(
+            text="🔍 На детальную проверку",
+            callback_data=f"mod:photo_deep:{photo_id}",
+        )
+        kb.button(
+            text="🗑 Удалить фотографию",
+            callback_data=f"mod:photo_delete:{source}:{photo_id}",
+        )
+        kb.button(
+            text="⛔ Удалить + бан",
+            callback_data=f"mod:photo_delete_ban:{source}:{photo_id}",
+        )
+    else:
+        kb.button(
+            text="👤 Профиль автора",
+            callback_data=f"mod:photo_profile:{photo_id}",
+        )
+        kb.button(
+            text="🗑 Удалить фотографию",
+            callback_data=f"mod:photo_delete:{source}:{photo_id}",
+        )
+        kb.button(
+            text="⛔ Удалить + бан",
+            callback_data=f"mod:photo_delete_ban:{source}:{photo_id}",
+        )
     kb.button(
         text="⬅️ Меню модерации",
         callback_data="mod:menu",
@@ -267,11 +316,56 @@ async def show_next_photo_for_self_check(callback: CallbackQuery) -> None:
                 reply_markup=build_moderator_menu(),
             )
         return
+    
+
+async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
+    """
+    Отправляет модератору следующую фотографию, которая ожидает детальной проверки.
+
+    Берутся фото со статусом 'under_detailed_review' (логика в get_next_photo_for_detailed_moderation).
+    """
+    photo = await get_next_photo_for_detailed_moderation()
+
+    if not photo:
+        try:
+            await callback.message.edit_text(
+                "Сейчас нет фотографий на детальной проверке.",
+                reply_markup=build_moderator_menu(),
+            )
+        except TelegramBadRequest:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text="Сейчас нет фотографий на детальной проверке.",
+                reply_markup=build_moderator_menu(),
+            )
+        return
 
     chat_id = callback.message.chat.id
     caption = await _build_moderation_caption(
         photo,
-        show_reports=False,
+        show_reports=True,
+        show_stats=True,
+    )
+
+    try:
+        await callback.message.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo["file_id"],
+            caption=caption,
+            reply_markup=build_moderation_photo_keyboard(photo["id"], source="deep"),
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=chat_id,
+            text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
+            reply_markup=build_moderation_photo_keyboard(photo["id"], source="deep"),
+        )
+
+
+    chat_id = callback.message.chat.id
+    caption = await _build_moderation_caption(
+        photo,
+        show_reports=True,
         show_stats=True,
     )
 
@@ -438,6 +532,109 @@ async def moderator_self_check(callback: CallbackQuery) -> None:
         pass
 
 
+@router.callback_query(F.data == "mod:deep")
+async def moderator_deep_check(callback: CallbackQuery) -> None:
+    """
+    Режим детальной проверки фотографий.
+
+    Показывает только те работы, которые модераторы явно отправили
+    в статус 'under_detailed_review'.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    await show_next_photo_for_deep_check(callback)
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "mod:users")
+async def moderator_users_menu(callback: CallbackQuery) -> None:
+    """
+    Вход в раздел работы с пользователями.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        await callback.message.edit_text(
+            "Раздел пользователей.\n\nВыбери нужное действие:",
+            reply_markup=build_moderator_users_menu(),
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text="Раздел пользователей.\n\nВыбери нужное действие:",
+            reply_markup=build_moderator_users_menu(),
+        )
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "mod:users_search")
+async def moderator_users_search_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Запуск поиска пользователя: просим модератора ввести ID или username.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    # Сохраняем, к какому сообщению привязано подменю
+    await state.update_data(
+        user_menu_msg_id=callback.message.message_id,
+        user_menu_chat_id=callback.message.chat.id,
+    )
+    await state.set_state(ModeratorStates.waiting_user_search_query)
+
+    text = (
+        "🔍 Поиск пользователя.\n\n"
+        "Отправь одним сообщением:\n"
+        "• @username, или\n"
+        "• ID Telegram, или\n"
+        "• внутренний ID пользователя из базы (если знаешь)."
+    )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+        )
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
 @router.callback_query(F.data.startswith("mod:photo_ok:"))
 async def moderator_photo_ok(callback: CallbackQuery) -> None:
     """
@@ -496,10 +693,18 @@ async def moderator_photo_ok(callback: CallbackQuery) -> None:
 
     if moderator is not None:
         try:
+            if source == "queue":
+                review_source = "report"
+            elif source == "self":
+                review_source = "self"
+            elif source == "deep":
+                review_source = "deep"
+            else:
+                review_source = source
             await add_moderator_review(
                 moderator_id=moderator["id"],
                 photo_id=photo_id,
-                source="report" if source == "queue" else "self",
+                source=review_source,
             )
         except Exception:
             # Не валим обработчик, если статистику не удалось записать
@@ -519,6 +724,369 @@ async def moderator_photo_ok(callback: CallbackQuery) -> None:
 
     try:
         await callback.answer("Фотография возвращена в ленту.", show_alert=False)
+    except TelegramBadRequest:
+        pass
+
+
+# Новый обработчик: отправить фото на детальную проверку
+@router.callback_query(F.data.startswith("mod:photo_deep:"))
+async def moderator_photo_deep(callback: CallbackQuery) -> None:
+    """
+    Отправить фотографию на детальную проверку по жалобам.
+
+    Логика:
+    - проверяем, что нажал модератор;
+    - меняем статус фотографии на 'under_detailed_review';
+    - логируем действие модератора;
+    - уведомляем автора о детальной проверке;
+    - показываем следующую фотографию из очереди жалоб.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    # Ожидаемый формат: mod:photo_deep:<photo_id>
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные для модерации.", show_alert=True)
+        return
+
+    photo_id_str = parts[2]
+    try:
+        photo_id = int(photo_id_str)
+    except (TypeError, ValueError):
+        await callback.answer("Некорректный ID фотографии.", show_alert=True)
+        return
+
+    # Обновляем статус фотографии
+    try:
+        await set_photo_moderation_status(photo_id, "under_detailed_review")
+    except Exception:
+        await callback.answer("Не удалось обновить статус фотографии.", show_alert=True)
+        return
+
+    # Фиксируем действие модератора
+    try:
+        moderator = await get_user_by_tg_id(tg_id)
+    except Exception:
+        moderator = None
+
+    if moderator is not None:
+        try:
+            await add_moderator_review(
+                moderator_id=moderator["id"],
+                photo_id=photo_id,
+                source="report",
+            )
+        except Exception:
+            # Не валим обработчик, если статистику не удалось записать
+            pass
+
+    # Уведомляем автора фотографии
+    try:
+        photo = await get_photo_by_id(photo_id)
+    except Exception:
+        photo = None
+
+    if photo is not None:
+        author_user_id = photo.get("user_id")
+        if author_user_id:
+            try:
+                author = await get_user_by_id(author_user_id)
+            except Exception:
+                author = None
+
+            if author is not None:
+                author_tg_id = author.get("tg_id")
+                if author_tg_id:
+                    notify_text = (
+                        "ℹ️ Ваша фотография отправлена на детальную проверку модератором.\n\n"
+                        "На время проверки она может быть временно скрыта из оценивания."
+                    )
+                    kb = InlineKeyboardBuilder()
+                    kb.button(
+                        text="✅ Просмотрено",
+                        callback_data="user:notify_seen",
+                    )
+                    kb.adjust(1)
+                    try:
+                        await callback.message.bot.send_message(
+                            chat_id=author_tg_id,
+                            text=notify_text,
+                            reply_markup=kb.as_markup(),
+                        )
+                    except Exception:
+                        pass
+
+    # Удаляем текущую карточку
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    # Показываем следующую фотографию из очереди жалоб
+    await show_next_photo_for_moderation(callback)
+
+    try:
+        await callback.answer("Фотография отправлена на детальную проверку.", show_alert=False)
+    except TelegramBadRequest:
+        pass
+
+
+# Новый обработчик: показать профиль автора фото в режиме самостоятельной проверки
+@router.callback_query(F.data.startswith("mod:photo_profile:"))
+async def moderator_photo_profile(callback: CallbackQuery) -> None:
+    """
+    Показать профиль автора фотографии в режиме самостоятельной проверки.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    # Ожидаемый формат: mod:photo_profile:<photo_id>
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные для модерации.", show_alert=True)
+        return
+
+    photo_id_str = parts[2]
+    try:
+        photo_id = int(photo_id_str)
+    except (TypeError, ValueError):
+        await callback.answer("Некорректный ID фотографии.", show_alert=True)
+        return
+
+    try:
+        photo = await get_photo_by_id(photo_id)
+    except Exception:
+        photo = None
+
+    if not photo:
+        await callback.answer("Не удалось найти фотографию.", show_alert=True)
+        return
+
+    author_user_id = photo.get("user_id")
+    if not author_user_id:
+        await callback.answer("Автор фотографии не найден.", show_alert=True)
+        return
+
+    try:
+        author = await get_user_by_id(author_user_id)
+    except Exception:
+        author = None
+
+    if not author:
+        await callback.answer("Автор фотографии не найден.", show_alert=True)
+        return
+
+    # Формируем краткий профиль автора
+    lines: list[str] = []
+    lines.append("👤 <b>Профиль автора</b>")
+    name = author.get("name") or author.get("display_name")
+    username = author.get("username")
+    if name:
+        lines.append(f"Имя: <b>{name}</b>")
+    if username:
+        lines.append(f"Username: @{username}")
+    age = author.get("age")
+    if age:
+        lines.append(f"Возраст: {age}")
+    gender = author.get("gender")
+    if gender:
+        lines.append(f"Пол: {gender}")
+    channel = author.get("channel_username") or author.get("channel_link")
+    if channel:
+        lines.append(f"Канал: {channel}")
+    bio = author.get("bio")
+    if bio:
+        lines.append("")
+        lines.append("Описание:")
+        lines.append(bio)
+
+    text = "\n".join(lines)
+
+    try:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+        )
+    except Exception:
+        pass
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+# Новый обработчик: удалить фото без бана
+@router.callback_query(F.data.startswith("mod:photo_delete:"))
+async def moderator_photo_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Удаление фотографии без бана автора.
+
+    Логика:
+    - проверяем, что нажал модератор;
+    - сохраняем ID фото и источник (queue/self) в состоянии;
+    - ставим действие delete;
+    - просим модератора ввести причину удаления;
+    - переводим в состояние waiting_ban_reason.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    # Ожидаемый формат:
+    #   mod:photo_delete:<source>:<photo_id>
+    #   или mod:photo_delete:<photo_id> (на всякий случай)
+    source = "queue"
+    photo_id_str: str | None = None
+
+    if len(parts) == 4:
+        source = parts[2]
+        photo_id_str = parts[3]
+    elif len(parts) == 3:
+        photo_id_str = parts[2]
+    else:
+        await callback.answer("Некорректные данные для модерации.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(photo_id_str)
+    except (TypeError, ValueError):
+        await callback.answer("Некорректный ID фотографии.", show_alert=True)
+        return
+
+    await state.update_data(
+        mod_ban_photo_id=photo_id,
+        mod_ban_source=source,
+        mod_ban_action="delete",
+        mod_ban_prompt_msg_id=callback.message.message_id,
+        mod_ban_prompt_chat_id=callback.message.chat.id,
+    )
+    await state.set_state(ModeratorStates.waiting_ban_reason)
+
+    text = (
+        "Напиши причину удаления фотографии одним сообщением.\n\n"
+        "Эта причина будет показана автору фотографии."
+    )
+
+    try:
+        await callback.message.edit_caption(
+            caption=text,
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=None,
+            )
+        except TelegramBadRequest:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+            )
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+# Новый обработчик: удалить фото + бан
+@router.callback_query(F.data.startswith("mod:photo_delete_ban:"))
+async def moderator_photo_delete_ban(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Удаление фотографии с одновременным баном автора на загрузку новых работ.
+
+    Логика:
+    - проверяем, что нажал модератор;
+    - сохраняем ID фото и источник в состоянии;
+    - ставим действие delete_and_ban;
+    - просим модератора ввести причину удаления и бана;
+    - переводим в состояние waiting_ban_reason.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    # Ожидаемый формат:
+    #   mod:photo_delete_ban:<source>:<photo_id>
+    #   или mod:photo_delete_ban:<photo_id>
+    source = "queue"
+    photo_id_str: str | None = None
+
+    if len(parts) == 4:
+        source = parts[2]
+        photo_id_str = parts[3]
+    elif len(parts) == 3:
+        photo_id_str = parts[2]
+    else:
+        await callback.answer("Некорректные данные для модерации.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(photo_id_str)
+    except (TypeError, ValueError):
+        await callback.answer("Некорректный ID фотографии.", show_alert=True)
+        return
+
+    await state.update_data(
+        mod_ban_photo_id=photo_id,
+        mod_ban_source=source,
+        mod_ban_action="delete_and_ban",
+        mod_ban_prompt_msg_id=callback.message.message_id,
+        mod_ban_prompt_chat_id=callback.message.chat.id,
+    )
+    await state.set_state(ModeratorStates.waiting_ban_reason)
+
+    text = (
+        "Напиши причину удаления <b>и бана</b> пользователя одним сообщением.\n\n"
+        "Эта причина будет показана автору фотографии."
+    )
+
+    try:
+        await callback.message.edit_caption(
+            caption=text,
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=None,
+            )
+        except TelegramBadRequest:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+            )
+
+    try:
+        await callback.answer()
     except TelegramBadRequest:
         pass
 
@@ -574,10 +1142,18 @@ async def moderator_photo_skip(callback: CallbackQuery) -> None:
 
     if moderator is not None:
         try:
+            if source == "queue":
+                review_source = "report"
+            elif source == "self":
+                review_source = "self"
+            elif source == "deep":
+                review_source = "deep"
+            else:
+                review_source = source
             await add_moderator_review(
                 moderator_id=moderator["id"],
                 photo_id=photo_id,
-                source="report" if source == "queue" else "self",
+                source=review_source,
             )
         except Exception:
             # Не валим обработчик, если статистику не удалось записать
@@ -773,6 +1349,220 @@ async def moderator_block_action(callback: CallbackQuery, state: FSMContext) -> 
         pass
 
 
+@router.message(ModeratorStates.waiting_user_search_query)
+async def moderator_users_search_input(message: Message, state: FSMContext) -> None:
+    """
+    Обработка ввода поискового запроса модератором.
+
+    Логика:
+    - удаляем сообщение с вводом модератора (чистый чат);
+    - пытаемся найти пользователя по ID Telegram или внутреннему ID;
+    - username пока не поддерживаем напрямую (нет быстрого поиска в БД);
+    - показываем краткую информацию о пользователе;
+    - возвращаемся в подменю пользователей.
+    """
+    # Удаляем текст модератора
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    menu_msg_id = data.get("user_menu_msg_id")
+    menu_chat_id = data.get("user_menu_chat_id", message.chat.id)
+
+    query = (message.text or "").strip()
+    if not query:
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text="Пустой запрос. Попробуй ещё раз через раздел «Пользователи».",
+        )
+        await state.clear()
+        return
+
+    found_user = None
+
+    # Поиск по username пока не реализован на уровне БД — заглушка
+    if query.startswith("@"):
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text=(
+                "Поиск по username пока не реализован на уровне базы данных.\n\n"
+                "Пока можно искать только по ID Telegram или внутреннему ID пользователя."
+            ),
+        )
+    else:
+        # Пробуем воспринимать как число: сначала как tg_id, потом как internal id
+        try:
+            num_id = int(query)
+        except ValueError:
+            num_id = None
+
+        if num_id is not None:
+            # Сначала пробуем как ID Telegram
+            user = await get_user_by_tg_id(num_id)
+            if user is None:
+                # Если не нашли — пробуем как внутренний ID
+                try:
+                    user = await get_user_by_id(num_id)
+                except Exception:
+                    user = None
+            found_user = user
+
+    if found_user is None:
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text="Пользователь не найден. Попробуй другой запрос.",
+        )
+    else:
+        # Формируем краткую карточку пользователя
+        lines: list[str] = []
+        lines.append("👤 <b>Найден пользователь</b>")
+        internal_id = found_user.get("id")
+        tg_id_value = found_user.get("tg_id")
+        username = found_user.get("username")
+        name = found_user.get("name") or found_user.get("display_name")
+        age = found_user.get("age")
+        gender = found_user.get("gender")
+        channel = found_user.get("channel_username") or found_user.get("channel_link")
+        is_moderator_flag = found_user.get("is_moderator")
+        is_admin_flag = found_user.get("is_admin")
+
+        if internal_id is not None:
+            lines.append(f"ID в базе: <code>{internal_id}</code>")
+        if tg_id_value is not None:
+            lines.append(f"ID Telegram: <code>{tg_id_value}</code>")
+        if username:
+            lines.append(f"Username: @{username}")
+        if name:
+            lines.append(f"Имя: <b>{name}</b>")
+        if age:
+            lines.append(f"Возраст: {age}")
+        if gender:
+            lines.append(f"Пол: {gender}")
+        if channel:
+            lines.append(f"Канал: {channel}")
+        if is_admin_flag:
+            lines.append("Роль: администратор")
+        elif is_moderator_flag:
+            lines.append("Роль: модератор")
+
+        bio = found_user.get("bio")
+        if bio:
+            lines.append("")
+            lines.append("Описание:")
+            lines.append(bio)
+
+        text = "\n".join(lines)
+
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text=text,
+        )
+
+    # Возвращаем подменю пользователей на том же сообщении, откуда стартовали
+    if menu_msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=menu_chat_id,
+                message_id=menu_msg_id,
+                text="Раздел пользователей.\n\nВыбери нужное действие:",
+                reply_markup=build_moderator_users_menu(),
+            )
+        except Exception:
+            await message.bot.send_message(
+                chat_id=menu_chat_id,
+                text="Раздел пользователей.\n\nВыбери нужное действие:",
+                reply_markup=build_moderator_users_menu(),
+            )
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "mod:users_block")
+async def moderator_users_block_stub(callback: CallbackQuery) -> None:
+    """
+    Заглушка для блока / разбана пользователей.
+
+    Реальную логику блокировок можно будет добавить отдельно в database.py,
+    а здесь только интерфейс.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    text = (
+        "Раздел «Блок / разбан» пока в разработке.\n\n"
+        "Когда добавим поддержку хранения глобальных блокировок "
+        "в базе данных, здесь можно будет:\n"
+        "• блокировать пользователя по ID или username;\n"
+        "• снимать блокировку;\n"
+        "• указывать причину ограничения."
+    )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=build_moderator_users_menu(),
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=build_moderator_users_menu(),
+        )
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data == "mod:users_blocked")
+async def moderator_users_blocked_stub(callback: CallbackQuery) -> None:
+    """
+    Заглушка для списка заблокированных пользователей.
+
+    Реальную выборку из базы можно будет добавить отдельно.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    text = (
+        "Список заблокированных пользователей пока не реализован.\n\n"
+        "Когда появится таблица/функции для хранения таких блокировок, "
+        "здесь можно будет посмотреть их в удобном виде."
+    )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=build_moderator_users_menu(),
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=build_moderator_users_menu(),
+        )
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
+
+
 @router.message(ModeratorStates.waiting_ban_reason)
 async def moderator_ban_reason_input(message: Message, state: FSMContext) -> None:
     """
@@ -869,10 +1659,17 @@ async def moderator_ban_reason_input(message: Message, state: FSMContext) -> Non
                             "и больше не участвует в оценке.\n\n"
                             f"Причина: {reason}"
                         )
+                    kb = InlineKeyboardBuilder()
+                    kb.button(
+                        text="✅ Просмотрено",
+                        callback_data="user:notify_seen",
+                    )
+                    kb.adjust(1)
                     try:
                         await message.bot.send_message(
                             chat_id=author_tg_id,
                             text=notify_text,
+                            reply_markup=kb.as_markup(),
                         )
                     except Exception:
                         pass
@@ -903,3 +1700,23 @@ async def moderator_ban_reason_input(message: Message, state: FSMContext) -> Non
     )
 
     await state.clear()
+
+
+@router.callback_query(F.data == "user:notify_seen")
+async def user_notify_seen(callback: CallbackQuery) -> None:
+    """
+    Пользователь нажал «Просмотрено» под служебным уведомлением.
+
+    Логика:
+    - удаляем сообщение с уведомлением;
+    - не создаём новых сообщений.
+    """
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass

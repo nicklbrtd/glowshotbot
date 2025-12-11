@@ -23,6 +23,8 @@ from database import (
     add_weekly_candidate,
     is_photo_in_weekly,
     get_weekly_photos_for_user,
+    get_user_block_status_by_tg_id,
+    set_user_block_status_by_tg_id,
 )
 
 
@@ -247,6 +249,7 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
     """Унифицированное получение пользователя.
 
     Если пользователя нет в базе — отправляет аккуратное уведомление и возвращает None.
+    Также здесь проверяем глобальные ограничения (блокировки) пользователя.
     """
 
     from_user = callback.from_user if isinstance(callback, CallbackQuery) else callback.from_user
@@ -258,6 +261,67 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
         else:
             await callback.answer(text)
         return None
+
+    # Проверяем глобальную блокировку пользователя (используется модерацией).
+    block = await get_user_block_status_by_tg_id(from_user.id)
+    is_blocked = bool(block.get("is_blocked"))
+    blocked_until_str = block.get("blocked_until")
+    blocked_reason = block.get("blocked_reason")
+
+    # Если есть срок блокировки, проверяем, не истёк ли он.
+    if blocked_until_str:
+        try:
+            blocked_until_dt = datetime.fromisoformat(blocked_until_str)
+        except Exception:
+            blocked_until_dt = None
+    else:
+        blocked_until_dt = None
+
+    # Если срок указан и уже прошёл — автоматически снимаем блокировку.
+    if is_blocked and blocked_until_dt is not None and blocked_until_dt <= datetime.utcnow():
+        try:
+            await set_user_block_status_by_tg_id(
+                from_user.id,
+                is_blocked=False,
+                blocked_until=None,
+                reason=None,
+            )
+        except Exception:
+            # Если не удалось обновить статус, не ломаем логику — просто считаем, что блок не активен.
+            pass
+        return user
+
+    # Если блок активен без срока или срок ещё не истёк — не даём продолжать.
+    if is_blocked and (blocked_until_dt is None or blocked_until_dt > datetime.utcnow()):
+        # Собираем текст уведомления.
+        lines: list[str] = [
+            "Твой аккаунт временно ограничен модераторами.",
+            "Сейчас ты не можешь выкладывать новые фотографии.",
+        ]
+
+        if blocked_until_dt is not None:
+            # Показываем время в человекочитаемом формате (по Москве).
+            blocked_until_msk = blocked_until_dt + timedelta(hours=3)
+            lines.append("")
+            lines.append(
+                f"Ограничение действует до {blocked_until_msk.strftime('%d.%m.%Y %H:%M')} по Москве."
+            )
+
+        if blocked_reason:
+            lines.append("")
+            lines.append(f"Причина: {blocked_reason}")
+
+        text = "\n".join(lines)
+
+        if isinstance(callback, CallbackQuery):
+            # Делаем алерт, чтобы не плодить новые сообщения в чате.
+            await callback.answer(text, show_alert=True)
+        else:
+            # Для обычного Message просто отвечаем одним сообщением.
+            await callback.answer(text)
+
+        return None
+
     return user
 
 

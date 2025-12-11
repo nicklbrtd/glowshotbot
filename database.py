@@ -36,6 +36,10 @@ async def init_db():
                 channel_username TEXT,
                 notify_likes INTEGER NOT NULL DEFAULT 1,
                 notify_comments INTEGER NOT NULL DEFAULT 1
+                ,
+                is_blocked INTEGER NOT NULL DEFAULT 0,
+                blocked_until TEXT,
+                blocked_reason TEXT
             );
 
             CREATE TABLE IF NOT EXISTS photos (
@@ -224,6 +228,24 @@ async def init_db():
         try:
             await db.execute(
                 "ALTER TABLE users ADD COLUMN daily_skip_count INTEGER NOT NULL DEFAULT 0"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN blocked_until TEXT"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN blocked_reason TEXT"
             )
         except aiosqlite.OperationalError:
             pass
@@ -1398,6 +1420,88 @@ async def get_helpers() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+# ====== GLOBAL USER BLOCK HELPERS ======
+
+async def set_user_block_status_by_tg_id(
+    tg_id: int,
+    is_blocked: bool,
+    blocked_until: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """
+    Установить или снять глобальную блокировку пользователя по его Telegram ID.
+
+    blocked_until — строка с датой/временем (например, в ISO-формате) или None,
+    reason — текстовая причина блокировки.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE users
+            SET
+                is_blocked = ?,
+                blocked_until = ?,
+                blocked_reason = ?
+            WHERE tg_id = ?
+            """,
+            (1 if is_blocked else 0, blocked_until, reason if is_blocked else None, tg_id),
+        )
+        await db.commit()
+
+
+async def get_user_block_status_by_tg_id(tg_id: int) -> dict:
+    """
+    Получить информацию о глобальной блокировке пользователя по Telegram ID.
+    Возвращает словарь с ключами:
+      - is_blocked: bool
+      - blocked_until: str | None
+      - blocked_reason: str | None
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT is_blocked, blocked_until, blocked_reason
+            FROM users
+            WHERE tg_id = ? AND is_deleted = 0
+            """,
+            (tg_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    if not row:
+        return {"is_blocked": False, "blocked_until": None, "blocked_reason": None}
+
+    return {
+        "is_blocked": bool(row["is_blocked"]),
+        "blocked_until": row["blocked_until"],
+        "blocked_reason": row["blocked_reason"],
+    }
+
+
+async def get_blocked_users() -> list[dict]:
+    """
+    Получить список всех глобально заблокированных пользователей.
+    Используется в модераторском разделе «Список заблокированных».
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE is_blocked = 1
+              AND is_deleted = 0
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]
+
+
 # ====== ЖАЛОБЫ И БАНЫ ======
 
 async def create_photo_report(
@@ -1503,6 +1607,31 @@ async def get_next_photo_for_moderation() -> dict | None:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM photos WHERE moderation_status = 'under_review' ORDER BY id LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    if not row:
+        return None
+    return dict(row)
+
+
+async def get_next_photo_for_detailed_moderation() -> dict | None:
+    """
+    Вернуть одну фотографию, которая находится в статусе 'under_detailed_review'
+    и должна быть показана модераторам в режиме детальной проверки.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM photos
+            WHERE moderation_status = 'under_detailed_review'
+              AND is_deleted = 0
+            ORDER BY id
+            LIMIT 1
+            """
         )
         row = await cursor.fetchone()
         await cursor.close()
