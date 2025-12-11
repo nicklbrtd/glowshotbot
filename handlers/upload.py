@@ -187,18 +187,10 @@ def build_my_photo_caption(photo: dict) -> str:
 
     title_line = f"\"{title}\"{device_suffix}"
 
-    # Категория работы
-    category_code = photo.get("category") or "photo"
-    if category_code == "poster":
-        category_label = "Постер"
-    else:
-        category_label = "Обычная фотография"
-
     description = photo.get("description")
 
     caption_lines: list[str] = [
         f"<b>{title_line}</b>",
-        f"Категория: <i>{category_label}</i>",
     ]
 
     if description:
@@ -424,16 +416,8 @@ async def build_my_photo_main_text(photo: dict) -> str:
 
     title_line = f"\"{title}\"{device_suffix}"
 
-    # Категория работы
-    category_code = photo.get("category") or "photo"
-    if category_code == "poster":
-        category_label = "Постер"
-    else:
-        category_label = "Обычная фотография"
-
     lines: list[str] = [
         f"<b>{title_line}</b>",
-        f"Категория: <i>{category_label}</i>",
         "",
         "<b>Статистика</b>",
     ]
