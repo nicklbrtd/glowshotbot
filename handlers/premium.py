@@ -24,6 +24,58 @@ def _format_premium_until(until: str | None) -> str | None:
     except Exception:
         # На всякий случай не падаем, а возвращаем как есть
         return until
+    
+
+@router.callback_query(F.data == "premium:menu")
+async def premium_main_menu(callback: CallbackQuery):
+    """
+    Отдельная премиум-панель из главного меню.
+    Здесь собираются все премиум-функции, а экран profile:premium
+    остаётся экраном про подписку/статус.
+    """
+    tg_id = callback.from_user.id
+
+    is_active = False
+    try:
+        is_active = await is_user_premium_active(tg_id)
+    except Exception:
+        is_active = False
+
+    kb = InlineKeyboardBuilder()
+    if is_active:
+        # У пользователя уже есть премиум
+        kb.button(text="💳 Подписка", callback_data="profile:premium")
+        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+    else:
+        # Пока нет премиума — ведём на экран подписки и даём почитать преимущества
+        kb.button(text="💳 Оформить премиум", callback_data="profile:premium")
+        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+
+    kb.button(text="🏠 В меню", callback_data="menu:back")
+    kb.adjust(1)
+
+    if is_active:
+        text = (
+            "✨ <b>Премиум-панель GlowShot</b>\n\n"
+            "У тебя уже активен премиум-аккаунт.\n\n"
+            "Здесь будут собраны все дополнительные функции и настройки премиума: "
+            "управление подпиской, дополнительные инструменты, новые фичи.\n\n"
+            "Пока доступно управление подпиской и список преимуществ.\n"
+            "Новые возможности будут появляться постепенно 👀"
+        )
+    else:
+        text = (
+            "✨ <b>Премиум-панель GlowShot</b>\n\n"
+            "У тебя пока нет активной премиум-подписки.\n\n"
+            "Через эту панель ты сможешь управлять премиум-функциями и видеть новые фичи.\n\n"
+            "Нажми «💳 Оформить премиум», чтобы перейти к экрану подписки."
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "profile:premium")
@@ -42,16 +94,20 @@ async def profile_premium_menu(callback: CallbackQuery):
         # В случае ошибок просто покажем базовый текст без статуса
         pass
 
-    kb = InlineKeyboardBuilder()
-    if is_active:
-        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
-        kb.button(text="💳 Управление подпиской", callback_data="profile:premium_buy")
-    else:
-        kb.button(text="💳 Оплатить подписку", callback_data="profile:premium_buy")
-        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+        kb = InlineKeyboardBuilder()
 
-    kb.button(text="⬅️ Назад", callback_data="menu:profile")
-    kb.adjust(1)   
+        # Отдельная премиум-панель, чтобы из профиля можно было зайти в общий премиум-центр
+        kb.button(text="✨ Премиум-панель", callback_data="premium:menu")
+
+        if is_active:
+            kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+            kb.button(text="💳 Управление подпиской", callback_data="profile:premium_buy")
+        else:
+            kb.button(text="💳 Оплатить подписку", callback_data="profile:premium_buy")
+            kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+
+        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.adjust(1)
 
     if is_active:
         if premium_until_human:
