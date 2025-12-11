@@ -21,6 +21,7 @@ from database import (
     get_user_premium_status,
     is_user_premium_active,
     get_today_photo_for_user,
+    get_awards_for_user,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -809,16 +810,63 @@ async def profile_set_bio(message: Message, state: FSMContext):
     )
 
 
+
 @router.callback_query(F.data == "profile:awards")
 async def profile_awards_menu(callback: CallbackQuery):
     """
-    Раздел наград (пока заглушка).
+    Раздел наград: показывает все награды пользователя списком
+    с датой получения и описанием (если есть).
     """
-    text = (
-        "🏆 <b>Награды</b>\n\n"
-        "Здесь будет отображаться список всех выданных тебе наград, достижений и ачивок.\n"
-        "Скоро здесь появятся первые трофеи за активность и участие в жизни GlowShot."
-    )
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
+        return
+
+    user_id = user.get("id")
+    if not user_id:
+        await callback.answer("Не получилось загрузить награды. Попробуй позже.", show_alert=True)
+        return
+
+    awards = await get_awards_for_user(user_id)
+
+    if not awards:
+        text = (
+            "🏆 <b>Награды</b>\n\n"
+            "У тебя пока нет наград.\n\n"
+            "За активность, участие в жизни GlowShot и особые достижения "
+            "здесь будут появляться твои трофеи."
+        )
+    else:
+        lines: list[str] = [
+            "🏆 <b>Награды</b>",
+            "",
+            "Вот список всех полученных тобой наград:",
+            "",
+        ]
+
+        for award in awards:
+            icon = award.get("icon") or "🏅"
+            title = award.get("title") or "Без названия"
+            description = award.get("description") or ""
+            created_at = award.get("created_at")
+
+            # Форматируем дату получения
+            human_date = "дата неизвестна"
+            if created_at:
+                try:
+                    dt = datetime.fromisoformat(created_at)
+                    human_date = dt.strftime("%d.%m.%Y")
+                except Exception:
+                    human_date = created_at
+
+            line = f"{icon} <b>{title}</b>\n   📅 Получена: {human_date}"
+            if description:
+                line += f"\n   {description}"
+
+            lines.append(line)
+            lines.append("")  # пустая строка между наградами
+
+        text = "\n".join(lines).rstrip()
 
     await callback.message.edit_text(
         text,
