@@ -38,7 +38,7 @@ async def cmd_terms(message: Message):
         "• За контент, который ты загружаешь, отвечаешь ты. Запрещён незаконный, эротический, насильственный и т.п. контент.\n"
         "• Администрация бота может блокировать доступ за нарушения правил.\n\n"
         "По вопросам — пиши в /support.",
-        reply_markup=build_back_kb("terms"),
+        reply_markup=_build_ack_keyboard("terms"),
     )
 
 @router.message(F.text == "/privacy")
@@ -57,7 +57,7 @@ async def cmd_privacy(message: Message):
         "• Фото хранятся в виде file_id Telegram, сами файлы лежат на серверах Telegram.\n"
         "• По запросу через поддержку аккаунт можно удалить вместе с данными.\n\n"
         "Если есть вопросы по данным — пиши в /support.",
-        reply_markup=build_back_kb("privacy"),
+        reply_markup=_build_ack_keyboard("privacy"),
     )
 
 @router.callback_query(F.data.startswith("legal:"))
