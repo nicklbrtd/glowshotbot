@@ -22,6 +22,7 @@ from database import (
     is_user_premium_active,
     get_today_photo_for_user,
     get_awards_for_user,
+    get_user_by_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -815,7 +816,9 @@ async def profile_set_bio(message: Message, state: FSMContext):
 async def profile_awards_menu(callback: CallbackQuery):
     """
     Раздел наград: показывает все награды пользователя списком
-    с датой получения и описанием (если есть).
+    в формате:
+    1. 🏆 Название (дата) - от Создателя / @username
+       Комментарий: текст  (только для наград от создателя)
     """
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
@@ -840,15 +843,15 @@ async def profile_awards_menu(callback: CallbackQuery):
         lines: list[str] = [
             "🏆 <b>Награды</b>",
             "",
-            "Вот список всех полученных тобой наград:",
-            "",
         ]
 
-        for award in awards:
+        for idx, award in enumerate(awards, start=1):
             icon = award.get("icon") or "🏅"
             title = award.get("title") or "Без названия"
-            description = award.get("description") or ""
+            description = (award.get("description") or "").strip()
             created_at = award.get("created_at")
+            is_special = bool(award.get("is_special"))
+            granted_by_user_id = award.get("granted_by_user_id")
 
             # Форматируем дату получения
             human_date = "дата неизвестна"
@@ -859,12 +862,40 @@ async def profile_awards_menu(callback: CallbackQuery):
                 except Exception:
                     human_date = created_at
 
-            line = f"{icon} <b>{title}</b>\n   📅 Получена: {human_date}"
-            if description:
-                line += f"\n   {description}"
+            # Кто выдал награду
+            from_label = "—"
+            if is_special:
+                # Спец-награды считаем «от Создателя»
+                from_label = "от Создателя"
+            elif granted_by_user_id:
+                try:
+                    giver = await get_user_by_id(int(granted_by_user_id))
+                except Exception:
+                    giver = None
 
+                if giver:
+                    giver_username = giver.get("username") or ""
+                    giver_name = giver.get("name") or ""
+                    if giver_username:
+                        from_label = f"@{giver_username}"
+                    elif giver_name:
+                        from_label = giver_name
+                    else:
+                        from_label = "неизвестно"
+                else:
+                    from_label = "неизвестно"
+
+            # Основная строка:
+            # 1. 🏆 Название (11.12.2025) - от Создателя / @username
+            line = f"{idx}. {icon} {title} ({human_date}) - {from_label}"
             lines.append(line)
-            lines.append("")  # пустая строка между наградами
+
+            # Для наград от создателя показываем комментарий (описание), если есть
+            if is_special and description:
+                lines.append(f"Комментарий: {description}")
+
+            # Пустая строка между наградами
+            lines.append("")
 
         text = "\n".join(lines).rstrip()
 
