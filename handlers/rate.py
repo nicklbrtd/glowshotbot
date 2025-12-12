@@ -932,6 +932,14 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:score:"))
 async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обычная оценка фотографии от 1 до 10.
+
+    Важно:
+    • Всегда сохраняем оценку в ratings, даже если не было комментария.
+    • Для user_id используем ВНУТРЕННИЙ ID (users.id), а не tg_id.
+    • После оценки пробуем засчитать реферальный бонус.
+    """
     parts = callback.data.split(":")
     if len(parts) != 4:
         await callback.answer("Странная оценка, не понял.", show_alert=True)
@@ -954,13 +962,14 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
+    # Достаём возможный комментарий из FSM
     data = await state.get_data()
     comment_photo_id = data.get("photo_id")
     comment_text = data.get("comment_text")
     is_public = data.get("is_public", True)
 
+    # Если к этой же фотке только что писали комментарий — сохраняем его и шлём уведомление автору
     if comment_photo_id == photo_id and comment_text:
-        # 1) Сохраняем комментарий в базе
         await create_comment(
             user_id=user["id"],
             photo_id=photo_id,
@@ -968,7 +977,6 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
             is_public=bool(is_public),
         )
 
-        # 2) Пытаемся отправить уведомление автору фотографии
         try:
             photo = await get_photo_by_id(photo_id)
         except Exception:
@@ -1005,10 +1013,8 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                             # Если не получилось доставить уведомление автору — просто игнорируем.
                             pass
 
-        # 3) Чистим состояние, чтобы не потащить комментарий на следующую фотографию
-        await state.clear()
-
-        await add_rating(user["id"], photo_id, value)
+    # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
+    await add_rating(user["id"], photo_id, value)
 
     # Рефералька: проверяем, не пора ли выдать бонусы
     try:
@@ -1050,8 +1056,10 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
             except Exception:
                 pass
 
+    # Показываем следующую фотографию
     await show_next_photo_for_rating(callback, user["id"])
 
+    # Чистим состояние (комментарий больше не нужен)
     await state.clear()
 
 
