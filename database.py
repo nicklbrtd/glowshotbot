@@ -877,6 +877,21 @@ async def set_user_notify_comments(tg_id: int, enabled: bool) -> None:
         await db.commit()
 
 
+async def get_all_users_tg_ids() -> list[int]:
+    """
+    Вернуть список tg_id всех не удалённых пользователей.
+    Используется для рассылки «всем пользователям».
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT tg_id FROM users WHERE is_deleted = 0"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+    # r[0] — tg_id
+    return [int(r[0]) for r in rows if r[0] is not None]
+
+
 # ====== DAILY SKIP HELPERS ======
 
 async def get_daily_skip_info(tg_id: int) -> tuple[str | None, int]:
