@@ -28,6 +28,7 @@ from database import (
     is_user_premium_active,
     get_daily_skip_info,
     update_daily_skip_info,
+    get_awards_for_user,
 )
 from handlers.upload import build_my_photo_caption
 from html import escape
@@ -125,6 +126,7 @@ def build_rate_caption(photo: dict) -> str:
     safe_description = escape(description) if description else ""
 
     is_premium_author = bool(photo.get("user_is_premium"))
+    has_beta_award = bool(photo.get("has_beta_award"))
 
     # Первая строка: название моноширным + устройство со смайликом
     device_part = f"📷 {safe_device}"
@@ -182,6 +184,12 @@ def build_rate_caption(photo: dict) -> str:
         lines.append("")
         lines.append(f"<b>📝Описание:</b> {safe_description}")
 
+    # Если у автора есть главная ачивка «Бета-тестер бота» — показываем её в самом низу
+    if has_beta_award:
+        # Добавляем пустую строку для отступа от описания / ссылки / заголовка
+        lines.append("")
+        lines.append("🏆 Бета-тестер бота")
+
     return "\n".join(lines)
 
 async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> None:
@@ -234,6 +242,23 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
         return
 
     #### Фотография найдена
+    # Проверяем, есть ли у автора главная ачивка «Бета-тестер бота»
+    try:
+        has_beta_award = False
+        author_user_id = photo.get("user_id")
+        if author_user_id:
+            awards = await get_awards_for_user(author_user_id)
+            for award in awards:
+                code = (award.get("code") or "").strip()
+                title = (award.get("title") or "").strip().lower()
+                if code == "beta_tester" or "бета-тестер бота" in title or "бета тестер бота" in title:
+                    has_beta_award = True
+                    break
+        photo["has_beta_award"] = has_beta_award
+    except Exception:
+        # Если что-то пошло не так при загрузке наград — просто не показываем ачивку
+        photo["has_beta_award"] = False
+
     caption = build_rate_caption(photo)
     kb = build_rate_keyboard(photo["id"], is_premium=is_premium)
     if message.photo:

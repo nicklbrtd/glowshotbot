@@ -812,13 +812,23 @@ async def profile_set_bio(message: Message, state: FSMContext):
 
 
 
-@router.callback_query(F.data == "profile:awards")
+@router.callback_query(F.data.startswith("profile:awards"))
 async def profile_awards_menu(callback: CallbackQuery):
     """
-    Раздел наград: показывает все награды пользователя списком
-    в формате:
-    1. 🏆 Название (дата) - от Создателя / @username
+    Раздел наград с фильтрами и пагинацией.
+
+    Формат:
+    1. 🏆 Название (11.12.2025) - от Создателя / @username
        Комментарий: текст  (только для наград от создателя)
+
+    Фильтры:
+    - Все награды (по умолчанию)
+    - Только «от Создателя» (is_special = 1)
+    - Только «от других» (is_special = 0)
+
+    Пагинация:
+    - Показываем по 5 наград на страницу.
+    - Кнопки «⬅️» / «➡️» только там, где есть куда листать.
     """
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
@@ -830,8 +840,24 @@ async def profile_awards_menu(callback: CallbackQuery):
         await callback.answer("Не получилось загрузить награды. Попробуй позже.", show_alert=True)
         return
 
+    # Разбираем callback_data: profile:awards[:filter[:page]]
+    data = callback.data or "profile:awards"
+    parts = data.split(":")
+    filter_type = "all"
+    page = 1
+
+    if len(parts) >= 3:
+        # profile:awards:filter
+        filter_type = parts[2] or "all"
+    if len(parts) >= 4:
+        try:
+            page = max(1, int(parts[3]))
+        except ValueError:
+            page = 1
+
     awards = await get_awards_for_user(user_id)
 
+    # Если наград вообще нет — простое сообщение и только «Назад»
     if not awards:
         text = (
             "🏆 <b>Награды</b>\n\n"
@@ -839,69 +865,178 @@ async def profile_awards_menu(callback: CallbackQuery):
             "За активность, участие в жизни GlowShot и особые достижения "
             "здесь будут появляться твои трофеи."
         )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.adjust(1)
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+        return
+
+    # Фильтрация по типу
+    if filter_type == "creator":
+        filtered = [a for a in awards if bool(a.get("is_special"))]
+    elif filter_type == "others":
+        filtered = [a for a in awards if not bool(a.get("is_special"))]
     else:
-        lines: list[str] = [
-            "🏆 <b>Награды</b>",
-            "",
-        ]
+        filter_type = "all"
+        filtered = list(awards)
 
-        for idx, award in enumerate(awards, start=1):
-            icon = award.get("icon") or "🏅"
-            title = award.get("title") or "Без названия"
-            description = (award.get("description") or "").strip()
-            created_at = award.get("created_at")
-            is_special = bool(award.get("is_special"))
-            granted_by_user_id = award.get("granted_by_user_id")
+    # Если после фильтрации ничего не осталось
+    if not filtered:
+        header = "🏆 <b>Награды</b>"
+        if filter_type == "creator":
+            header += "\n\nУ тебя пока нет наград от Создателя."
+        elif filter_type == "others":
+            header += "\n\nУ тебя пока нет наград от других пользователей."
+        else:
+            header += "\n\nУ тебя пока нет наград."
 
-            # Форматируем дату получения
-            human_date = "дата неизвестна"
-            if created_at:
-                try:
-                    dt = datetime.fromisoformat(created_at)
-                    human_date = dt.strftime("%d.%m.%Y")
-                except Exception:
-                    human_date = created_at
+        text = header
+        kb = InlineKeyboardBuilder()
+        # Фильтры доступны даже если наград этого типа нет — можно переключиться
+        kb.button(text="От Создателя", callback_data="profile:awards:creator:1")
+        kb.button(text="От других", callback_data="profile:awards:others:1")
+        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.adjust(2, 1)
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+        )
+        await callback.answer()
+        return
 
-            # Кто выдал награду
-            from_label = "—"
-            if is_special:
-                # Спец-награды считаем «от Создателя»
-                from_label = "от Создателя"
-            elif granted_by_user_id:
-                try:
-                    giver = await get_user_by_id(int(granted_by_user_id))
-                except Exception:
-                    giver = None
+    # Пагинация
+    page_size = 5
+    total = len(filtered)
+    total_pages = (total + page_size - 1) // page_size
+    if page > total_pages:
+        page = total_pages
 
-                if giver:
-                    giver_username = giver.get("username") or ""
-                    giver_name = giver.get("name") or ""
-                    if giver_username:
-                        from_label = f"@{giver_username}"
-                    elif giver_name:
-                        from_label = giver_name
-                    else:
-                        from_label = "неизвестно"
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    page_items = filtered[start_idx:end_idx]
+
+    lines: list[str] = [
+        "🏆 <b>Награды</b>",
+        "",
+    ]
+
+    # Можно при желании подсветить текущий фильтр
+    if filter_type == "creator":
+        lines.append("Фильтр: <b>от Создателя</b>")
+        lines.append("")
+    elif filter_type == "others":
+        lines.append("Фильтр: <b>от других пользователей</b>")
+        lines.append("")
+
+    # Нумерация глобальная — по всем отфильтрованным, а не только на странице
+    for local_idx, award in enumerate(page_items, start=1):
+        idx = start_idx + local_idx  # 1-based номер в общем списке
+        icon = award.get("icon") or "🏅"
+        title = award.get("title") or "Без названия"
+        description = (award.get("description") or "").strip()
+        created_at = award.get("created_at")
+        is_special = bool(award.get("is_special"))
+        granted_by_user_id = award.get("granted_by_user_id")
+
+        # Форматируем дату получения
+        human_date = "дата неизвестна"
+        if created_at:
+            try:
+                dt = datetime.fromisoformat(created_at)
+                human_date = dt.strftime("%d.%m.%Y")
+            except Exception:
+                human_date = created_at
+
+        # Кто выдал награду
+        from_label = "—"
+        if is_special:
+            # Спец-награды считаем «от Создателя»
+            from_label = "от Создателя"
+        elif granted_by_user_id:
+            try:
+                giver = await get_user_by_id(int(granted_by_user_id))
+            except Exception:
+                giver = None
+
+            if giver:
+                giver_username = giver.get("username") or ""
+                giver_name = giver.get("name") or ""
+                if giver_username:
+                    from_label = f"@{giver_username}"
+                elif giver_name:
+                    from_label = giver_name
                 else:
                     from_label = "неизвестно"
+            else:
+                from_label = "неизвестно"
 
-            # Основная строка:
-            # 1. 🏆 Название (11.12.2025) - от Создателя / @username
-            line = f"{idx}. {icon} {title} ({human_date}) - {from_label}"
-            lines.append(line)
+        # Основная строка:
+        # 1. 🏆 Название (11.12.2025) - от Создателя / @username
+        line = f"{idx}. {icon} {title} ({human_date}) - {from_label}"
+        lines.append(line)
 
-            # Для наград от создателя показываем комментарий (описание), если есть
-            if is_special and description:
-                lines.append(f"Комментарий: {description}")
+        # Для наград от создателя показываем комментарий (описание), если есть
+        if is_special and description:
+            lines.append(f"Комментарий: {description}")
 
-            # Пустая строка между наградами
-            lines.append("")
+        lines.append("")
 
-        text = "\n".join(lines).rstrip()
+    # Информация о страницах, если их больше одной
+    if total_pages > 1:
+        lines.append(f"Страница {page} из {total_pages}")
+
+    text = "\n".join(lines).rstrip()
+
+    # Собираем клавиатуру: навигация по страницам + фильтры + назад
+    kb = InlineKeyboardBuilder()
+
+    if total_pages > 1:
+        # Навигационные кнопки «назад/вперёд» только если есть куда листать
+        has_prev = page > 1
+        has_next = page < total_pages
+
+        if has_prev:
+            kb.button(
+                text="⬅️ Назад",
+                callback_data=f"profile:awards:{filter_type}:{page - 1}",
+            )
+        if has_next:
+            kb.button(
+                text="➡️ Вперёд",
+                callback_data=f"profile:awards:{filter_type}:{page + 1}",
+            )
+
+    # Кнопки фильтров
+    kb.button(text="От Создателя", callback_data="profile:awards:creator:1")
+    kb.button(text="От других", callback_data="profile:awards:others:1")
+
+    # Кнопка назад в профиль
+    kb.button(text="⬅️ В профиль", callback_data="menu:profile")
+
+    # Раскладка кнопок
+    if total_pages > 1:
+        has_prev = page > 1
+        has_next = page < total_pages
+        if has_prev and has_next:
+            # 2 навигационные, 2 фильтра, 1 назад
+            kb.adjust(2, 2, 1)
+        elif has_prev or has_next:
+            # 1 навигационная, 2 фильтра, 1 назад
+            kb.adjust(1, 2, 1)
+        else:
+            # Теоретически сюда не попадём, но на всякий случай
+            kb.adjust(2, 1)
+    else:
+        # Только фильтры + назад
+        kb.adjust(2, 1)
 
     await callback.message.edit_text(
         text,
-        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+        reply_markup=kb.as_markup(),
     )
     await callback.answer()
 
