@@ -20,6 +20,7 @@ from handlers import (
     premium,
     payments,
     terms,
+    referrals,
 )
 
 
@@ -47,6 +48,7 @@ async def main():
     dp.include_router(premium.router)
     dp.include_router(payments.router)
     dp.include_router(terms.router)
+    вp.include_router(referrals.router)
 
     print("🤖 GlowShot запущен")
     await dp.start_polling(bot)
