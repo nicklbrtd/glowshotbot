@@ -152,7 +152,6 @@ async def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_moderator_reviews_mod_photo
                 ON moderator_reviews(moderator_id, photo_id);
-            );
 
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
