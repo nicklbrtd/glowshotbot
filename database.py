@@ -567,6 +567,81 @@ async def get_user_admin_stats(user_id: int) -> dict:
         "upload_bans_count": upload_bans_count,
     }
 
+
+# ====== PHOTO ADMIN STATS ======
+async def get_photo_admin_stats(photo_id: int) -> dict:
+    """
+    Расширенная статистика по фотографии для админ-панели.
+    Возвращает словарь с ключами:
+        avg_rating, ratings_count, super_ratings_count, comments_count,
+        reports_total, reports_pending, reports_resolved.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Средний рейтинг и количество оценок
+        cursor = await db.execute(
+            "SELECT AVG(value), COUNT(*) FROM ratings WHERE photo_id = ?",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        avg_rating = float(row[0]) if row and row[0] is not None else None
+        ratings_count = int(row[1] or 0) if row else 0
+
+        # Супер-оценки
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM super_ratings WHERE photo_id = ?",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        super_ratings_count = int(row[0] or 0)
+
+        # Комментарии
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM comments WHERE photo_id = ?",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        comments_count = int(row[0] or 0)
+
+        # Жалобы всего
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM photo_reports WHERE photo_id = ?",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        reports_total = int(row[0] or 0)
+
+        # Жалобы в ожидании
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM photo_reports WHERE photo_id = ? AND status = 'pending'",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        reports_pending = int(row[0] or 0)
+
+        # Жалобы решено
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM photo_reports WHERE photo_id = ? AND status = 'resolved'",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        reports_resolved = int(row[0] or 0)
+
+    return {
+        "avg_rating": avg_rating,
+        "ratings_count": ratings_count,
+        "super_ratings_count": super_ratings_count,
+        "comments_count": comments_count,
+        "reports_total": reports_total,
+        "reports_pending": reports_pending,
+        "reports_resolved": reports_resolved,
+    }
+
 # ====== PHOTOS COUNT BY USER ======
 
 async def count_photos_by_user(user_id: int) -> int:
