@@ -3102,3 +3102,359 @@ async def link_and_reward_referral_if_needed(
         referee_tg_id = int(referee_row["tg_id"]) if referee_row["tg_id"] is not None else None
 
         return True, referrer_tg_id, referee_tg_id
+# ====== RATINGS HELPERS (OVERRIDE) ======
+
+async def add_rating(user_id: int, photo_id: int, value: int) -> None:
+    """
+    Добавить или обновить оценку фотографии пользователем.
+
+    ВНИМАНИЕ:
+    - user_id — это ВНУТРЕННИЙ ID (users.id), а НЕ tg_id.
+    - В таблицу ratings пишем только users.id.
+    """
+    from datetime import datetime as _dt
+
+    now_iso = _dt.utcnow().isoformat(timespec="seconds")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO ratings (user_id, photo_id, value, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, photo_id) DO UPDATE SET
+                value = excluded.value,
+                created_at = excluded.created_at
+            """,
+            (user_id, photo_id, value, now_iso),
+        )
+        await db.commit()
+
+
+async def get_random_photo_for_rating(user_id: int) -> dict | None:
+    """
+    Выбрать случайную фотографию для оценивания.
+
+    Правила:
+    • Берём только активные фото (is_deleted = 0, moderation_status = 'active').
+    • Не показываем фото самого пользователя.
+    • Не показываем фото, которые он уже оценивал (ratings.user_id = users.id).
+    • Фото только за СЕГОДНЯШНИЙ день по Москве (day_key = сегодняшняя дата).
+
+    user_id — это ВНУТРЕННИЙ ID (users.id).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        today_key = get_moscow_today()
+
+        cursor = await db.execute(
+            """
+            SELECT
+                p.*,
+                u.tg_channel_link AS user_tg_channel_link,
+                u.is_premium      AS user_is_premium
+            FROM photos AS p
+            JOIN users AS u ON p.user_id = u.id
+            WHERE
+                p.is_deleted = 0
+                AND p.moderation_status = 'active'
+                AND p.user_id != ?
+                AND p.day_key = ?
+                AND p.id NOT IN (
+                    SELECT photo_id
+                    FROM ratings
+                    WHERE user_id = ?
+                )
+            ORDER BY RANDOM()
+            LIMIT 1
+            """,
+            (user_id, today_key, user_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    if not row:
+        return None
+    return dict(row)
+
+
+# ====== REFERRALS HELPERS (OVERRIDE) ======
+
+async def get_or_create_referral_code(user_tg_id: int) -> str | None:
+    """
+    Получить или создать реферальный код для пользователя по его tg_id.
+
+    Код сохраняется в users.referral_code и затем используется в ссылке:
+    https://t.me/<bot>?start=ref_<code>
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Ищем пользователя
+        cursor = await db.execute(
+            "SELECT id, referral_code FROM users WHERE tg_id = ? AND is_deleted = 0",
+            (user_tg_id,),
+        )
+        user_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not user_row:
+            return None
+
+        user_id = int(user_row["id"])
+        existing_code = user_row["referral_code"]
+        if existing_code:
+            return existing_code
+
+        # Генерируем новый код
+        import secrets
+        base = "GS"
+        while True:
+            tail = secrets.token_hex(3).upper()  # 6 hex-символов
+            code = f"{base}{tail}"
+
+            cursor = await db.execute(
+                "SELECT 1 FROM users WHERE referral_code = ? LIMIT 1",
+                (code,),
+            )
+            dup = await cursor.fetchone()
+            await cursor.close()
+            if not dup:
+                break
+
+        await db.execute(
+            "UPDATE users SET referral_code = ?, updated_at = ? WHERE id = ?",
+            (code, get_moscow_now_iso(), user_id),
+        )
+        await db.commit()
+        return code
+
+
+async def get_referral_stats_for_user(user_tg_id: int) -> dict:
+    """
+    Статистика рефералок для пользователя по его tg_id.
+
+    Сейчас возвращаем:
+    - invited_qualified: сколько друзей выполнили условия (referral_qualified = 1).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE tg_id = ? AND is_deleted = 0",
+            (user_tg_id,),
+        )
+        user_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not user_row:
+            return {"invited_qualified": 0}
+
+        user_id = int(user_row["id"])
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE referred_by_user_id = ?
+              AND referral_qualified = 1
+              AND is_deleted = 0
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    invited_qualified = int(row[0]) if row else 0
+    return {"invited_qualified": invited_qualified}
+
+
+async def save_pending_referral(tg_id: int, referral_code: str) -> None:
+    """
+    Сохранить «ожидающую» реферальную привязку до момента,
+    когда пользователь зарегистрируется и поставит первую оценку.
+
+    Используем таблицу referral_pending (tg_id, referral_code, created_at).
+    """
+    now_iso = get_moscow_now_iso()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO referral_pending (tg_id, referral_code, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET
+                referral_code = excluded.referral_code,
+                created_at    = excluded.created_at
+            """,
+            (tg_id, referral_code, now_iso),
+        )
+        await db.commit()
+
+
+async def link_and_reward_referral_if_needed(referee_tg_id: int) -> tuple[bool, int | None, int | None]:
+    """
+    Проверяем, не пора ли выдать реферальный бонус приглашённому пользователю
+    (referee) и тому, кто его пригласил (referrer).
+
+    Условия:
+    • пользователь существует и не удалён;
+    • у него есть pending-запись в referral_pending ИЛИ ещё не заполнен referred_by_user_id;
+    • у него есть хотя бы одна оценка в ratings (по users.id);
+    • реферальный бонус ещё не выдавался (referral_qualified = 0).
+
+    Результат:
+    - (True, referrer_tg_id, referee_tg_id), если бонус выдан;
+    - (False, None, None) — если условий нет или уже выдавали.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Находим приглашённого пользователя (referee) по tg_id
+        cursor = await db.execute(
+            """
+            SELECT id, referred_by_user_id, referral_qualified, is_deleted
+            FROM users
+            WHERE tg_id = ?
+            """,
+            (referee_tg_id,),
+        )
+        user_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not user_row or user_row["is_deleted"]:
+            return False, None, None
+
+        referee_id = int(user_row["id"])
+        already_linked = user_row["referred_by_user_id"] is not None
+        already_qualified = bool(user_row["referral_qualified"])
+
+        # Если уже выдавали бонус или уже привязан к кому-то — ничего не делаем
+        if already_qualified or already_linked:
+            return False, None, None
+
+        # Проверяем, есть ли pending-рефералка по tg_id
+        cursor = await db.execute(
+            "SELECT referral_code FROM referral_pending WHERE tg_id = ?",
+            (referee_tg_id,),
+        )
+        pending_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not pending_row:
+            # Нет pending-записи — значит пользователь либо не пришёл по ссылке,
+            # либо уже обработан
+            return False, None, None
+
+        ref_code = pending_row["referral_code"]
+
+        # Ищем того, кто пригласил, по referral_code
+        cursor = await db.execute(
+            """
+            SELECT id, tg_id
+            FROM users
+            WHERE referral_code = ?
+              AND is_deleted = 0
+            """,
+            (ref_code,),
+        )
+        referrer_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not referrer_row:
+            # Код невалидный — просто очищаем pending, но никого не награждаем
+            await db.execute(
+                "DELETE FROM referral_pending WHERE tg_id = ?",
+                (referee_tg_id,),
+            )
+            await db.commit()
+            return False, None, None
+
+        referrer_id = int(referrer_row["id"])
+        referrer_tg_id = int(referrer_row["tg_id"])
+
+        # Проверяем, есть ли у приглашённого хотя бы одна оценка
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE user_id = ?",
+            (referee_id,),
+        )
+        ratings_row = await cursor.fetchone()
+        await cursor.close()
+
+        ratings_count = int(ratings_row[0]) if ratings_row else 0
+        if ratings_count <= 0:
+            # Условие ещё не выполнено — ждём
+            return False, None, None
+
+        # Всё ок — помечаем, что пользователь выполнил условия
+        now_iso = get_moscow_now_iso()
+        await db.execute(
+            """
+            UPDATE users
+            SET
+                referred_by_user_id = ?,
+                referral_qualified  = 1,
+                updated_at          = ?
+            WHERE id = ?
+            """,
+            (referrer_id, now_iso, referee_id),
+        )
+
+        # Чистим pending-запись
+        await db.execute(
+            "DELETE FROM referral_pending WHERE tg_id = ?",
+            (referee_tg_id,),
+        )
+
+        # Начисляем по 2 дня премиума обоим
+        from datetime import datetime as _dt, timedelta as _td
+
+        async def _add_premium_days_for_tg(target_tg_id: int, days: int) -> None:
+            cursor_inner = await db.execute(
+                """
+                SELECT id, is_premium, premium_until
+                FROM users
+                WHERE tg_id = ? AND is_deleted = 0
+                """,
+                (target_tg_id,),
+            )
+            u = await cursor_inner.fetchone()
+            await cursor_inner.close()
+            if not u:
+                return
+
+            current_until = u["premium_until"]
+            now = _dt.utcnow()
+
+            if current_until:
+                try:
+                    dt_until = _dt.fromisoformat(current_until)
+                except Exception:
+                    dt_until = now
+            else:
+                dt_until = now
+
+            if dt_until < now:
+                dt_until = now
+
+            new_until = dt_until + _td(days=days)
+            new_until_iso = new_until.isoformat(timespec="seconds")
+
+            await db.execute(
+                """
+                UPDATE users
+                SET
+                    is_premium    = 1,
+                    premium_until = ?,
+                    updated_at    = ?
+                WHERE tg_id = ?
+                """,
+                (new_until_iso, get_moscow_now_iso(), target_tg_id),
+            )
+
+        # 2 дня премиума приглашённому и пригласившему
+        await _add_premium_days_for_tg(referee_tg_id, 2)
+        await _add_premium_days_for_tg(referrer_tg_id, 2)
+
+        await db.commit()
+
+    return True, referrer_tg_id, referee_tg_id

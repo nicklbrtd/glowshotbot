@@ -84,7 +84,7 @@ async def profile_premium_menu(callback: CallbackQuery):
 
     is_active = False
     premium_until_human: str | None = None
-    raw_status = {}
+    raw_status: dict = {}
 
     try:
         raw_status = await get_user_premium_status(tg_id)
@@ -94,20 +94,20 @@ async def profile_premium_menu(callback: CallbackQuery):
         # В случае ошибок просто покажем базовый текст без статуса
         pass
 
-        kb = InlineKeyboardBuilder()
+    kb = InlineKeyboardBuilder()
 
-        # Отдельная премиум-панель, чтобы из профиля можно было зайти в общий премиум-центр
-        kb.button(text="✨ Премиум-панель", callback_data="premium:menu")
+    # Отдельная премиум-панель, чтобы из профиля можно было зайти в общий премиум-центр
+    kb.button(text="✨ Премиум-панель", callback_data="premium:menu")
 
-        if is_active:
-            kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
-            kb.button(text="💳 Управление подпиской", callback_data="profile:premium_buy")
-        else:
-            kb.button(text="💳 Оплатить подписку", callback_data="profile:premium_buy")
-            kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+    if is_active:
+        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+        kb.button(text="💳 Управление подпиской", callback_data="profile:premium_buy")
+    else:
+        kb.button(text="💳 Оплатить подписку", callback_data="profile:premium_buy")
+        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
 
-        kb.button(text="⬅️ Назад", callback_data="menu:profile")
-        kb.adjust(1)
+    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.adjust(1)
 
     if is_active:
         if premium_until_human:
