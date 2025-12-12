@@ -31,6 +31,15 @@ from database import (
     update_award_text,
     update_award_icon,
     create_custom_award_for_user,
+    # статистика и выборки пользователей
+    get_users_sample,
+    get_active_users_last_24h,
+    get_online_users_recent,
+    get_total_activity_events,
+    get_new_users_last_days,
+    get_premium_stats,
+    get_blocked_users_page,
+    get_users_with_multiple_daily_top3,
 )
 # ====== AchievementStates: FSM для работы с ачивками ======
 class AchievementStates(StatesGroup):
@@ -429,7 +438,7 @@ ROLE_CONFIG = {
 
 
 @router.callback_query(F.data == "admin:roles")
-async def admin_roles_menu(callback: CallbackQuery):
+async def admin_roles_menu(callback: CallbackQuery, state: FSMContext):
     """
     Раздел управления ролями:
     - модераторы
@@ -439,6 +448,9 @@ async def admin_roles_menu(callback: CallbackQuery):
     user = await _ensure_admin(callback)
     if user is None:
         return
+
+    # очищаем FSM, если до этого были шаги выдачи/удаления ролей
+    await state.clear()
 
     text = (
         "<b>Роли</b>\n\n"
@@ -493,6 +505,9 @@ async def admin_roles_router(callback: CallbackQuery, state: FSMContext):
 
     # Если только admin:roles:<role> — показываем меню роли
     if len(parts) == 3:
+        # При входе в меню роли сбрасываем состояние выдачи/удаления
+        await state.clear()
+
         text = (
             f"<b>Роль: {cfg['name_plural'].capitalize()}</b>\n\n"
             "Что хочешь сделать?\n"
@@ -531,20 +546,53 @@ async def admin_roles_router(callback: CallbackQuery, state: FSMContext):
         users_with_role = await cfg["get_list"]()
 
         if not users_with_role:
-            text = f"Сейчас нет ни одного {cfg['name_single']}."
+            if role_code == "premium":
+                text = "Сейчас нет ни одного премиум-пользователя."
+            else:
+                text = f"Сейчас нет ни одного {cfg['name_single']}."
         else:
-            lines = []
-            for u in users_with_role:
-                username = u.get("username")
-                line = f"• {u.get('name') or 'Без имени'} — ID <code>{u.get('tg_id')}</code>"
-                if username:
-                    line += f" (@{username})"
-                lines.append(line)
+            # Отдельный формат для премиум-пользователей
+            if role_code == "premium":
+                now_date = get_moscow_now().date()
+                lines: list[str] = ["<b>Премиум-пользователи</b>", ""]
+                for u in users_with_role:
+                    username = u.get("username")
+                    name = u.get("name") or "Без имени"
+                    label = f"@{username}" if username else name
 
-            text = (
-                f"<b>{cfg['name_plural'].capitalize()}</b>\n\n" +
-                "\n".join(lines)
-            )
+                    premium_until = u.get("premium_until")
+                    if premium_until:
+                        try:
+                            until_dt = datetime.fromisoformat(premium_until)
+                            until_str = until_dt.strftime("%d.%m.%Y")
+                            days_left = (until_dt.date() - now_date).days
+                            if days_left < 0:
+                                duration = f"до {until_str} (истёк)"
+                            elif days_left == 0:
+                                duration = "до конца дня"
+                            else:
+                                duration = f"до {until_str}"
+                        except Exception:
+                            duration = premium_until
+                    else:
+                        duration = "бессрочно"
+
+                    lines.append(f"• {label} — ({duration})")
+
+                text = "\n".join(lines)
+            else:
+                lines = []
+                for u in users_with_role:
+                    username = u.get("username")
+                    line = f"• {u.get('name') or 'Без имени'} — ID <code>{u.get('tg_id')}</code>"
+                    if username:
+                        line += f" (@{username})"
+                    lines.append(line)
+
+                text = (
+                    f"<b>{cfg['name_plural'].capitalize()}</b>\n\n" +
+                    "\n".join(lines)
+                )
 
         kb = InlineKeyboardBuilder()
         kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
@@ -578,13 +626,19 @@ async def admin_roles_router(callback: CallbackQuery, state: FSMContext):
         text = (
             f"Введи ID или @username пользователя, которому нужно "
             f"{'выдать' if action == 'add' else 'снять'} роль {cfg['name_single']}.\n\n"
-            "Пример: <code>123456789</code> или <code>@username</code>."
+            "Пример: <code>123456789</code> или <code>@username</code>.\n\n"
+            "Если передумал — нажми «Назад», чтобы вернуться в меню роли."
         )
 
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+
         try:
-            prompt = await callback.message.edit_text(text)
+            prompt = await callback.message.edit_text(text, reply_markup=kb.as_markup())
         except Exception:
-            prompt = await callback.message.answer(text)
+            prompt = await callback.message.answer(text, reply_markup=kb.as_markup())
 
         await state.update_data(
             role_prompt_chat_id=prompt.chat.id,
@@ -646,6 +700,12 @@ async def role_add_user(message: Message, state: FSMContext):
 
         await state.set_state(RoleStates.waiting_premium_duration)
         extra = f" (@{username})" if username else ""
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+
         await _edit_role_prompt_or_answer(
             message,
             state,
@@ -653,6 +713,7 @@ async def role_add_user(message: Message, state: FSMContext):
             "На какой срок выдать премиум?\n"
             "• Напиши количество дней (например: <code>7</code> или <code>30</code>);\n"
             "• или отправь <b>навсегда</b>, чтобы выдать бессрочный премиум.",
+            reply_markup=kb.as_markup(),
         )
         return
 
@@ -964,24 +1025,25 @@ async def admin_stats_menu(callback: CallbackQuery):
     text = (
         "<b>Статистика</b>\n\n"
         "Выбери, что посмотреть:\n"
-        "• 👥 Кол-во пользователей\n"
-        "• 📈 Активные за сегодня / неделю\n"
-        "• ⏱ Онлайн сейчас\n"
-        "• 📬 Сколько сообщений бот обработал\n"
-        "• ➕ Новые за сегодня / вчера / неделю\n\n"
-        "А также выборки по пользователям:"
+        "• 👥 Общее количество пользователей\n"
+        "• 📈 Активные за последние 24 часа\n"
+        "• ⏱ Онлайн сейчас (за последние 5 минут)\n"
+        "• 📬 Основные действия / события\n"
+        "• ➕ Новые пользователи за последние 3 дня\n"
+        "• 💎 Премиум-пользователи\n"
+        "• ⛔️ Пользователи в бане\n"
+        "• 🏆 Неоднократные победители в топ-3 дня"
     )
 
     kb = InlineKeyboardBuilder()
     kb.button(text="👥 Кол-во пользователей", callback_data="admin:stats:total_users")
-    kb.button(text="📈 Активные (скоро)", callback_data="admin:stub:stats_active")
-    kb.button(text="⏱ Онлайн сейчас (скоро)", callback_data="admin:stub:stats_online")
-    kb.button(text="📬 Сообщения (скоро)", callback_data="admin:stub:stats_messages")
-    kb.button(text="➕ Новые (скоро)", callback_data="admin:stub:stats_new")
-    kb.button(text="💎 Премиум-пользователи (скоро)", callback_data="admin:stub:stats_premium")
-    kb.button(text="⛔️ В бане (скоро)", callback_data="admin:stub:stats_banned")
-    kb.button(text="🏆 С неоднократными победами (скоро)", callback_data="admin:stub:stats_top")
-    kb.button(text="📋 Все пользователи (скоро)", callback_data="admin:stub:stats_all")
+    kb.button(text="📈 Активные за 24 часа", callback_data="admin:stats:active")
+    kb.button(text="⏱ Онлайн сейчас", callback_data="admin:stats:online")
+    kb.button(text="📬 Сообщения / действия", callback_data="admin:stats:messages")
+    kb.button(text="➕ Новые (3 дня)", callback_data="admin:stats:new")
+    kb.button(text="💎 Премиум-пользователи", callback_data="admin:stats:premium")
+    kb.button(text="⛔️ В бане", callback_data="admin:stats:banned")
+    kb.button(text="🏆 С неоднократными победами", callback_data="admin:stats:top_winners")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
@@ -1009,12 +1071,28 @@ async def admin_stats_total_users(callback: CallbackQuery):
         return
 
     total_users = await get_total_users()
+    users_sample = []
+    if total_users <= 20 and total_users > 0:
+        users_sample = await get_users_sample(limit=20)
 
-    text = (
-        "<b>Статистика → Кол-во пользователей</b>\n\n"
-        f"Всего пользователей: <b>{total_users}</b>\n\n"
-        "В будущем здесь появится более детальная разбивка: по дням, неделям и активности."
-    )
+    lines: list[str] = [
+        "<b>Статистика → Кол-во пользователей</b>",
+        "",
+        f"Всего пользователей: <b>{total_users}</b>.",
+    ]
+
+    if users_sample:
+        lines.append("")
+        lines.append("Список пользователей:")
+        for u in users_sample:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            if username:
+                lines.append(f"• @{username} ({name})")
+            else:
+                lines.append(f"• {name}")
+
+    text = "\n".join(lines)
 
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
@@ -1031,6 +1109,384 @@ async def admin_stats_total_users(callback: CallbackQuery):
             text,
             reply_markup=kb.as_markup(),
         )
+
+    await callback.answer()
+
+
+# ====== Новые хендлеры статистики ======
+
+
+@router.callback_query(F.data == "admin:stats:active")
+async def admin_stats_active(callback: CallbackQuery):
+    """
+    Активные за последние 24 часа (по updated_at).
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    total, sample = await get_active_users_last_24h(limit=20)
+
+    lines: list[str] = [
+        "<b>Статистика → Активные за 24 часа</b>",
+        "",
+        f"За последние 24 часа пользовались ботом: <b>{total}</b> человек.",
+    ]
+
+    if sample and total <= 20:
+        lines.append("")
+        lines.append("Пользователи:")
+        for u in sample:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            if username:
+                lines.append(f"• @{username} ({name})")
+            else:
+                lines.append(f"• {name}")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:stats:online")
+async def admin_stats_online(callback: CallbackQuery):
+    """
+    Онлайн сейчас: активность за последние 5 минут.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    total, sample = await get_online_users_recent(window_minutes=5, limit=20)
+
+    lines: list[str] = [
+        "<b>Статистика → Онлайн сейчас</b>",
+        "",
+        "Считаем онлайн тех, у кого была активность за последние 5 минут.",
+        "",
+        f"Прямо сейчас онлайн: <b>{total}</b>.",
+    ]
+
+    if sample and total <= 20:
+        lines.append("")
+        lines.append("Пользователи сейчас онлайн:")
+        for u in sample:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            if username:
+                lines.append(f"• @{username} ({name})")
+            else:
+                lines.append(f"• {name}")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:stats:messages")
+async def admin_stats_messages(callback: CallbackQuery):
+    """
+    Статистика по количеству обработанных действий.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    total = await get_total_activity_events()
+
+    text = (
+        "<b>Статистика → Сообщения / действия</b>\n\n"
+        "Считаем количество ключевых действий пользователей:\n"
+        "загрузки фото, оценки, супер-оценки, комментарии и жалобы.\n\n"
+        f"Всего таких событий обработано: <b>{total}</b>."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:stats:new")
+async def admin_stats_new(callback: CallbackQuery):
+    """
+    Новые пользователи за последние 3 дня.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    total, sample = await get_new_users_last_days(days=3, limit=20)
+
+    lines: list[str] = [
+        "<b>Статистика → Новые за 3 дня</b>",
+        "",
+        f"За последние 3 дня впервые запустили бота: <b>{total}</b> человек.",
+    ]
+
+    if sample and total <= 20:
+        lines.append("")
+        lines.append("Новые пользователи:")
+        for u in sample:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            if username:
+                lines.append(f"• @{username} ({name})")
+            else:
+                lines.append(f"• {name}")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:stats:premium")
+async def admin_stats_premium(callback: CallbackQuery):
+    """
+    Премиум-пользователи: купившие и получившие от создателя.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    stats = await get_premium_stats(limit=20)
+    total = stats["total"]
+    total_paid = stats["total_paid"]
+    total_gift = stats["total_gift"]
+    paid_sample = stats["paid_sample"]
+    gift_sample = stats["gift_sample"]
+
+    lines: list[str] = [
+        "<b>Статистика → Премиум-пользователи</b>",
+        "",
+        f"Всего премиум-пользователей: <b>{total}</b>.",
+        f"• Купили премиум: <b>{total_paid}</b>",
+        f"• Получили от создателя (бессрочно): <b>{total_gift}</b>",
+    ]
+
+    if paid_sample and total_paid <= 20:
+        lines.append("")
+        lines.append("Купили премиум:")
+        for u in paid_sample:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            if username:
+                lines.append(f"• @{username} ({name})")
+            else:
+                lines.append(f"• {name}")
+
+    if gift_sample and total_gift <= 20:
+        lines.append("")
+        lines.append("Премиум от создателя:")
+        for u in gift_sample:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            if username:
+                lines.append(f"• @{username} ({name})")
+            else:
+                lines.append(f"• {name}")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+# ====== В бане и топ-победители ======
+
+async def _render_banned_page(callback: CallbackQuery, page: int) -> None:
+    PAGE_SIZE = 20
+    if page < 1:
+        page = 1
+
+    total, users_page = await get_blocked_users_page(limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    # Если страница вышла за пределы — нормализуем
+    if page > total_pages:
+        page = total_pages
+        total, users_page = await get_blocked_users_page(limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
+
+    lines: list[str] = [
+        "<b>Статистика → В бане</b>",
+        "",
+        f"Всего заблокировано: <b>{total}</b> пользовател(ей).",
+    ]
+
+    if not users_page:
+        lines.append("")
+        lines.append("Сейчас в бане никого нет.")
+    else:
+        lines.append("")
+        lines.append("Список заблокированных:")
+        for u in users_page:
+            username = u.get("username")
+            name = u.get("name") or "Без имени"
+            label = f"@{username}" if username else name
+
+            blocked_until = u.get("blocked_until")
+            if blocked_until:
+                try:
+                    until_dt = datetime.fromisoformat(blocked_until)
+                    until_str = until_dt.strftime("%d.%m.%Y %H:%M")
+                except Exception:
+                    until_str = blocked_until
+            else:
+                until_str = "бессрочно"
+
+            reason = u.get("blocked_reason") or "без указания причины"
+            lines.append(f"• {label} — до {until_str}")
+            lines.append(f"  причина: {reason}")
+
+    lines.append("")
+    lines.append(f"Страница <b>{page}</b> из <b>{total_pages}</b>.")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    if total_pages > 1:
+        if page > 1:
+            kb.button(
+                text="⬅️ Назад",
+                callback_data=f"admin:stats:banned:page:{page - 1}",
+            )
+        if page < total_pages:
+            kb.button(
+                text="➡️ Вперёд",
+                callback_data=f"admin:stats:banned:page:{page + 1}",
+            )
+    kb.button(text="⬅️ К статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:stats:banned")
+async def admin_stats_banned(callback: CallbackQuery):
+    """
+    Статистика: пользователи в бане (постранично).
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await _render_banned_page(callback, page=1)
+
+
+@router.callback_query(F.data.startswith("admin:stats:banned:page:"))
+async def admin_stats_banned_page(callback: CallbackQuery):
+    """
+    Переключение страниц списка забаненных.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    try:
+        _, _, _, _, page_str = callback.data.split(":", 4)
+        page = int(page_str)
+    except Exception:
+        page = 1
+
+    await _render_banned_page(callback, page=page)
+
+
+@router.callback_query(F.data == "admin:stats:top_winners")
+async def admin_stats_top_winners(callback: CallbackQuery):
+    """
+    Пользователи, которые несколько раз попадали в топ-3 дня.
+    """
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    winners = await get_users_with_multiple_daily_top3(min_wins=2, limit=50)
+
+    lines: list[str] = [
+        "<b>Статистика → Неоднократные победители</b>",
+        "",
+        "Здесь показываем пользователей, чьи работы попадали в топ-3 дня больше двух раз.",
+    ]
+
+    if not winners:
+        lines.append("")
+        lines.append("Пока нет пользователей с более чем двумя попаданиями в топ-3.")
+    else:
+        lines.append("")
+        for w in winners:
+            username = w.get("username")
+            name = w.get("name") or "Без имени"
+            wins = w.get("wins_count") or 0
+            if username:
+                lines.append(f"• @{username} ({name}) — {wins} раз(а) в топ-3")
+            else:
+                lines.append(f"• {name} — {wins} раз(а) в топ-3")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
 
     await callback.answer()
 

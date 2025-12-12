@@ -2049,3 +2049,343 @@ async def count_special_awards_for_user(user_id: int) -> int:
         await cursor.close()
 
     return int(row[0]) if row and row[0] is not None else 0
+async def get_users_sample(limit: int = 20) -> list[dict]:
+    """
+    Вернуть до `limit` пользователей (TG ID, username, имя) для примеров/списков.
+    Используются в админской статистике, когда общее количество небольшое.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT tg_id, username, name
+            FROM users
+            WHERE is_deleted = 0
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]
+
+
+async def get_active_users_last_24h(limit: int = 20) -> tuple[int, list[dict]]:
+    """
+    Вернуть количество и список пользователей, у которых была активность за последние 24 часа.
+    Используем поле updated_at как последнюю активность.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Общее количество
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted = 0
+              AND updated_at >= ?
+            """,
+            (cutoff_iso,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        total = int(row[0] or 0)
+
+        sample: list[dict] = []
+        if total > 0:
+            cursor = await db.execute(
+                """
+                SELECT tg_id, username, name
+                FROM users
+                WHERE is_deleted = 0
+                  AND updated_at >= ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (cutoff_iso, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            sample = [dict(r) for r in rows]
+
+    return total, sample
+
+
+async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> tuple[int, list[dict]]:
+    """
+    Вернуть количество и список «онлайн» пользователей:
+    считаем онлайн тех, у кого была активность за последние window_minutes минут.
+    """
+    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted = 0
+              AND updated_at >= ?
+            """,
+            (cutoff_iso,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        total = int(row[0] or 0)
+
+        sample: list[dict] = []
+        if total > 0:
+            cursor = await db.execute(
+                """
+                SELECT tg_id, username, name
+                FROM users
+                WHERE is_deleted = 0
+                  AND updated_at >= ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (cutoff_iso, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            sample = [dict(r) for r in rows]
+
+    return total, sample
+
+
+async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, list[dict]]:
+    """
+    Вернуть количество и список пользователей, впервые запустивших бота за последние days дней.
+    Основано на поле created_at.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted = 0
+              AND created_at >= ?
+            """,
+            (cutoff_iso,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        total = int(row[0] or 0)
+
+        sample: list[dict] = []
+        if total > 0:
+            cursor = await db.execute(
+                """
+                SELECT tg_id, username, name
+                FROM users
+                WHERE is_deleted = 0
+                  AND created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (cutoff_iso, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            sample = [dict(r) for r in rows]
+
+    return total, sample
+
+
+async def get_premium_stats(limit: int = 20) -> dict:
+    """
+    Статистика по премиум-пользователям:
+    - total: общее количество;
+    - total_paid: с премиумом по дате premium_until;
+    - total_gift: бессрочный премиум (premium_until IS NULL);
+    - paid_sample / gift_sample: примеры пользователей.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT tg_id, username, name, premium_until
+            FROM users
+            WHERE is_deleted = 0
+              AND is_premium = 1
+            """,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    paid: list[dict] = []
+    gift: list[dict] = []
+
+    for r in rows:
+        item = dict(r)
+        if item.get("premium_until"):
+            paid.append(item)
+        else:
+            gift.append(item)
+
+    return {
+        "total": len(rows),
+        "total_paid": len(paid),
+        "total_gift": len(gift),
+        "paid_sample": paid[:limit],
+        "gift_sample": gift[:limit],
+    }
+
+
+async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """
+    Вернуть общее количество заблокированных пользователей и страницу со списком.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted = 0
+              AND is_blocked = 1
+            """,
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        total = int(row[0] or 0)
+
+        users: list[dict] = []
+        if total > 0:
+            cursor = await db.execute(
+                """
+                SELECT tg_id, username, name, blocked_until, blocked_reason
+                FROM users
+                WHERE is_deleted = 0
+                  AND is_blocked = 1
+                ORDER BY blocked_until DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            users = [dict(r) for r in rows]
+
+    return total, users
+
+
+async def get_total_activity_events() -> int:
+    """
+    Считать суммарное количество ключевых действий пользователей:
+    загрузки фото, оценки, супер-оценки, комментарии и жалобы.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM photos) +
+                (SELECT COUNT(*) FROM ratings) +
+                (SELECT COUNT(*) FROM super_ratings) +
+                (SELECT COUNT(*) FROM comments) +
+                (SELECT COUNT(*) FROM photo_reports)
+            """
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+    if not row or row[0] is None:
+        return 0
+    return int(row[0])
+
+
+async def get_users_with_multiple_daily_top3(
+    min_wins: int = 2,
+    limit: int = 50,
+) -> list[dict]:
+    """
+    Найти пользователей, которые больше min_wins раз попадали в топ-3 дня.
+    Основано на средних оценках по дням (логика аналогична get_daily_top_photos).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            WITH photo_stats AS (
+                SELECT
+                    p.id,
+                    p.user_id,
+                    p.day_key,
+                    CASE
+                        WHEN SUM(
+                            CASE
+                                WHEN r.value IS NOT NULL AND r.value != 0
+                                    THEN CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END
+                                ELSE 0
+                            END
+                        ) = 0
+                        THEN NULL
+                        ELSE
+                            1.0 * SUM(
+                                CASE
+                                    WHEN r.value IS NOT NULL AND r.value != 0
+                                        THEN r.value * (CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END)
+                                    ELSE 0
+                                END
+                            )
+                            / SUM(
+                                CASE
+                                    WHEN r.value IS NOT NULL AND r.value != 0
+                                        THEN CASE WHEN sr.user_id IS NOT NULL THEN 2 ELSE 1 END
+                                    ELSE 0
+                                END
+                            )
+                    END AS avg_rating,
+                    COUNT(CASE WHEN r.value IS NOT NULL AND r.value != 0 THEN 1 END) AS ratings_count
+                FROM photos p
+                LEFT JOIN ratings r ON r.photo_id = p.id
+                LEFT JOIN super_ratings sr
+                    ON sr.photo_id = p.id
+                   AND sr.user_id = r.user_id
+                WHERE p.is_deleted = 0
+                  AND p.moderation_status = 'active'
+                GROUP BY p.id, p.user_id, p.day_key
+            ),
+            ranked AS (
+                SELECT
+                    ps.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ps.day_key
+                        ORDER BY ps.avg_rating DESC, ps.ratings_count DESC, ps.id ASC
+                    ) AS rn
+                FROM photo_stats ps
+                WHERE ps.avg_rating IS NOT NULL
+            )
+            SELECT
+                u.tg_id,
+                u.username,
+                u.name,
+                COUNT(*) AS wins_count
+            FROM ranked r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.rn <= 3
+            GROUP BY r.user_id
+            HAVING wins_count >= ?
+            ORDER BY wins_count DESC, u.id ASC
+            LIMIT ?
+            """,
+            (min_wins, limit),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]
