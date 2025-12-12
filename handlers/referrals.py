@@ -55,7 +55,7 @@ async def _build_ref_main_text(user_tg_id: int, obj) -> str:
         "По твоей реферальной ссылке друг <b>тоже получает 2 дня премиума</b> при выполнении условий.\n\n"
         "Вот твоя реферальная ссылка:\n"
         f"{link_line}\n\n"
-        f"По твоей ссылке пришло <b>{invited_qualified}</b> друзей:."
+        f"По твоей ссылке пришло <b>{invited_qualified}</b> друзей."
     )
     return text
 
@@ -165,6 +165,18 @@ async def ref_premium_info(callback: CallbackQuery):
 async def ref_close(callback: CallbackQuery):
     """
     Кнопка «Закрыть» — удаляет сообщение бота с реферальным меню.
+    """
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ref:thanks")
+async def ref_thanks(callback: CallbackQuery):
+    """
+    Кнопка «Спасибо!» в пушах реферальки — просто удаляет сообщение.
     """
     try:
         await callback.message.delete()

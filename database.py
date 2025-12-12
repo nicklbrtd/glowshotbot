@@ -175,6 +175,12 @@ async def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_payments_user
                 ON payments(user_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS referral_pending (
+                tg_id INTEGER PRIMARY KEY,
+                referral_code TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         # Миграции для добавления новых полей в существующие таблицы
@@ -2932,3 +2938,167 @@ async def get_users_with_multiple_daily_top3(
         await cursor.close()
 
     return [dict(r) for r in rows]
+
+
+async def save_pending_referral(tg_id: int, referral_code: str) -> None:
+    """
+    Сохранить отложенную реферальную инфу для пользователя, которого ещё может не быть в users.
+
+    Хранит пару (tg_id, referral_code) в referral_pending, перезаписывая старое значение.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        now_iso = datetime.utcnow().isoformat(timespec="seconds")
+        await db.execute(
+            """
+            INSERT INTO referral_pending (tg_id, referral_code, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET
+                referral_code = excluded.referral_code,
+                created_at = excluded.created_at
+            """,
+            (tg_id, referral_code, now_iso),
+        )
+        await db.commit()
+
+
+async def link_and_reward_referral_if_needed(
+    tg_id: int,
+    bonus_days: int = 2,
+) -> tuple[bool, int | None, int | None]:
+    """
+    Проверяет, нужно ли завершить реферальку для пользователя с данным tg_id.
+
+    Логика:
+    - Если referral_qualified = 1 — уже отработано, выходим.
+    - Если referred_by_user_id None, но есть запись в referral_pending:
+        ищем реферера по referral_code, записываем referred_by_user_id.
+    - Если есть хотя бы одна оценка в ratings и есть реферер, а referral_qualified = 0:
+        добавляем обоим по bonus_days премиума и ставим referral_qualified = 1.
+
+    Возвращает:
+        (success, referrer_tg_id, referee_tg_id)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # 1. Сам пользователь
+        cursor = await db.execute(
+            "SELECT id, referred_by_user_id, referral_qualified, is_deleted "
+            "FROM users WHERE tg_id = ?",
+            (tg_id,),
+        )
+        user_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not user_row or user_row["is_deleted"]:
+            return False, None, None
+
+        user_id = int(user_row["id"])
+        referred_by_user_id = user_row["referred_by_user_id"]
+        referral_qualified = int(user_row["referral_qualified"] or 0)
+
+        if referral_qualified:
+            return False, None, None
+
+        # 2. Если не знаем реферера — смотрим pending
+        if referred_by_user_id is None:
+            cursor = await db.execute(
+                "SELECT referral_code FROM referral_pending WHERE tg_id = ?",
+                (tg_id,),
+            )
+            pend_row = await cursor.fetchone()
+            await cursor.close()
+
+            if pend_row:
+                ref_code = pend_row["referral_code"]
+
+                cursor = await db.execute(
+                    "SELECT id FROM users WHERE referral_code = ? AND is_deleted = 0 LIMIT 1",
+                    (ref_code,),
+                )
+                ref_row = await cursor.fetchone()
+                await cursor.close()
+
+                if ref_row:
+                    referred_by_user_id = int(ref_row["id"])
+                    await db.execute(
+                        "UPDATE users SET referred_by_user_id = ? WHERE id = ?",
+                        (referred_by_user_id, user_id),
+                    )
+
+                await db.execute(
+                    "DELETE FROM referral_pending WHERE tg_id = ?",
+                    (tg_id,),
+                )
+                await db.commit()
+
+        if referred_by_user_id is None:
+            return False, None, None
+
+        # 3. Проверяем, что человек реально кого-то оценил
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        ratings_count = int(row[0] or 0) if row else 0
+
+        if ratings_count <= 0:
+            return False, None, None
+
+        # 4. Достаём обоих и выдаём прем
+        cursor = await db.execute(
+            "SELECT id, tg_id, premium_until, is_premium FROM users WHERE id IN (?, ?)",
+            (user_id, referred_by_user_id),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+        if not rows or len(rows) < 2:
+            return False, None, None
+
+        by_id = {int(r["id"]): r for r in rows}
+        referee_row = by_id.get(user_id)
+        referrer_row = by_id.get(referred_by_user_id)
+
+        if not referee_row or not referrer_row:
+            return False, None, None
+
+        now = datetime.utcnow()
+
+        def _calc_new_until(prev: str | None) -> str:
+            base = now
+            if prev:
+                try:
+                    prev_dt = datetime.fromisoformat(prev)
+                    if prev_dt > now:
+                        base = prev_dt
+                except Exception:
+                    pass
+            new_dt = base + timedelta(days=bonus_days)
+            return new_dt.isoformat(timespec="seconds")
+
+        new_referee_until = _calc_new_until(referee_row["premium_until"])
+        new_referrer_until = _calc_new_until(referrer_row["premium_until"])
+
+        await db.execute(
+            "UPDATE users SET premium_until = ?, is_premium = 1 WHERE id = ?",
+            (new_referee_until, user_id),
+        )
+        await db.execute(
+            "UPDATE users SET premium_until = ?, is_premium = 1 WHERE id = ?",
+            (new_referrer_until, referred_by_user_id),
+        )
+
+        await db.execute(
+            "UPDATE users SET referral_qualified = 1 WHERE id = ?",
+            (user_id,),
+        )
+
+        await db.commit()
+
+        referrer_tg_id = int(referrer_row["tg_id"]) if referrer_row["tg_id"] is not None else None
+        referee_tg_id = int(referee_row["tg_id"]) if referee_row["tg_id"] is not None else None
+
+        return True, referrer_tg_id, referee_tg_id

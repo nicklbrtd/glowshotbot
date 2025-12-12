@@ -29,6 +29,7 @@ from database import (
     get_daily_skip_info,
     update_daily_skip_info,
     get_awards_for_user,
+    link_and_reward_referral_if_needed,
 )
 from handlers.upload import build_my_photo_caption
 from html import escape
@@ -98,6 +99,17 @@ def build_comment_notification_keyboard() -> InlineKeyboardMarkup:
     используем общий хелпер с кнопкой «Просмотрено».
     """
     return build_viewed_kb(callback_data="comment:seen")
+
+
+def build_referral_thanks_keyboard() -> InlineKeyboardMarkup:
+    """
+    Кнопка «Спасибо!» для реферальных уведомлений.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Спасибо!", callback_data="ref:thanks")]
+        ]
+    )
 
 
 # Специальная подпись для раздела оценивания
@@ -873,6 +885,46 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     # И помечаем её как супер-оценку (+5 баллов в статистике)
     await set_super_rating(user["id"], photo_id)
 
+    # Рефералька: проверяем, не пора ли выдать бонусы
+    try:
+        rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
+    except Exception:
+        rewarded = False
+        referrer_tg_id = None
+        referee_tg_id = None
+
+    if rewarded:
+        # Пуш тому, кто дал ссылку
+        if referrer_tg_id:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=referrer_tg_id,
+                    text=(
+                        "🤝 <b>Друг выполнил условия реферальной программы!</b>\n\n"
+                        "Тебе начислено <b>2 дня GlowShot Премиум</b> за приглашение.\n"
+                        "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
+                    ),
+                    reply_markup=build_referral_thanks_keyboard(),
+                )
+            except Exception:
+                pass
+
+        # Пуш другу
+        if referee_tg_id:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=referee_tg_id,
+                    text=(
+                        "🎉 <b>Ты выполнил условия реферальной программы!</b>\n\n"
+                        "За регистрацию и участие в оценке фотографий тебе начислено "
+                        "<b>2 дня GlowShot Премиум</b>.\n"
+                        "Продолжай выкладывать свои кадры и оценивать работы других 💎"
+                    ),
+                    reply_markup=build_referral_thanks_keyboard(),
+                )
+            except Exception:
+                pass
+
     await show_next_photo_for_rating(callback, user["id"])
 
     await state.clear()
@@ -956,8 +1008,51 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
         # 3) Чистим состояние, чтобы не потащить комментарий на следующую фотографию
         await state.clear()
 
-    await add_rating(user["id"], photo_id, value)
+        await add_rating(user["id"], photo_id, value)
+
+    # Рефералька: проверяем, не пора ли выдать бонусы
+    try:
+        rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
+    except Exception:
+        rewarded = False
+        referrer_tg_id = None
+        referee_tg_id = None
+
+    if rewarded:
+        # Пуш тому, кто дал ссылку
+        if referrer_tg_id:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=referrer_tg_id,
+                    text=(
+                        "🤝 <b>Друг выполнил условия реферальной программы!</b>\n\n"
+                        "Тебе начислено <b>2 дня GlowShot Премиум</b> за приглашение.\n"
+                        "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
+                    ),
+                    reply_markup=build_referral_thanks_keyboard(),
+                )
+            except Exception:
+                pass
+
+        # Пуш другу
+        if referee_tg_id:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=referee_tg_id,
+                    text=(
+                        "🎉 <b>Ты выполнил условия реферальной программы!</b>\n\n"
+                        "За регистрацию и участие в оценке фотографий тебе начислено "
+                        "<b>2 дня GlowShot Премиум</b>.\n"
+                        "Продолжай выкладывать свои кадры и оценивать работы других 💎"
+                    ),
+                    reply_markup=build_referral_thanks_keyboard(),
+                )
+            except Exception:
+                pass
+
     await show_next_photo_for_rating(callback, user["id"])
+
+    await state.clear()
 
 
 from datetime import date

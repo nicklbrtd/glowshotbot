@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup
 from utils.time import get_moscow_now
 
-from database import get_user_by_tg_id, is_user_premium_active
+from database import get_user_by_tg_id, is_user_premium_active, save_pending_referral
 from keyboards.common import build_main_menu
 
 router = Router()
@@ -159,9 +159,25 @@ def build_menu_text(is_premium: bool) -> str:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    # Разбираем payload у /start (например: /start ref_GSXXXXXX)
+    payload = None
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) == 2:
+            payload = parts[1].strip()
+
     user = await get_user_by_tg_id(message.from_user.id)
 
     if user is None:
+        # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
+        if payload and payload.startswith("ref_"):
+            ref_code = payload[4:].strip()
+            if ref_code:
+                try:
+                    await save_pending_referral(message.from_user.id, ref_code)
+                except Exception:
+                    pass
+
         text = (
             "Привет! Это <b>GlowShot</b> — бот для тех, кто любит фотографировать.\n\n"
             "Здесь мы оцениваем <b>кадры</b>.\n"
