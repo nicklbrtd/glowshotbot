@@ -85,7 +85,12 @@ async def _get_admin_context(state: FSMContext) -> tuple[int | None, int | None]
 
 
 # ================= HELPER: Edit last role prompt or answer =================
-async def _edit_role_prompt_or_answer(message: Message, state: FSMContext, text: str):
+async def _edit_role_prompt_or_answer(
+    message: Message,
+    state: FSMContext,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
     """
     Попробовать отредактировать последнее служебное сообщение бота в разделе ролей.
     Если данных о сообщении нет или редактирование не удалось — отправляем новый ответ.
@@ -100,12 +105,13 @@ async def _edit_role_prompt_or_answer(message: Message, state: FSMContext, text:
                 chat_id=chat_id,
                 message_id=msg_id,
                 text=text,
+                reply_markup=reply_markup,
             )
             return
         except Exception:
             pass
 
-    await message.answer(text)
+    await message.answer(text, reply_markup=reply_markup)
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
@@ -607,6 +613,12 @@ async def role_add_user(message: Message, state: FSMContext):
         return
 
     identifier = (message.text or "").strip()
+    # Удаляем сообщение админа из чата, чтобы не плодить лишний текст
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     user = await _find_user_by_identifier(identifier)
 
     if not user:
@@ -615,7 +627,7 @@ async def role_add_user(message: Message, state: FSMContext):
             state,
             "Пользователь не найден.\n\n"
             "Убедись, что он уже запускал бота, и попробуй ещё раз.\n"
-            "Можно ввести числовой ID или @username."
+            "Можно ввести числовой ID или @username.",
         )
         return
 
@@ -640,7 +652,7 @@ async def role_add_user(message: Message, state: FSMContext):
             f"Выдаём премиум-подписку пользователю {name} — ID <code>{tg_id}</code>{extra}.\n\n"
             "На какой срок выдать премиум?\n"
             "• Напиши количество дней (например: <code>7</code> или <code>30</code>);\n"
-            "• или отправь <b>навсегда</b>, чтобы выдать бессрочный премиум."
+            "• или отправь <b>навсегда</b>, чтобы выдать бессрочный премиум.",
         )
         return
 
@@ -648,11 +660,53 @@ async def role_add_user(message: Message, state: FSMContext):
     await cfg["set_func"](tg_id, True)
     extra = f" (@{username})" if username else ""
 
+    # Клавиатура после успешной выдачи роли
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ В роли", callback_data="admin:roles")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
     await _edit_role_prompt_or_answer(
         message,
         state,
-        f"Роль {cfg['name_single']} выдана пользователю {name} — ID <code>{tg_id}</code>{extra} ✅"
+        f"Роль {cfg['name_single']} выдана пользователю {name} — ID <code>{tg_id}</code>{extra} ✅",
+        reply_markup=kb.as_markup(),
     )
+
+    # Уведомление пользователю о новой роли
+    try:
+        notif_kb = InlineKeyboardBuilder()
+        notif_kb.button(text="✅ Просмотрено", callback_data="admin:notif_read")
+        notif_kb.adjust(1)
+
+        if role_code == "moderator":
+            notif_text = (
+                "🛡 <b>Тебе выдана роль модератора</b>\n\n"
+                "Теперь ты можешь помогать следить за порядком и жалобами в GlowShot."
+            )
+        elif role_code == "helper":
+            notif_text = (
+                "🤝 <b>Тебе выдана роль помощника</b>\n\n"
+                "Ты помогаешь проекту с ручными задачами и тестами. Спасибо за поддержку!"
+            )
+        elif role_code == "support":
+            notif_text = (
+                "👨‍💻 <b>Тебе выдана роль поддержки</b>\n\n"
+                "Теперь ты можешь отвечать пользователям и помогать им в саппорте."
+            )
+        else:
+            notif_text = (
+                "⭐️ <b>Тебе выдана новая роль</b>\n\n"
+                "Спасибо, что помогаешь проекту GlowShot."
+            )
+
+        await message.bot.send_message(
+            chat_id=tg_id,
+            text=notif_text,
+            reply_markup=notif_kb.as_markup(),
+        )
+    except Exception:
+        pass
 
     await state.clear()
 
@@ -673,11 +727,22 @@ async def role_set_premium_duration(message: Message, state: FSMContext):
         await _edit_role_prompt_or_answer(
             message,
             state,
-            "Данные о пользователе потерялись. Попробуй выдать премиум ещё раз."
+            "Данные о пользователе потерялись. Попробуй выдать премиум ещё раз.",
         )
         return
 
     raw = (message.text or "").strip().lower()
+    # Удаляем сообщение админа, чтобы не копить текст
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Клавиатура для возврата после успешной выдачи премиума
+    kb_done = InlineKeyboardBuilder()
+    kb_done.button(text="⬅️ В роли", callback_data="admin:roles")
+    kb_done.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb_done.adjust(1, 1)
 
     # Бессрочный премиум
     if raw in ("навсегда", "бессрочно", "навечно", "forever", "∞"):
@@ -688,15 +753,15 @@ async def role_set_premium_duration(message: Message, state: FSMContext):
             message,
             state,
             f"Премиум-подписка выдана пользователю {name} — ID <code>{tg_id}</code>{extra} "
-            f"на <b>бессрочный</b> период ✅"
+            f"на <b>бессрочный</b> период ✅",
+            reply_markup=kb_done.as_markup(),
         )
 
         await state.clear()
 
         # Уведомление пользователю о бессрочном премиуме
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
         notif_kb = InlineKeyboardBuilder()
-        notif_kb.button(text="✅ Прочитано", callback_data="profile:premium_notif_read")
+        notif_kb.button(text="✅ Просмотрено", callback_data="admin:notif_read")
         notif_kb.adjust(1)
 
         notif_text = (
@@ -725,7 +790,7 @@ async def role_set_premium_duration(message: Message, state: FSMContext):
             state,
             "Не понял срок премиума.\n\n"
             "Напиши число дней (например: <code>7</code> или <code>30</code>) "
-            "или отправь <b>навсегда</b>."
+            "или отправь <b>навсегда</b>.",
         )
         return
 
@@ -733,7 +798,7 @@ async def role_set_premium_duration(message: Message, state: FSMContext):
         await _edit_role_prompt_or_answer(
             message,
             state,
-            "Срок должен быть больше нуля. Попробуй ещё раз."
+            "Срок должен быть больше нуля. Попробуй ещё раз.",
         )
         return
 
@@ -750,15 +815,15 @@ async def role_set_premium_duration(message: Message, state: FSMContext):
         message,
         state,
         f"Премиум-подписка выдана пользователю {name} — ID <code>{tg_id}</code>{extra} "
-        f"на <b>{days}</b> дн. (до {human_until}) ✅"
+        f"на <b>{days}</b> дн. (до {human_until}) ✅",
+        reply_markup=kb_done.as_markup(),
     )
 
     await state.clear()
 
     # Уведомление пользователю о премиуме с конкретным сроком
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
     notif_kb = InlineKeyboardBuilder()
-    notif_kb.button(text="✅ Прочитано", callback_data="profile:premium_notif_read")
+    notif_kb.button(text="✅ Просмотрено", callback_data="admin:notif_read")
     notif_kb.adjust(1)
 
     notif_text = (
@@ -793,13 +858,21 @@ async def role_remove_user(message: Message, state: FSMContext):
         return
 
     identifier = (message.text or "").strip()
+    # Удаляем сообщение админа
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     user = await _find_user_by_identifier(identifier)
 
     if not user:
-        await message.answer(
+        await _edit_role_prompt_or_answer(
+            message,
+            state,
             "Пользователь не найден.\n\n"
             "Убедись, что он уже запускал бота, и попробуй ещё раз.\n"
-            "Можно ввести числовой ID или @username."
+            "Можно ввести числовой ID или @username.",
         )
         return
 
@@ -808,12 +881,37 @@ async def role_remove_user(message: Message, state: FSMContext):
     name = user.get("name") or "Без имени"
 
     await cfg["set_func"](tg_id, False)
-    await state.clear()
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ В роли", callback_data="admin:roles")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
 
     extra = f" (@{username})" if username else ""
-    await message.answer(
-        f"Роль {cfg['name_single']} снята с пользователя {name} — ID <code>{tg_id}</code>{extra} ✅"
+    await _edit_role_prompt_or_answer(
+        message,
+        state,
+        f"Роль {cfg['name_single']} снята с пользователя {name} — ID <code>{tg_id}</code>{extra} ✅",
+        reply_markup=kb.as_markup(),
     )
+
+    await state.clear()
+
+
+# ====== Универсальный хендлер для кнопки «Просмотрено» ======
+@router.callback_query(F.data == "admin:notif_read")
+async def admin_notif_read(callback: CallbackQuery):
+    """
+    Универсальная кнопка для пуш-уведомлений:
+    по нажатию удаляет сообщение с уведомлением.
+    """
+    try:
+        await callback.message.delete()
+    except Exception:
+        try:
+            await callback.answer("Уведомление скрыто.")
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "admin:help_reports")
