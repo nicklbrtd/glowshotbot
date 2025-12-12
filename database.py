@@ -486,6 +486,87 @@ async def create_custom_award_for_user(
         return cursor.lastrowid
 
 
+
+async def get_user_admin_stats(user_id: int) -> dict:
+    """
+    Расширенная статистика активности пользователя для админ-раздела «Пользователи».
+
+    Считаем по фактическим действиям в базе:
+    • сколько оценок он поставил;
+    • сколько оставил комментариев;
+    • сколько создал жалоб;
+    • сколько всего активных фото у него сейчас;
+    • сколько всего фото он когда‑либо загружал;
+    • сколько раз для него заводили ограничение на загрузку (user_upload_bans).
+
+    Поле messages_total — суммарное число действий, которые считаем «сообщениями в боте».
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Оценки
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        ratings_given = int(row[0] or 0)
+
+        # Комментарии
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM comments WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        comments_given = int(row[0] or 0)
+
+        # Жалобы, созданные этим пользователем
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM photo_reports WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        reports_created = int(row[0] or 0)
+
+        # Всего фото и активные фото
+        cursor = await db.execute(
+            """
+            SELECT
+                SUM(CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END) AS active_count,
+                COUNT(*) AS total_count
+            FROM photos
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        active_photos = int((row[0] or 0) if row else 0)
+        total_photos = int((row[1] or 0) if row else 0)
+
+        # Ограничения на загрузку (user_upload_bans)
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM user_upload_bans WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        upload_bans_count = int(row[0] or 0)
+
+    messages_total = int(ratings_given + comments_given + reports_created)
+
+    return {
+        "messages_total": messages_total,
+        "ratings_given": ratings_given,
+        "comments_given": comments_given,
+        "reports_created": reports_created,
+        "active_photos": active_photos,
+        "total_photos": total_photos,
+        "upload_bans_count": upload_bans_count,
+    }
+
 # ====== PHOTOS COUNT BY USER ======
 
 async def count_photos_by_user(user_id: int) -> int:

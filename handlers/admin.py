@@ -12,6 +12,7 @@ from aiogram.filters import Command
 
 from database import (
     get_user_by_tg_id,
+    get_user_block_status_by_tg_id,
     set_user_admin_by_tg_id,
     get_total_users,
     get_all_users_tg_ids,
@@ -41,7 +42,290 @@ from database import (
     get_premium_stats,
     get_blocked_users_page,
     get_users_with_multiple_daily_top3,
+    get_user_admin_stats,
+    get_user_rating_summary,
 )
+# ================= HELPER: Edit last user prompt or answer =================
+async def _edit_user_prompt_or_answer(
+    message: Message,
+    state: FSMContext,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """
+    Универсальный helper для раздела «Пользователи».
+    Пытаемся отредактировать последнее служебное сообщение,
+    в котором ведём диалог по пользователю.
+    """
+    data = await state.get_data()
+    chat_id = data.get("user_prompt_chat_id")
+    msg_id = data.get("user_prompt_msg_id")
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            pass
+
+    await message.answer(text, reply_markup=reply_markup)
+class UserAdminStates(StatesGroup):
+    """
+    FSM для раздела «Пользователи»:
+    - просмотр профиля по @username / ID;
+    - подготовка к выдаче бана.
+    """
+    waiting_identifier_for_profile = State()
+    waiting_identifier_for_block = State()
+@router.callback_query(F.data == "admin:users")
+async def admin_users_menu(callback: CallbackQuery, state: FSMContext):
+    """Главное меню раздела «Пользователи»."""
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    # При входе в раздел очищаем предыдущее состояние
+    await state.clear()
+
+    text = (
+        "<b>Пользователи</b>\n\n"
+        "Здесь можно:\n"
+        "• Найти пользователя и посмотреть подробный профиль;\n"
+        "• В будущем — выдавать / снимать бан и ограничивать доступ к боту.\n\n"
+        "Пока доступен только подробный поиск по пользователю."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔍 Найти пользователя", callback_data="admin:users:find")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    try:
+        msg = await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        msg = await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await state.update_data(
+        user_prompt_chat_id=msg.chat.id,
+        user_prompt_msg_id=msg.message_id,
+    )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:users:find")
+async def admin_users_find_start(callback: CallbackQuery, state: FSMContext):
+    """Старт поиска пользователя по @username или Telegram ID."""
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await state.set_state(UserAdminStates.waiting_identifier_for_profile)
+
+    text = (
+        "<b>Поиск пользователя</b>\n\n"
+        "Пришли @username или числовой Telegram ID пользователя.\n\n"
+        "Примеры:\n"
+        "<code>@nickname</code>\n"
+        "<code>123456789</code>\n\n"
+        "Я покажу подробный профиль и базовую статистику."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ К разделу «Пользователи»", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    await state.update_data(
+        user_prompt_chat_id=callback.message.chat.id,
+        user_prompt_msg_id=callback.message.message_id,
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.message(UserAdminStates.waiting_identifier_for_profile, F.text)
+async def admin_users_find_profile(message: Message, state: FSMContext):
+    """Поиск и показ подробного профиля пользователя для админа."""
+    identifier = (message.text or "").strip()
+    await message.delete()
+
+    if not identifier:
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Пустой запрос. Пришли @username или числовой ID пользователя.",
+        )
+        return
+
+    user = await _find_user_by_identifier(identifier)
+    if user is None:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ К разделу «Пользователи»", callback_data="admin:users")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Пользователь не найден. Проверь @username или ID и попробуй ещё раз.",
+            reply_markup=kb.as_markup(),
+        )
+        return
+
+    internal_id = user["id"]
+    tg_id = user.get("tg_id")
+    username = user.get("username")
+    name = user.get("name") or "Без имени"
+    gender = user.get("gender") or "—"
+    age = user.get("age")
+    bio = (user.get("bio") or "").strip()
+    created_at = user.get("created_at")
+    updated_at = user.get("updated_at")
+    is_admin_flag = bool(user.get("is_admin"))
+    is_moderator_flag = bool(user.get("is_moderator"))
+    is_support_flag = bool(user.get("is_support"))
+    is_helper_flag = bool(user.get("is_helper"))
+    is_deleted = bool(user.get("is_deleted"))
+    is_premium = bool(user.get("is_premium"))
+    premium_until = user.get("premium_until")
+
+    # Статусы блокировки (ограничения на загрузку)
+    block_status = await get_user_block_status_by_tg_id(tg_id) if tg_id else {}
+    is_blocked = bool(block_status.get("is_blocked"))
+    blocked_until = block_status.get("blocked_until")
+    blocked_reason = block_status.get("blocked_reason")
+
+    # Рейтинг и активность
+    rating_summary = await get_user_rating_summary(internal_id)
+    admin_stats = await get_user_admin_stats(internal_id)
+    awards = await get_awards_for_user(internal_id)
+
+    avg_rating = rating_summary.get("avg_rating")
+    ratings_count = rating_summary.get("ratings_count")
+
+    messages_total = admin_stats["messages_total"]
+    ratings_given = admin_stats["ratings_given"]
+    comments_given = admin_stats["comments_given"]
+    reports_created = admin_stats["reports_created"]
+    active_photos = admin_stats["active_photos"]
+    total_photos = admin_stats["total_photos"]
+    upload_bans_count = admin_stats["upload_bans_count"]
+
+    awards_count = len(awards)
+    has_beta_award = any(
+        (a.get("code") == "beta_tester")
+        or ("бета-тестер бота" in (a.get("title") or "").lower())
+        for a in awards
+    )
+
+    def _fmt_dt(dt_str: str | None) -> str:
+        if not dt_str:
+            return "—"
+        try:
+            dt = datetime.fromisoformat(dt_str)
+            return dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            return dt_str
+
+    if is_premium:
+        if premium_until:
+            premium_text = f"активен до { _fmt_dt(premium_until) }"
+        else:
+            premium_text = "активен (без срока)"
+    else:
+        premium_text = "нет"
+
+    if is_blocked:
+        if blocked_until:
+            block_text = f"да, до { _fmt_dt(blocked_until) }"
+        else:
+            block_text = "да, без срока"
+        if blocked_reason:
+            block_text += f"\nПричина: {blocked_reason}"
+    else:
+        block_text = "нет"
+
+    if avg_rating is not None and ratings_count:
+        rating_line = f"• Рейтинг: <b>{avg_rating:.1f}</b> (оценок: {ratings_count})"
+    else:
+        rating_line = "• Рейтинг: —"
+
+    header_parts = [
+        "<b>Профиль пользователя</b>",
+        "",
+        f"ID в базе: <code>{internal_id}</code>",
+        f"Telegram ID: <code>{tg_id}</code>",
+        f"Username: {'@' + username if username else '—'}",
+        f"Имя: {name}",
+        "",
+        f"Пол: {gender}",
+        f"Возраст: {age if age is not None else '—'}",
+        "",
+        f"Регистрация: { _fmt_dt(created_at) }",
+        f"Последнее обновление: { _fmt_dt(updated_at) }",
+        "",
+        "<b>Роли</b>",
+        f"• Админ: {'да' if is_admin_flag else 'нет'}",
+        f"• Модератор: {'да' if is_moderator_flag else 'нет'}",
+        f"• Поддержка: {'да' if is_support_flag else 'нет'}",
+        f"• Помощник: {'да' if is_helper_flag else 'нет'}",
+        "",
+        "<b>Статусы</b>",
+        f"• Премиум: {premium_text}",
+        f"• Бан на загрузку: {block_text}",
+        f"• Удалён из базы: {'да' if is_deleted else 'нет'}",
+        "",
+        "<b>Активность</b>",
+        f"• Всего действий (оценки / комментарии / жалобы): <b>{messages_total}</b>",
+        f"• Оценок поставил: <b>{ratings_given}</b>",
+        f"• Комментариев: <b>{comments_given}</b>",
+        f"• Жалоб на фото отправил: <b>{reports_created}</b>",
+        f"• Фото сейчас активно: <b>{active_photos}</b>",
+        f"• Всего фото загружал: <b>{total_photos}</b>",
+        f"• Ограничений на загрузку: <b>{upload_bans_count}</b>",
+        "",
+        "<b>Награды</b>",
+        f"• Всего наград: <b>{awards_count}</b>",
+        f"• Есть «Бета‑тестер бота»: {'да' if has_beta_award else 'нет'}",
+    ]
+
+    if bio:
+        header_parts.append("")
+        header_parts.append(f"<b>О себе</b>\n{bio}")
+
+    text = "\n".join(header_parts)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ К разделу «Пользователи»", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    await _edit_user_prompt_or_answer(
+        message,
+        state,
+        text=text,
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(UserAdminStates.waiting_identifier_for_profile)
+async def admin_users_find_profile_non_text(message: Message):
+    """Любой не-текст в режиме поиска пользователя просто удаляем."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
 # ====== AchievementStates: FSM для работы с ачивками ======
 class AchievementStates(StatesGroup):
     """
