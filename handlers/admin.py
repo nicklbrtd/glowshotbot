@@ -44,6 +44,8 @@ from database import (
     get_users_with_multiple_daily_top3,
     get_user_admin_stats,
     get_user_rating_summary,
+    get_today_photo_for_user,
+    get_photo_admin_stats,
 )
 
 router = Router()
@@ -80,31 +82,37 @@ async def _edit_user_prompt_or_answer(
 class UserAdminStates(StatesGroup):
     """
     FSM для раздела «Пользователи»:
-    - просмотр профиля по @username / ID;
-    - подготовка к выдаче бана.
+    - ожидание идентификатора пользователя (ID / @username);
+    - дальнейшие операции выполняются через callback-и (фото, бан, ограничить, статистика).
     """
     waiting_identifier_for_profile = State()
-    waiting_identifier_for_block = State()
+
+
 @router.callback_query(F.data == "admin:users")
 async def admin_users_menu(callback: CallbackQuery, state: FSMContext):
-    """Главное меню раздела «Пользователи»."""
+    """
+    Главный вход в раздел «Пользователи».
+
+    Сразу просим у админа @username или Telegram ID нужного пользователя.
+    """
     user = await _ensure_admin(callback)
     if user is None:
         return
 
-    # При входе в раздел очищаем предыдущее состояние
+    # При входе в раздел очищаем предыдущее состояние и ставим ожидание идентификатора
     await state.clear()
+    await state.set_state(UserAdminStates.waiting_identifier_for_profile)
 
     text = (
         "<b>Пользователи</b>\n\n"
-        "Здесь можно:\n"
-        "• Найти пользователя и посмотреть подробный профиль;\n"
-        "• В будущем — выдавать / снимать бан и ограничивать доступ к боту.\n\n"
-        "Пока доступен только подробный поиск по пользователю."
+        "Отправь @username или числовой Telegram ID пользователя.\n\n"
+        "Примеры:\n"
+        "<code>@nickname</code>\n"
+        "<code>123456789</code>\n\n"
+        "Я покажу полный профиль и дам кнопки: фотография, бан, ограничение, статистика."
     )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔍 Найти пользователя", callback_data="admin:users:find")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
@@ -116,76 +124,25 @@ async def admin_users_menu(callback: CallbackQuery, state: FSMContext):
     await state.update_data(
         user_prompt_chat_id=msg.chat.id,
         user_prompt_msg_id=msg.message_id,
+        selected_user_id=None,
+        selected_user_tg_id=None,
+        selected_user_profile=None,
     )
 
     await callback.answer()
 
 
-@router.callback_query(F.data == "admin:users:find")
-async def admin_users_find_start(callback: CallbackQuery, state: FSMContext):
-    """Старт поиска пользователя по @username или Telegram ID."""
-    user = await _ensure_admin(callback)
-    if user is None:
-        return
-
-    await state.set_state(UserAdminStates.waiting_identifier_for_profile)
-
-    text = (
-        "<b>Поиск пользователя</b>\n\n"
-        "Пришли @username или числовой Telegram ID пользователя.\n\n"
-        "Примеры:\n"
-        "<code>@nickname</code>\n"
-        "<code>123456789</code>\n\n"
-        "Я покажу подробный профиль и базовую статистику."
-    )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ К разделу «Пользователи»", callback_data="admin:users")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1, 1)
-
-    await state.update_data(
-        user_prompt_chat_id=callback.message.chat.id,
-        user_prompt_msg_id=callback.message.message_id,
-    )
-
-    try:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
-    except Exception:
-        await callback.message.answer(text, reply_markup=kb.as_markup())
-
-    await callback.answer()
-
-
-@router.message(UserAdminStates.waiting_identifier_for_profile, F.text)
-async def admin_users_find_profile(message: Message, state: FSMContext):
-    """Поиск и показ подробного профиля пользователя для админа."""
-    identifier = (message.text or "").strip()
-    await message.delete()
-
-    if not identifier:
-        await _edit_user_prompt_or_answer(
-            message,
-            state,
-            "Пустой запрос. Пришли @username или числовой ID пользователя.",
-        )
-        return
-
-    user = await _find_user_by_identifier(identifier)
-    if user is None:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="⬅️ К разделу «Пользователи»", callback_data="admin:users")
-        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-        kb.adjust(1, 1)
-
-        await _edit_user_prompt_or_answer(
-            message,
-            state,
-            "Пользователь не найден. Проверь @username или ID и попробуй ещё раз.",
-            reply_markup=kb.as_markup(),
-        )
-        return
-
+async def _render_admin_user_profile(
+    user: dict,
+    block_status: dict,
+    rating_summary: dict,
+    admin_stats: dict,
+    awards: list[dict],
+) -> str:
+    """
+    Сборка текста профиля пользователя для админ-раздела.
+    Вынесено в отдельную функцию, чтобы можно было переиспользовать (например, для кнопки «Назад к профилю»).
+    """
     internal_id = user["id"]
     tg_id = user.get("tg_id")
     username = user.get("username")
@@ -203,16 +160,9 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
     is_premium = bool(user.get("is_premium"))
     premium_until = user.get("premium_until")
 
-    # Статусы блокировки (ограничения на загрузку)
-    block_status = await get_user_block_status_by_tg_id(tg_id) if tg_id else {}
     is_blocked = bool(block_status.get("is_blocked"))
     blocked_until = block_status.get("blocked_until")
     blocked_reason = block_status.get("blocked_reason")
-
-    # Рейтинг и активность
-    rating_summary = await get_user_rating_summary(internal_id)
-    admin_stats = await get_user_admin_stats(internal_id)
-    awards = await get_awards_for_user(internal_id)
 
     avg_rating = rating_summary.get("avg_rating")
     ratings_count = rating_summary.get("ratings_count")
@@ -290,6 +240,7 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
         f"• Удалён из базы: {'да' if is_deleted else 'нет'}",
         "",
         "<b>Активность</b>",
+        rating_line,
         f"• Всего действий (оценки / комментарии / жалобы): <b>{messages_total}</b>",
         f"• Оценок поставил: <b>{ratings_given}</b>",
         f"• Комментариев: <b>{comments_given}</b>",
@@ -307,12 +258,75 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
         header_parts.append("")
         header_parts.append(f"<b>О себе</b>\n{bio}")
 
-    text = "\n".join(header_parts)
+    return "\n".join(header_parts)
+
+
+@router.message(UserAdminStates.waiting_identifier_for_profile, F.text)
+async def admin_users_find_profile(message: Message, state: FSMContext):
+    """Поиск и показ подробного профиля пользователя для админа."""
+    identifier = (message.text or "").strip()
+    await message.delete()
+
+    if not identifier:
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Пустой запрос. Пришли @username или числовой ID пользователя.",
+        )
+        return
+
+    user = await _find_user_by_identifier(identifier)
+    if user is None:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Пользователь не найден. Проверь @username или ID и попробуй ещё раз.",
+            reply_markup=kb.as_markup(),
+        )
+        return
+
+    internal_id = user["id"]
+    tg_id = user.get("tg_id")
+
+    # Статусы блокировки (ограничения на загрузку)
+    block_status = await get_user_block_status_by_tg_id(tg_id) if tg_id else {}
+    # Рейтинг и активность
+    rating_summary = await get_user_rating_summary(internal_id)
+    admin_stats = await get_user_admin_stats(internal_id)
+    awards = await get_awards_for_user(internal_id)
+
+    text = await _render_admin_user_profile(
+        user=user,
+        block_status=block_status,
+        rating_summary=rating_summary,
+        admin_stats=admin_stats,
+        awards=awards,
+    )
+
+    # Сохраняем выбранного пользователя в FSM для дальнейших действий
+    await state.update_data(
+        selected_user_id=internal_id,
+        selected_user_tg_id=tg_id,
+        selected_user_profile=user,
+    )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ К разделу «Пользователи»", callback_data="admin:users")
+    kb.button(text="📸 Фотография", callback_data="admin:users:photo")
+    kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    is_blocked = bool(block_status.get("is_blocked"))
+    if is_blocked:
+        kb.button(text="♻️ Разбан", callback_data="admin:users:unban")
+    else:
+        kb.button(text="🚫 Бан", callback_data="admin:users:ban")
+    kb.button(text="⛔ Ограничить доступ", callback_data="admin:users:limit")
+    kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1, 1)
+    kb.adjust(2, 2, 2)
 
     await _edit_user_prompt_or_answer(
         message,
@@ -329,6 +343,265 @@ async def admin_users_find_profile_non_text(message: Message):
         await message.delete()
     except Exception:
         pass
+
+
+# ========== USERS: ФОТОГРАФИЯ ==========
+@router.callback_query(F.data == "admin:users:photo")
+async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
+    """
+    Показать актуальную фотографию выбранного пользователя
+    с подробной статистикой по этому кадру.
+    """
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    target_user_id = data.get("selected_user_id")
+    if not target_user_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    # Берём «текущую» фотографию пользователя — по аналогии с разделом «Моя фотография».
+    photo = await get_today_photo_for_user(target_user_id)
+    if not photo or photo.get("is_deleted"):
+        text = (
+            "У этого пользователя сейчас нет активной актуальной фотографии.\n\n"
+            "Он либо ещё ничего не загружал сегодня, либо работа уже удалена."
+        )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад к профилю", callback_data="admin:users:profile")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+
+        try:
+            await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb.as_markup())
+
+        await callback.answer()
+        return
+
+    stats = await get_photo_admin_stats(photo["id"])
+
+    title = (photo.get("title") or "Без названия").strip()
+    device_type = (photo.get("device_type") or "").strip()
+    device_info = (photo.get("device_info") or "").strip()
+    description = (photo.get("description") or "").strip()
+    created_at = photo.get("created_at")
+    moderation_status = (photo.get("moderation_status") or "active").strip()
+
+    def _fmt_dt(dt_str: str | None) -> str:
+        if not dt_str:
+            return "—"
+        try:
+            dt = datetime.fromisoformat(dt_str)
+            return dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            return dt_str
+
+    device_line = "устройство не указано"
+    if device_type and device_info:
+        device_line = f"{device_type} — {device_info}"
+    elif device_type:
+        device_line = device_type
+    elif device_info:
+        device_line = device_info
+
+    lines: list[str] = [
+        "<b>Фотография пользователя</b>",
+        "",
+        f"ID фото: <code>{photo['id']}</code>",
+        f"Название: <b>{title}</b>",
+        f"Устройство: {device_line}",
+        f"Загружена: { _fmt_dt(created_at) }",
+        f"Статус модерации: {moderation_status}",
+        "",
+        "<b>Статистика по кадру</b>",
+    ]
+
+    avg_rating = stats["avg_rating"]
+    if avg_rating is not None and stats["ratings_count"] > 0:
+        lines.append(f"• Средний рейтинг: <b>{avg_rating:.1f}</b>")
+    else:
+        lines.append("• Средний рейтинг: —")
+
+    lines.extend(
+        [
+            f"• Оценок всего: <b>{stats['ratings_count']}</b>",
+            f"• Супер-оценок: <b>{stats['super_ratings_count']}</b>",
+            f"• Комментариев: <b>{stats['comments_count']}</b>",
+            f"• Жалоб всего: <b>{stats['reports_total']}</b>",
+            f"• Жалоб в ожидании: <b>{stats['reports_pending']}</b>",
+            f"• Жалоб решено: <b>{stats['reports_resolved']}</b>",
+        ]
+    )
+
+    if description:
+        lines.append("")
+        lines.append(f"📝 {description}")
+
+    caption = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к профилю", callback_data="admin:users:profile")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    # Чтобы не плодить сообщения: пробуем удалить старое и отправить новое с фото.
+    try:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        sent = await callback.message.bot.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=photo["file_id"],
+            caption=caption,
+            reply_markup=kb.as_markup(),
+            disable_notification=True,
+        )
+
+        await state.update_data(
+            user_prompt_chat_id=sent.chat.id,
+            user_prompt_msg_id=sent.message_id,
+        )
+    except Exception:
+        # В крайнем случае просто пробуем отредактировать подпись, если сообщение уже с фото.
+        try:
+            await callback.message.edit_caption(caption=caption, reply_markup=kb.as_markup())
+        except Exception:
+            await callback.message.answer(caption, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:users:profile")
+async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext):
+    """
+    Вернуться к экрану профиля пользователя, не запрашивая идентификатор заново.
+    """
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    user = data.get("selected_user_profile")
+    internal_id = data.get("selected_user_id")
+    tg_id = data.get("selected_user_tg_id")
+
+    if not user or not internal_id or not tg_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    block_status = await get_user_block_status_by_tg_id(tg_id)
+    rating_summary = await get_user_rating_summary(internal_id)
+    admin_stats = await get_user_admin_stats(internal_id)
+    awards = await get_awards_for_user(internal_id)
+
+    text = await _render_admin_user_profile(
+        user=user,
+        block_status=block_status,
+        rating_summary=rating_summary,
+        admin_stats=admin_stats,
+        awards=awards,
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📸 Фотография", callback_data="admin:users:photo")
+    kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    is_blocked = bool(block_status.get("is_blocked"))
+    if is_blocked:
+        kb.button(text="♻️ Разбан", callback_data="admin:users:unban")
+    else:
+        kb.button(text="🚫 Бан", callback_data="admin:users:ban")
+    kb.button(text="⛔ Ограничить доступ", callback_data="admin:users:limit")
+    kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 2, 2)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:users:stats")
+async def admin_users_stats(callback: CallbackQuery, state: FSMContext):
+    """
+    Отдельный экран со статистикой пользователя.
+    """
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    internal_id = data.get("selected_user_id")
+
+    if not internal_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    rating_summary = await get_user_rating_summary(internal_id)
+    admin_stats = await get_user_admin_stats(internal_id)
+
+    avg_rating = rating_summary.get("avg_rating")
+    ratings_count = rating_summary.get("ratings_count")
+
+    messages_total = admin_stats["messages_total"]
+    ratings_given = admin_stats["ratings_given"]
+    comments_given = admin_stats["comments_given"]
+    reports_created = admin_stats["reports_created"]
+    active_photos = admin_stats["active_photos"]
+    total_photos = admin_stats["total_photos"]
+    upload_bans_count = admin_stats["upload_bans_count"]
+
+    if avg_rating is not None and ratings_count:
+        rating_line = f"• Рейтинг: <b>{avg_rating:.1f}</b> (оценок: {ratings_count})"
+    else:
+        rating_line = "• Рейтинг: —"
+
+    text_lines = [
+        "<b>Статистика пользователя</b>",
+        "",
+        rating_line,
+        f"• Всего действий (оценки / комментарии / жалобы): <b>{messages_total}</b>",
+        f"• Оценок поставил: <b>{ratings_given}</b>",
+        f"• Комментариев: <b>{comments_given}</b>",
+        f"• Жалоб на фото отправил: <b>{reports_created}</b>",
+        f"• Фото сейчас активно: <b>{active_photos}</b>",
+        f"• Всего фото загружал: <b>{total_photos}</b>",
+        f"• Ограничений на загрузку: <b>{upload_bans_count}</b>",
+    ]
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к профилю", callback_data="admin:users:profile")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text("\n".join(text_lines), reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer("\n".join(text_lines), reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+# ====== USERS: БАН / РАЗБАН / ОГРАНИЧИТЬ (ЗАГЛУШКИ) ======
+
+@router.callback_query(F.data == "admin:users:ban")
+async def admin_users_ban(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Бан пользователя — пока заглушка.", show_alert=True)
+
+@router.callback_query(F.data == "admin:users:unban")
+async def admin_users_unban(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Разбан пользователя — пока заглушка.", show_alert=True)
+
+@router.callback_query(F.data == "admin:users:limit")
+async def admin_users_limit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Ограничить доступ — пока заглушка.", show_alert=True)
 # ====== AchievementStates: FSM для работы с ачивками ======
 class AchievementStates(StatesGroup):
     """
