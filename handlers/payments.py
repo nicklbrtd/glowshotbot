@@ -8,12 +8,15 @@ from aiogram.types import (
     Message,
     InlineKeyboardMarkup,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from keyboards.common import build_viewed_kb, build_back_kb
-
 from config import PAYMENT_PROVIDER_TOKEN
-from database import set_user_premium_status
+
+from database import (
+    set_user_premium_status,
+    log_successful_payment,
+)
 from utils.time import get_moscow_now
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 router = Router(name="payments")
 
@@ -22,24 +25,24 @@ router = Router(name="payments")
 TARIFFS = {
     "7d": {
         "days": 7,
-        "price_rub": 99,
-        "price_stars": 5,
+        "price_rub": 79,
+        "price_stars": 70,
         "title": "GlowShot Premium — 7 дней",
         "label": "Премиум на 7 дней",
         "description": "Доступ ко всем премиум-функциям на 7 дней.",
     },
     "30d": {
         "days": 30,
-        "price_rub": 249,
-        "price_stars": 15,
+        "price_rub": 239,
+        "price_stars": 200,
         "title": "GlowShot Premium — 30 дней",
         "label": "Премиум на 30 дней",
         "description": "Доступ ко всем премиум-функциям на 30 дней.",
     },
     "90d": {
         "days": 90,
-        "price_rub": 599,
-        "price_stars": 40,
+        "price_rub": 569,
+        "price_stars": 500,
         "title": "GlowShot Premium — 90 дней",
         "label": "Премиум на 90 дней",
         "description": "Доступ ко всем премиум-функциям на 90 дней.",
@@ -308,6 +311,24 @@ async def process_successful_payment(message: Message):
         True,
         premium_until=premium_until_iso,
     )
+
+
+    # Логируем платёж в свою таблицу payments
+    try:
+        await log_successful_payment(
+            tg_id=message.from_user.id,
+            method=method,
+            period_code=period_code,
+            days=days,
+            amount=successful_payment.total_amount,
+            currency=successful_payment.currency,
+            telegram_charge_id=getattr(successful_payment, "telegram_payment_charge_id", None),
+            provider_charge_id=getattr(successful_payment, "provider_payment_charge_id", None),
+        )
+    except Exception:
+        # Если что-то пойдёт не так, оплата всё равно считается успешной
+        pass
+
 
     # Текст чуть-чуть различаем по способу оплаты чисто косметически
     if method == "rub":

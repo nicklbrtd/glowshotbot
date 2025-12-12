@@ -13,6 +13,7 @@ from database import (
     is_moderator_by_tg_id,
     set_user_moderator_by_tg_id,
     get_photo_by_id,
+    mark_photo_deleted,
     set_photo_moderation_status,
     get_next_photo_for_moderation,
     get_user_by_id,
@@ -316,7 +317,28 @@ async def show_next_photo_for_self_check(callback: CallbackQuery) -> None:
                 reply_markup=build_moderator_menu(),
             )
         return
-    
+
+    # Отправляем карточку с фото для самостоятельной проверки (source="self")
+    chat_id = callback.message.chat.id
+    caption = await _build_moderation_caption(
+        photo,
+        show_reports=True,
+        show_stats=True,
+    )
+
+    try:
+        await callback.message.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo["file_id"],
+            caption=caption,
+            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=chat_id,
+            text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
+            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+        )
 
 async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
     """
@@ -362,26 +384,161 @@ async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
         )
 
 
-    chat_id = callback.message.chat.id
-    caption = await _build_moderation_caption(
-        photo,
-        show_reports=True,
-        show_stats=True,
-    )
+# ================== Удаление фото и удаление+бан ==================
 
+@router.callback_query(F.data.startswith("mod:photo_delete:"))
+async def moderator_photo_delete(callback: CallbackQuery) -> None:
+    """
+    Удаление фотографии модератором.
+
+    Логика:
+    - помечаем фото как удалённое в БД (is_deleted = 1);
+    - выставляем статус модерации, чтобы оно не попадало в очереди;
+    - показываем следующую работу в том же режиме (очередь / детальная / самостоятельная).
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
+        )
+        return
+
+    parts = callback.data.split(":")
+    # ['mod', 'photo_delete', '<source>', '<photo_id>']
+    if len(parts) != 4:
+        await callback.answer("Не удалось разобрать команду удаления.", show_alert=True)
+        return
+
+    _, _, source, pid = parts
     try:
-        await callback.message.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo["file_id"],
-            caption=caption,
-            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+        photo_id = int(pid)
+    except ValueError:
+        await callback.answer("Некорректный идентификатор фотографии.", show_alert=True)
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo:
+        await callback.answer("Эта фотография уже недоступна.", show_alert=True)
+    else:
+        # Помечаем фото как удалённое «из всех разделов»
+        try:
+            await mark_photo_deleted(photo_id)
+        except Exception:
+            # Если что-то пошло не так — всё равно пытаемся убрать её из модерации
+            pass
+
+        try:
+            await set_photo_moderation_status(photo_id, "deleted_by_moderator")
+        except Exception:
+            # Если поле статуса по какой-то причине не обновилось — не критично,
+            # выборка по is_deleted всё равно не будет её показывать.
+            pass
+
+        await callback.answer("Фотография удалена и больше не участвует в оценивании.", show_alert=True)
+
+    # Переходим к следующей работе в зависимости от источника
+    try:
+        if source == "queue":
+            await show_next_photo_for_moderation(callback)
+        elif source == "deep":
+            await show_next_photo_for_deep_check(callback)
+        else:
+            # Для всего остального считаем, что это самостоятельная проверка
+            await show_next_photo_for_self_check(callback)
+    except Exception:
+        # Если не получилось показать следующую карточку, просто выходим в меню модерации
+        try:
+            await callback.message.edit_text(
+                "Раздел модерации.",
+                reply_markup=build_moderator_menu(),
+            )
+        except TelegramBadRequest:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text="Раздел модерации.",
+                    reply_markup=build_moderator_menu(),
+                )
+            except Exception:
+                pass
+
+
+@router.callback_query(F.data.startswith("mod:photo_delete_ban:"))
+async def moderator_photo_delete_and_ban(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Удалить фотографию и запустить процесс бана пользователя.
+
+    Пока реализуем только удаление фото «отовсюду», а механику бана
+    (с выбором срока и причины) докручиваем отдельно.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer(
+            "Этот раздел доступен только модераторам.",
+            show_alert=True,
         )
-    except TelegramBadRequest:
-        await callback.message.bot.send_message(
-            chat_id=chat_id,
-            text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
-            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+        return
+
+    parts = callback.data.split(":")
+    # ['mod', 'photo_delete_ban', '<source>', '<photo_id>']
+    if len(parts) != 4:
+        await callback.answer("Не удалось разобрать команду удаления.", show_alert=True)
+        return
+
+    _, _, source, pid = parts
+    try:
+        photo_id = int(pid)
+    except ValueError:
+        await callback.answer("Некорректный идентификатор фотографии.", show_alert=True)
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo:
+        await callback.answer("Эта фотография уже недоступна.", show_alert=True)
+    else:
+        try:
+            await mark_photo_deleted(photo_id)
+        except Exception:
+            pass
+
+        try:
+            await set_photo_moderation_status(photo_id, "deleted_by_moderator")
+        except Exception:
+            pass
+
+        # TODO: здесь можно запомнить пользователя и перевести модератора
+        # в состояние ввода причины/срока бана (используя FSM).
+        await callback.answer(
+            "Фотография удалена. Логику бана пользователя дополним позднее.",
+            show_alert=True,
         )
+
+    # Пытаемся продолжить модерацию в том же режиме
+    try:
+        if source == "queue":
+            await show_next_photo_for_moderation(callback)
+        elif source == "deep":
+            await show_next_photo_for_deep_check(callback)
+        else:
+            await show_next_photo_for_self_check(callback)
+    except Exception:
+        try:
+            await callback.message.edit_text(
+                "Раздел модерации.",
+                reply_markup=build_moderator_menu(),
+            )
+        except TelegramBadRequest:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text="Раздел модерации.",
+                    reply_markup=build_moderator_menu(),
+                )
+            except Exception:
+                pass
 
 
 @router.message(Command("moderator"))

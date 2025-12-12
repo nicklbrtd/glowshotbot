@@ -9,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
+from handlers.payments import TARIFFS
 
 from database import (
     get_user_by_tg_id,
@@ -46,6 +47,11 @@ from database import (
     get_user_rating_summary,
     get_today_photo_for_user,
     get_photo_admin_stats,
+    get_payments_count,
+    get_payments_page,
+    get_revenue_summary,
+    get_subscriptions_total,
+    get_subscriptions_page,
 )
 
 router = Router()
@@ -76,9 +82,36 @@ async def _edit_user_prompt_or_answer(
             )
             return
         except Exception:
-            pass
+            # Try to delete the old message
+            try:
+                await message.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+            # Send a new message
+            try:
+                sent = await message.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                )
+                # Update FSM state with the new message id
+                await state.update_data(
+                    user_prompt_chat_id=sent.chat.id,
+                    user_prompt_msg_id=sent.message_id,
+                )
+                return
+            except Exception:
+                pass
 
-    await message.answer(text, reply_markup=reply_markup)
+    # If no stored prompt message or all above failed, answer and store new ids
+    try:
+        sent = await message.answer(text, reply_markup=reply_markup)
+        await state.update_data(
+            user_prompt_chat_id=sent.chat.id,
+            user_prompt_msg_id=sent.message_id,
+        )
+    except Exception:
+        pass
 class UserAdminStates(StatesGroup):
     """
     FSM для раздела «Пользователи»:
@@ -521,11 +554,12 @@ async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(2, 2, 2)
 
-    try:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
-    except Exception:
-        await callback.message.answer(text, reply_markup=kb.as_markup())
-
+    await _edit_user_prompt_or_answer(
+        callback.message,
+        state,
+        text,
+        reply_markup=kb.as_markup(),
+    )
     await callback.answer()
 
 
@@ -588,6 +622,384 @@ async def admin_users_stats(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("\n".join(text_lines), reply_markup=kb.as_markup())
 
     await callback.answer()
+
+
+# ====== PAYMENTS: STATES & HELPERS ======
+class PaymentsStates(StatesGroup):
+    """
+    Состояния для раздела «Платежи».
+    Пока нужны только для хранения служебного сообщения.
+    """
+    idle = State()
+
+
+async def _edit_payments_prompt_or_answer(
+    message: Message,
+    state: FSMContext,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """
+    Helper для раздела «Платежи»: стараемся всегда держать одно служебное сообщение.
+    """
+    data = await state.get_data()
+    chat_id = data.get("payments_chat_id")
+    msg_id = data.get("payments_msg_id")
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            try:
+                await message.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+
+    try:
+        sent = await message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        sent = await message.answer(text, reply_markup=reply_markup)
+
+    await state.update_data(
+        payments_chat_id=sent.chat.id,
+        payments_msg_id=sent.message_id,
+    )
+
+
+# ====== PAYMENTS: MAIN MENU ======
+@router.callback_query(F.data == "admin:payments")
+async def admin_payments_menu(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    text = (
+        "<b>Платежи и подписки</b>\n\n"
+        "Здесь можно посмотреть:\n"
+        "• список успешных платежей;\n"
+        "• доходы за день / неделю / месяц;\n"
+        "• список активных тарифов;\n"
+        "• (позже) управление тарифами;\n"
+        "• подписки пользователей.\n"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📜 Список платежей", callback_data="admin:payments:list:1")
+    kb.button(text="💰 Доходы", callback_data="admin:payments:revenue")
+    kb.button(text="🏷 Тарифы и продукты", callback_data="admin:payments:tariffs")
+    kb.button(text="⚙️ Управление тарифами", callback_data="admin:payments:tariffs_manage")
+    kb.button(text="👥 Подписки пользователей", callback_data="admin:payments:subs:1")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_payments_prompt_or_answer(
+        callback.message,
+        state,
+        text,
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+# ====== PAYMENTS: LIST ======
+@router.callback_query(F.data.startswith("admin:payments:list"))
+async def admin_payments_list(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    page = 1
+    if len(parts) >= 4:
+        try:
+            page = int(parts[3])
+        except ValueError:
+            page = 1
+
+    total = await get_payments_count()
+    page_size = 20
+    max_page = max(1, (total + page_size - 1) // page_size)
+    if page > max_page:
+        page = max_page
+
+    rows = await get_payments_page(page, page_size=page_size)
+
+    lines: list[str] = [
+        "<b>Список успешных платежей</b>",
+        "",
+        f"Всего платежей: <b>{total}</b>",
+    ]
+
+    if not rows:
+        lines.append("")
+        lines.append("Пока нет ни одного успешного платежа.")
+    else:
+        lines.append("")
+        start_idx = (page - 1) * page_size + 1
+        for idx, p in enumerate(rows, start=start_idx):
+            created_at = p.get("created_at")
+            try:
+                dt = datetime.fromisoformat(created_at) if created_at else None
+                created_human = dt.strftime("%d.%m.%Y %H:%M") if dt else created_at
+            except Exception:
+                created_human = created_at or "—"
+
+            username = p.get("user_username")
+            name = p.get("user_name") or ""
+            tg_id = p.get("user_tg_id")
+            user_label = f"@{username}" if username else (name or f"ID {tg_id}")
+
+            method = p.get("method")
+            method_label = "💳 RUB" if method == "rub" else "⭐ Stars"
+
+            currency = p.get("currency")
+            amount = int(p.get("amount") or 0)
+            if currency == "RUB":
+                amount_human = f"{amount / 100:.2f} ₽"
+            else:
+                amount_human = f"{amount} ⭐"
+
+            period_code = p.get("period_code")
+            days = p.get("days")
+
+            lines.append(
+                f"{idx}. {created_human} — {user_label}\n"
+                f"   Тариф: {period_code} ({days} дн.), сумма: {amount_human}, способ: {method_label}"
+            )
+
+    lines.append("")
+    lines.append(f"Страница <b>{page}</b> из <b>{max_page}</b>.")
+
+    kb = InlineKeyboardBuilder()
+    if page > 1:
+        kb.button(
+            text="◀️ Назад",
+            callback_data=f"admin:payments:list:{page-1}",
+        )
+    if page < max_page:
+        kb.button(
+            text="▶️ Вперёд",
+            callback_data=f"admin:payments:list:{page+1}",
+        )
+    kb.button(text="⬅️ К разделу платежей", callback_data="admin:payments")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 1, 1)
+
+    await _edit_payments_prompt_or_answer(
+        callback.message,
+        state,
+        "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+# ====== PAYMENTS: REVENUE ======
+@router.callback_query(F.data == "admin:payments:revenue")
+async def admin_payments_revenue(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    day = await get_revenue_summary("day")
+    week = await get_revenue_summary("week")
+    month = await get_revenue_summary("month")
+
+    def fmt_block(label: str, data: dict) -> str:
+        rub_total = data.get("rub_total", 0.0) or 0.0
+        rub_count = data.get("rub_count", 0) or 0
+        stars_total = data.get("stars_total", 0) or 0
+        stars_count = data.get("stars_count", 0) or 0
+        return (
+            f"<b>{label}</b>\n"
+            f"• RUB: {rub_total:.2f} ₽ ({rub_count} платежей)\n"
+            f"• Stars: {stars_total} ⭐ ({stars_count} платежей)"
+        )
+
+    lines = [
+        "<b>Доходы</b>",
+        "",
+        fmt_block("За последние 24 часа", day),
+        "",
+        fmt_block("За последние 7 дней", week),
+        "",
+        fmt_block("За последние 30 дней", month),
+    ]
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ К разделу платежей", callback_data="admin:payments")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_payments_prompt_or_answer(
+        callback.message,
+        state,
+        "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+# ====== PAYMENTS: TARIFFS VIEW ======
+@router.callback_query(F.data == "admin:payments:tariffs")
+async def admin_payments_tariffs(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    lines = [
+        "<b>Тарифы и продукты</b>",
+        "",
+        "Сейчас доступны такие тарифы GlowShot Premium:",
+        "",
+    ]
+
+    for code, t in TARIFFS.items():
+        days = t.get("days")
+        price_rub = t.get("price_rub")
+        price_stars = t.get("price_stars")
+        title = t.get("title")
+        lines.append(
+            f"• <b>{title}</b>\n"
+            f"  Код: <code>{code}</code>, длительность: {days} дн.\n"
+            f"  Цена: {price_rub} ₽ или {price_stars} ⭐"
+        )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⚙️ Управление тарифами", callback_data="admin:payments:tariffs_manage")
+    kb.button(text="⬅️ К разделу платежей", callback_data="admin:payments")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_payments_prompt_or_answer(
+        callback.message,
+        state,
+        "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+# ====== PAYMENTS: TARIFFS MANAGE (stub) ======
+@router.callback_query(F.data == "admin:payments:tariffs_manage")
+async def admin_payments_tariffs_manage(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    text = (
+        "<b>Управление тарифами</b>\n\n"
+        "Сейчас тарифы заданы в коде (константа TARIFFS).\n"
+        "Позже здесь можно будет добавлять, скрывать и менять тарифы прямо из админки."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏷 Посмотреть тарифы", callback_data="admin:payments:tariffs")
+    kb.button(text="⬅️ К разделу платежей", callback_data="admin:payments")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_payments_prompt_or_answer(
+        callback.message,
+        state,
+        text,
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+# ====== PAYMENTS: SUBSCRIPTIONS ======
+@router.callback_query(F.data.startswith("admin:payments:subs"))
+async def admin_payments_subscriptions(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    page = 1
+    if len(parts) >= 4:
+        try:
+            page = int(parts[3])
+        except ValueError:
+            page = 1
+
+    total_users = await get_subscriptions_total()
+    page_size = 20
+    max_page = max(1, (total_users + page_size - 1) // page_size)
+    if page > max_page:
+        page = max_page
+
+    rows = await get_subscriptions_page(page, page_size=page_size)
+
+    lines: list[str] = [
+        "<b>Подписки пользователей</b>",
+        "",
+        f"Всего платящих пользователей: <b>{total_users}</b>",
+    ]
+
+    if not rows:
+        lines.append("")
+        lines.append("Пока нет ни одного пользователя с платёжной историей.")
+    else:
+        lines.append("")
+        start_idx = (page - 1) * page_size + 1
+        for idx, row in enumerate(rows, start=start_idx):
+            username = row.get("user_username")
+            name = row.get("user_name") or ""
+            tg_id = row.get("user_tg_id")
+            user_label = f"@{username}" if username else (name or f"ID {tg_id}")
+
+            last_payment_at = row.get("last_payment_at")
+            try:
+                dt = datetime.fromisoformat(last_payment_at) if last_payment_at else None
+                last_payment_human = dt.strftime("%d.%m.%Y %H:%M") if dt else last_payment_at
+            except Exception:
+                last_payment_human = last_payment_at or "—"
+
+            payments_count = int(row.get("payments_count") or 0)
+            total_days = int(row.get("total_days") or 0)
+            total_rub = float(row.get("total_rub") or 0.0)
+            total_stars = int(row.get("total_stars") or 0)
+
+            lines.append(
+                f"{idx}. {user_label}\n"
+                f"   Последний платёж: {last_payment_human}\n"
+                f"   Всего платежей: {payments_count}, всего дней: {total_days}\n"
+                f"   Оплачено: {total_rub:.2f} ₽ и {total_stars} ⭐"
+            )
+
+    lines.append("")
+    lines.append(f"Страница <b>{page}</b> из <b>{max_page}</b>.")
+
+    kb = InlineKeyboardBuilder()
+    if page > 1:
+        kb.button(
+            text="◀️ Назад",
+            callback_data=f"admin:payments:subs:{page-1}",
+        )
+    if page < max_page:
+        kb.button(
+            text="▶️ Вперёд",
+            callback_data=f"admin:payments:subs:{page+1}",
+        )
+    kb.button(text="⬅️ К разделу платежей", callback_data="admin:payments")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 1, 1)
+
+    await _edit_payments_prompt_or_answer(
+        callback.message,
+        state,
+        "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+    
 
 # ====== USERS: БАН / РАЗБАН / ОГРАНИЧИТЬ (ЗАГЛУШКИ) ======
 

@@ -152,8 +152,30 @@ async def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_moderator_reviews_mod_photo
                 ON moderator_reviews(moderator_id, photo_id);
+            );
+
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                method TEXT NOT NULL,          -- 'rub' или 'stars'
+                period_code TEXT NOT NULL,     -- '7d', '30d', '90d', ...
+                days INTEGER NOT NULL,
+                amount INTEGER NOT NULL,       -- RUB: в копейках, XTR: кол-во звёзд
+                currency TEXT NOT NULL,        -- 'RUB' или 'XTR'
+                created_at TEXT NOT NULL,      -- ISO-строка UTC
+                telegram_charge_id TEXT,
+                provider_charge_id TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_payments_created_at
+                ON payments(created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_payments_user
+                ON payments(user_id, created_at);
             """
         )
+        # Миграции для добавления новых полей в существующие таблицы
 
         try:
             await db.execute(
@@ -641,6 +663,241 @@ async def get_photo_admin_stats(photo_id: int) -> dict:
         "reports_pending": reports_pending,
         "reports_resolved": reports_resolved,
     }
+
+
+# ====== PAYMENTS & SUBSCRIPTIONS ======
+
+async def log_successful_payment(
+    tg_id: int,
+    method: str,
+    period_code: str,
+    days: int,
+    amount: int,
+    currency: str,
+    telegram_charge_id: str | None = None,
+    provider_charge_id: str | None = None,
+) -> None:
+    """
+    Записать успешный платёж в таблицу payments.
+
+    amount:
+        - для RUB — сумма в копейках (как приходит от Telegram);
+        - для XTR (Stars) — количество звёзд.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE tg_id = ? AND is_deleted = 0",
+            (tg_id,),
+        )
+        user_row = await cursor.fetchone()
+        await cursor.close()
+
+        if not user_row:
+            return
+
+        user_id = int(user_row["id"])
+        now_iso = datetime.utcnow().isoformat(timespec="seconds")
+
+        await db.execute(
+            """
+            INSERT INTO payments (
+                user_id,
+                method,
+                period_code,
+                days,
+                amount,
+                currency,
+                created_at,
+                telegram_charge_id,
+                provider_charge_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                method,
+                period_code,
+                days,
+                amount,
+                currency,
+                now_iso,
+                telegram_charge_id,
+                provider_charge_id,
+            ),
+        )
+        await db.commit()
+
+
+async def get_payments_count() -> int:
+    """
+    Общее количество записанных успешных платежей.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM payments")
+        row = await cursor.fetchone()
+        await cursor.close()
+    return int(row[0] or 0) if row else 0
+
+
+async def get_payments_page(page: int, page_size: int = 20) -> list[dict]:
+    """
+    Страница платежей с привязкой к пользователям.
+    Сортировка: новые сверху.
+    """
+    if page < 1:
+        page = 1
+    offset = (page - 1) * page_size
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT
+                p.*,
+                u.tg_id AS user_tg_id,
+                u.username AS user_username,
+                u.name AS user_name
+            FROM payments p
+            JOIN users u ON u.id = p.user_id
+            ORDER BY p.created_at DESC, p.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (page_size, offset),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]
+
+
+async def get_revenue_summary(period: str) -> dict:
+    """
+    Подсчёт доходов за период:
+        period = 'day' | 'week' | 'month'
+    Возвращает:
+    {
+        "period": period,
+        "from": iso_start,
+        "to": iso_end,
+        "rub_total": float,   # сумма в рублях
+        "rub_count": int,     # кол-во RUB-платежей
+        "stars_total": int,   # кол-во звёзд
+        "stars_count": int,   # кол-во XTR-платежей
+    }
+    """
+    now = datetime.utcnow()
+    if period == "day":
+        delta_days = 1
+    elif period == "week":
+        delta_days = 7
+    else:
+        delta_days = 30
+
+    start_dt = now - timedelta(days=delta_days)
+    start_iso = start_dt.isoformat(timespec="seconds")
+    end_iso = now.isoformat(timespec="seconds")
+
+    rub_total_minor = 0
+    rub_count = 0
+    stars_total = 0
+    stars_count = 0
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT currency, SUM(amount) AS total_amount, COUNT(*) AS cnt
+            FROM payments
+            WHERE created_at >= ?
+            GROUP BY currency
+            """,
+            (start_iso,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    for row in rows or []:
+        currency = row[0]
+        total_amount = int(row[1] or 0)
+        cnt = int(row[2] or 0)
+        if currency == "RUB":
+            rub_total_minor = total_amount
+            rub_count = cnt
+        elif currency == "XTR":
+            stars_total = total_amount
+            stars_count = cnt
+
+    rub_total = rub_total_minor / 100.0 if rub_total_minor else 0.0
+
+    return {
+        "period": period,
+        "from": start_iso,
+        "to": end_iso,
+        "rub_total": rub_total,
+        "rub_count": rub_count,
+        "stars_total": stars_total,
+        "stars_count": stars_count,
+    }
+
+
+async def get_subscriptions_total() -> int:
+    """
+    Количество пользователей, у которых есть хотя бы один платёж.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM payments")
+        row = await cursor.fetchone()
+        await cursor.close()
+    return int(row[0] or 0) if row else 0
+
+
+async def get_subscriptions_page(page: int, page_size: int = 20) -> list[dict]:
+    """
+    Страница по пользователям с платежами.
+    Для каждого:
+      - last_payment_at
+      - payments_count
+      - total_days
+      - total_rub (float)
+      - total_stars (int)
+    """
+    if page < 1:
+        page = 1
+    offset = (page - 1) * page_size
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT
+                u.id AS user_id,
+                u.tg_id AS user_tg_id,
+                u.username AS user_username,
+                u.name AS user_name,
+                MAX(p.created_at) AS last_payment_at,
+                COUNT(*) AS payments_count,
+                SUM(p.days) AS total_days,
+                SUM(CASE WHEN p.currency = 'RUB' THEN p.amount ELSE 0 END) AS total_rub_minor,
+                SUM(CASE WHEN p.currency = 'XTR' THEN p.amount ELSE 0 END) AS total_stars
+            FROM payments p
+            JOIN users u ON u.id = p.user_id
+            GROUP BY u.id
+            ORDER BY last_payment_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (page_size, offset),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    result: list[dict] = []
+    for r in rows or []:
+        d = dict(r)
+        rub_minor = int(d.get("total_rub_minor") or 0)
+        d["total_rub"] = rub_minor / 100.0 if rub_minor else 0.0
+        result.append(d)
+
+    return result
 
 # ====== PHOTOS COUNT BY USER ======
 
