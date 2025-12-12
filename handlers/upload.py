@@ -26,6 +26,7 @@ from database import (
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
 )
+from utils.time import get_moscow_now
 
 
 router = Router()
@@ -78,17 +79,6 @@ def _build_draft_caption(*, category: str | None, title: str | None, device_type
         lines.append("Подготовка работы…")
 
     return "\n".join(lines)
-
-
-# ========= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =========
-
-
-def get_moscow_now() -> datetime:
-    """Текущее время по Москве.
-
-    Вся логика по дню/итогам завязана именно на московское время.
-    """
-    return datetime.utcnow() + timedelta(hours=3)
 
 
 # ====== Helpers for time formatting (таймер до следующей загрузки) ======
@@ -1096,13 +1086,14 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
             photo = existing_photo
         else:
             await state.clear()
+            remaining = _format_time_until_next_upload()
             try:
                 await message_or_service.bot.edit_message_caption(
                     chat_id=upload_chat_id,
                     message_id=upload_msg_id,
                     caption=(
                         "Похоже, на сегодня у тебя уже есть фотография.\n\n"
-                        "Новый кадр нельзя сохранить до подведения итогов дня."
+                        f"Новый кадр можно будет выложить {remaining}."
                     ),
                 )
             except Exception:
@@ -1111,7 +1102,7 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
                         chat_id=upload_chat_id,
                         text=(
                             "Похоже, на сегодня у тебя уже есть фотография.\n\n"
-                            "Новый кадр нельзя сохранить до подведения итогов дня."
+                            f"Новый кадр можно будет выложить {remaining}."
                         ),
                         disable_notification=True,
                     )
@@ -1188,7 +1179,7 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Это не твоя фотография.", show_alert=True)
         return
 
-    # === Блокируем удаление, если фото уже в итогах дня ===
+    # === Блокируем удаление, если день фотографии уже завершился по Москве ===
     now = get_moscow_now()
     day_key = photo.get("day_key")
     try:
@@ -1196,11 +1187,8 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
     except Exception:
         day = now.date()
 
-    # Считаем, что итоги дня подводятся после 20:45 по московскому времени
-    results_time_reached = (
-        now.date() > day
-        or (now.date() == day and (now.hour, now.minute) >= (20, 45))
-    )
+    # Считаем, что итоги дня подводятся после завершения календарного дня по Москве
+    results_time_reached = now.date() > day
 
     if results_time_reached:
         # Фото уже участвует в итогах дня — не даём его удалять, чтобы не ломать статистику
@@ -1503,11 +1491,9 @@ async def myphoto_promote(callback: CallbackQuery, state: FSMContext):
     except Exception:
         day = now.date()
 
-    if not (
-        now.date() > day
-        or (now.date() == day and (now.hour, now.minute) >= (20, 45))
-    ):
-        await callback.answer("Продвигать можно только после итогов дня.", show_alert=True)
+    # Продвигать можно только после окончания календарного дня по Москве
+    if now.date() <= day:
+        await callback.answer("Продвигать можно только после окончания дня.", show_alert=True)
         return
 
     top10 = await get_daily_top_photos(photo["day_key"], limit=10)

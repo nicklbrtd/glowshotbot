@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timedelta, timezone
 import random
 from aiogram import Router, F
 from aiogram.filters import CommandStart
@@ -8,6 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup
+from utils.time import get_moscow_now
 
 from database import get_user_by_tg_id, is_user_premium_active
 from keyboards.common import build_main_menu
@@ -78,7 +78,7 @@ def build_menu_text(is_premium: bool) -> str:
     Для премиум‑пользователей — напоминание о доступных возможностях.
     """
     # Текущее время по Москве
-    now = datetime.now(timezone(timedelta(hours=3)))
+    now = get_moscow_now()
 
     # Итоги дня теперь подводятся каждый день в 05:00 по Москве
     results_hour = 5

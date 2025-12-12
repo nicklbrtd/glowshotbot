@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from utils.time import get_moscow_now
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -18,11 +19,7 @@ from database import (
 
 router = Router()
 
-
-def get_moscow_now() -> datetime:
-    return datetime.utcnow() + timedelta(hours=3)
-
-
+# ========== Итоги дня ==========
 def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
     """
     Построить навигацию по шагам итогов дня.
