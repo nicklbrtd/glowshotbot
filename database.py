@@ -1,4 +1,5 @@
 import aiosqlite
+import random
 from datetime import datetime, timedelta
 from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
 
@@ -35,11 +36,13 @@ async def init_db():
                 avatar_file_id TEXT,
                 channel_username TEXT,
                 notify_likes INTEGER NOT NULL DEFAULT 1,
-                notify_comments INTEGER NOT NULL DEFAULT 1
-                ,
+                notify_comments INTEGER NOT NULL DEFAULT 1,
                 is_blocked INTEGER NOT NULL DEFAULT 0,
                 blocked_until TEXT,
-                blocked_reason TEXT
+                blocked_reason TEXT,
+                referral_code TEXT,
+                referred_by_user_id INTEGER,
+                referral_qualified INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS photos (
@@ -270,6 +273,24 @@ async def init_db():
         try:
             await db.execute(
                 "ALTER TABLE users ADD COLUMN blocked_reason TEXT"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN referral_code TEXT"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN referred_by_user_id INTEGER"
+            )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN referral_qualified INTEGER NOT NULL DEFAULT 0"
             )
         except aiosqlite.OperationalError:
             pass
@@ -897,6 +918,101 @@ async def get_subscriptions_page(page: int, page_size: int = 20) -> list[dict]:
         result.append(d)
 
     return result
+
+# ====== REFERRALS ======
+
+async def _generate_unique_referral_code(db: aiosqlite.Connection) -> str:
+    """
+    Сгенерировать уникальный реферальный код вида GSXXXXXX.
+    """
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        code = "GS" + "".join(random.choice(alphabet) for _ in range(6))
+        cursor = await db.execute(
+            "SELECT 1 FROM users WHERE referral_code = ? LIMIT 1",
+            (code,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if not row:
+            return code
+
+async def get_or_create_referral_code(tg_id: int) -> str | None:
+    """
+    Получить или создать реферальный код для пользователя по его Telegram ID.
+    Возвращает строку-код или None, если пользователь не найден.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, referral_code FROM users WHERE tg_id = ? AND is_deleted = 0",
+            (tg_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        if not row:
+            return None
+
+        existing = row["referral_code"]
+        if existing:
+            return str(existing)
+
+        user_id = int(row["id"])
+        new_code = await _generate_unique_referral_code(db)
+        await db.execute(
+            "UPDATE users SET referral_code = ? WHERE id = ?",
+            (new_code, user_id),
+        )
+        await db.commit()
+        return new_code
+
+async def get_referral_stats_for_user(tg_id: int) -> dict:
+    """
+    Простая статистика по рефералке для пользователя с заданным tg_id.
+    Возвращает:
+    {
+        "invited_total": int,      # всего людей, у которых указан referred_by_user_id
+        "invited_qualified": int,  # людей с referral_qualified = 1
+    }
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE tg_id = ? AND is_deleted = 0",
+            (tg_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        if not row:
+            return {
+                "invited_total": 0,
+                "invited_qualified": 0,
+            }
+
+        user_id = int(row["id"])
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE referred_by_user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        invited_total = int(row[0] or 0) if row else 0
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE referred_by_user_id = ? AND referral_qualified = 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        invited_qualified = int(row[0] or 0) if row else 0
+
+    return {
+        "invited_total": invited_total,
+        "invited_qualified": invited_qualified,
+    }
 
 # ====== PHOTOS COUNT BY USER ======
 
