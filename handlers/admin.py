@@ -45,6 +45,9 @@ from database import (
     get_user_admin_stats,
     get_user_rating_summary,
 )
+
+router = Router()
+
 # ================= HELPER: Edit last user prompt or answer =================
 async def _edit_user_prompt_or_answer(
     message: Message,
@@ -348,8 +351,6 @@ class AchievementStates(StatesGroup):
 from keyboards.common import build_admin_menu, build_back_kb
 from utils.time import get_moscow_now
 from config import ADMIN_PASSWORD, MASTER_ADMIN_ID
-
-router = Router()
 
 ADMIN_PANEL_TEXT = "<b>Админ-панель</b>\n\nВыбери раздел:"
 
