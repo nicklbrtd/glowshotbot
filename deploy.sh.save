@@ -1,0 +1,21 @@
+set -e
+
+PROJECT_DIR="/home/nick/glowshotbot"
+SESSION_MAIN="glowshot"
+SESSION_SUPPORT="glowshot_support"
+
+cd "$PROJECT_DIR"
+
+echo "🔄 Pulling latest code from git..."
+git pull
+
+echo "📦 Updating venv packages..."
+source venv/bin/activate
+pip install -r requirements.txt
+
+echo "🤖 Restarting main bot in tmux ($SESSION_MAIN)..."
+tmux has-session -t "$SESSION_MAIN" 2>/dev/null && tmux kill-session -t "$SESSION_MAIN"
+tmux new-session -d -s "$SESSION_MAIN" "cd $PROJECT_DIR && source venv/bin/activate && python bot.py"
+
+echo "💬 Restarting support bot in tmux ($SESSION_SUPPORT)..."
+tmux has-session -t "$SESSION_SUPPORT" 2>/dev/null 
