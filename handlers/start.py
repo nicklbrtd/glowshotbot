@@ -166,6 +166,39 @@ async def cmd_start(message: Message, state: FSMContext):
         if len(parts) == 2:
             payload = parts[1].strip()
 
+    # === PAYMENT REDIRECT HANDLING ===
+    # Если это возврат с оплаты (success / fail) — НЕ создаём новое меню
+    if payload in ("payment_success", "payment_fail"):
+        user = await get_user_by_tg_id(message.from_user.id)
+        if user:
+            is_admin = _get_flag(user, "is_admin")
+            is_moderator = _get_flag(user, "is_moderator")
+            is_premium = await is_user_premium_active(message.from_user.id)
+
+            data = await state.get_data()
+            menu_msg_id = data.get("menu_msg_id")
+
+            if menu_msg_id:
+                try:
+                    await message.bot.edit_message_text(
+                        build_menu_text(is_premium=is_premium),
+                        chat_id=message.chat.id,
+                        message_id=menu_msg_id,
+                        reply_markup=build_main_menu(
+                            is_admin=is_admin,
+                            is_moderator=is_moderator,
+                            is_premium=is_premium,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     user = await get_user_by_tg_id(message.from_user.id)
 
     if user is None:
