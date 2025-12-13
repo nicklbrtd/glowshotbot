@@ -167,32 +167,75 @@ async def cmd_start(message: Message, state: FSMContext):
             payload = parts[1].strip()
 
     # === PAYMENT REDIRECT HANDLING ===
-    # Если это возврат с оплаты (success / fail) — НЕ создаём новое меню
+    # Success/Fail — это просто возврат пользователя после оплаты.
+    # Реальная активация премиума происходит через ResultURL (вебхук),
+    # поэтому в success мы показываем понятный статус и НЕ плодим новые сообщения.
     if payload in ("payment_success", "payment_fail"):
         user = await get_user_by_tg_id(message.from_user.id)
+
+        # Определяем текущий статус премиума (вебхук мог уже успеть включить)
+        is_premium = await is_user_premium_active(message.from_user.id)
+
+        if payload == "payment_success":
+            if is_premium:
+                payment_note = (
+                    "✅ <b>Оплата прошла!</b> Премиум уже активен.\n"
+                    "Если вдруг не видишь изменения — открой «Профиль → Премиум» заново."
+                )
+            else:
+                payment_note = (
+                    "🧾 <b>Платёж принят</b>. Сейчас подтверждаем оплату…\n"
+                    "Обычно это занимает до 1 минуты.\n"
+                    "Открой «Профиль → Премиум» через минутку — статус обновится автоматически."
+                )
+        else:
+            payment_note = (
+                "❌ <b>Оплата не завершена</b> (отмена/ошибка).\n"
+                "Если это была ошибка — попробуй ещё раз в «Профиль → Премиум»."
+            )
+
+        # Пытаемся обновить уже существующее сообщение меню (не спамим чат)
+        data = await state.get_data()
+        menu_msg_id = data.get("menu_msg_id")
+
         if user:
             is_admin = _get_flag(user, "is_admin")
             is_moderator = _get_flag(user, "is_moderator")
-            is_premium = await is_user_premium_active(message.from_user.id)
+        else:
+            is_admin = False
+            is_moderator = False
 
-            data = await state.get_data()
-            menu_msg_id = data.get("menu_msg_id")
+        menu_text = build_menu_text(is_premium=is_premium) + "\n\n" + payment_note
+        reply_kb = build_main_menu(
+            is_admin=is_admin,
+            is_moderator=is_moderator,
+            is_premium=is_premium,
+        )
 
-            if menu_msg_id:
-                try:
-                    await message.bot.edit_message_text(
-                        build_menu_text(is_premium=is_premium),
-                        chat_id=message.chat.id,
-                        message_id=menu_msg_id,
-                        reply_markup=build_main_menu(
-                            is_admin=is_admin,
-                            is_moderator=is_moderator,
-                            is_premium=is_premium,
-                        ),
-                    )
-                except Exception:
-                    pass
+        edited = False
+        if menu_msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    menu_text,
+                    chat_id=message.chat.id,
+                    message_id=menu_msg_id,
+                    reply_markup=reply_kb,
+                )
+                edited = True
+            except Exception:
+                edited = False
 
+        if not edited:
+            # Если меню ещё не было (или его нельзя отредактировать) — создаём новое меню
+            sent = await message.answer(
+                menu_text,
+                reply_markup=reply_kb,
+                disable_notification=True,
+            )
+            data["menu_msg_id"] = sent.message_id
+            await state.set_data(data)
+
+        # Убираем сам /start, чтобы не плодить сообщения
         try:
             await message.delete()
         except Exception:
