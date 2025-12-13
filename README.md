@@ -68,5 +68,6 @@ glowshotbot/
 ├── deploy.sh              # скрипт деплоя на сервере
 ├── requirements.txt
 └── db.sqlite3             # база данных (в проде обычно лежит рядом с кодом)
+```
 
 ## License → All rights reserved.
