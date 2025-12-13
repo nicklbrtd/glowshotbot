@@ -12,4 +12,24 @@ MASTER_ADMIN_ID = int(os.getenv("MASTER_ADMIN_ID", "0"))
 SUPPORT_BOT_TOKEN = os.getenv("SUPPORT_BOT_TOKEN")
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "0"))
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
-ROBOKASSA_PASSWORD2 = os.getenv("ROBOKASSA_PASSWORD2", "")
+# ===== Robokassa =====
+ROBOKASSA_LOGIN = os.getenv("ROBOKASSA_LOGIN", "").strip()
+
+# Тумблер тестового режима (1/true/yes)
+ROBOKASSA_IS_TEST = os.getenv("ROBOKASSA_IS_TEST", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# Боевые пароли
+ROBOKASSA_PASSWORD1_PROD = os.getenv("ROBOKASSA_PASSWORD1", "").strip()
+ROBOKASSA_PASSWORD2_PROD = os.getenv("ROBOKASSA_PASSWORD2", "").strip()
+
+# Тестовые пароли (из Robokassa → Технические настройки → Тестовые пароли)
+ROBOKASSA_PASSWORD1_TEST = os.getenv("ROBOKASSA_TEST_PASSWORD1", "").strip()
+ROBOKASSA_PASSWORD2_TEST = os.getenv("ROBOKASSA_TEST_PASSWORD2", "").strip()
+
+# Эффективные пароли (используются кодом)
+ROBOKASSA_PASSWORD1 = ROBOKASSA_PASSWORD1_TEST if ROBOKASSA_IS_TEST else ROBOKASSA_PASSWORD1_PROD
+ROBOKASSA_PASSWORD2 = ROBOKASSA_PASSWORD2_TEST if ROBOKASSA_IS_TEST else ROBOKASSA_PASSWORD2_PROD

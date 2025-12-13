@@ -9,7 +9,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 from keyboards.common import build_viewed_kb, build_back_kb
-from config import PAYMENT_PROVIDER_TOKEN
+from config import PAYMENT_PROVIDER_TOKEN, ROBOKASSA_LOGIN, ROBOKASSA_PASSWORD1, ROBOKASSA_IS_TEST
 
 from database import (
     set_user_premium_status,
@@ -17,6 +17,10 @@ from database import (
 )
 from utils.time import get_moscow_now
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import hashlib
+import random
+import time
+from urllib.parse import urlencode
 
 router = Router(name="payments")
 
@@ -48,6 +52,63 @@ TARIFFS = {
         "description": "Доступ ко всем премиум-функциям на 90 дней.",
     },
 }
+
+
+ROBOKASSA_ENABLED = bool(ROBOKASSA_LOGIN and ROBOKASSA_PASSWORD1)
+
+
+def _md5_hex(s: str) -> str:
+    return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+
+def _money_rub_str(amount_rub: int) -> str:
+    # 79 -> "79.00"
+    return f"{amount_rub:.2f}"
+
+
+def build_robokassa_pay_url(tg_id: int, period_code: str) -> str:
+    """Собираем ссылку на оплату Robokassa.
+
+    В подпись (SignatureValue) обязательно входят все Shp_* параметры.
+    Для тестового режима добавляем IsTest=1.
+    """
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        raise ValueError("Unknown tariff")
+
+    out_sum = _money_rub_str(int(tariff["price_rub"]))
+
+    # InvId должен быть уникальным
+    inv_id = int(time.time()) * 1000 + random.randint(0, 999)
+
+    desc = f"GlowShot Premium {period_code}"
+
+    # кастомные поля (пойдут в подпись и придут в ResultURL)
+    shp = {
+        "Shp_tg_id": str(tg_id),
+        "Shp_period": str(period_code),
+    }
+
+    base = f"{ROBOKASSA_LOGIN}:{out_sum}:{inv_id}:{ROBOKASSA_PASSWORD1}"
+    for k in sorted(shp.keys()):
+        base += f":{k}={shp[k]}"
+
+    sig = _md5_hex(base)
+
+    params = {
+        "MerchantLogin": ROBOKASSA_LOGIN,
+        "OutSum": out_sum,
+        "InvId": str(inv_id),
+        "Description": desc,
+        "SignatureValue": sig,
+        **shp,
+        "Culture": "ru",
+    }
+
+    if ROBOKASSA_IS_TEST:
+        params["IsTest"] = "1"
+
+    return "https://auth.robokassa.ru/Merchant/Index.aspx?" + urlencode(params)
 
 
 def _build_tariffs_kb_rub() -> InlineKeyboardMarkup:
@@ -110,13 +171,23 @@ async def premium_buy_menu(callback: CallbackQuery):
     - Если токена нет → показываем сразу Stars-тарифы.
     """
     has_rub_payments = bool(PAYMENT_PROVIDER_TOKEN)
+    has_robokassa = bool(ROBOKASSA_ENABLED)
 
-    if has_rub_payments:
+    if has_rub_payments or has_robokassa:
         kb = InlineKeyboardBuilder()
-        kb.button(
-            text="💳 Оплата картой (RUB)",
-            callback_data="premium:buy:rub",
-        )
+
+        if has_robokassa:
+            kb.button(
+                text="💳 Оплата картой (Robokassa)",
+                callback_data="premium:buy:rk",
+            )
+
+        if has_rub_payments:
+            kb.button(
+                text="💳 Оплата картой (RUB)",
+                callback_data="premium:buy:rub",
+            )
+
         kb.button(
             text="⭐ Оплата Stars",
             callback_data="premium:buy:stars",
@@ -127,12 +198,15 @@ async def premium_buy_menu(callback: CallbackQuery):
         )
         kb.adjust(1)
 
+        test_line = "\n\n🧪 <b>Robokassa: тестовый режим включен</b>" if ROBOKASSA_IS_TEST else ""
+
         text = (
             "💳 <b>Оплата GlowShot Premium</b>\n\n"
             "Выбери, как тебе удобнее оплатить подписку:\n\n"
-            "• 💳 картой в рублях (через встроенные платежи Telegram);\n"
+            "• 💳 картой (Robokassa / Telegram);\n"
             "• ⭐ Telegram Stars.\n\n"
             "После выбора способа оплаты появятся доступные тарифы."
+            f"{test_line}"
         )
 
         await callback.message.edit_text(
@@ -180,6 +254,45 @@ async def premium_buy_rub(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "premium:buy:rk")
+async def premium_buy_robokassa(callback: CallbackQuery):
+    """Экран выбора тарифа при оплате через Robokassa."""
+    if not ROBOKASSA_ENABLED:
+        await callback.answer("Robokassa не настроена 😔", show_alert=True)
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=f"💳 7 дней — {TARIFFS['7d']['price_rub']} ₽",
+        callback_data="premium:order:rk:7d",
+    )
+    kb.button(
+        text=f"💳 30 дней — {TARIFFS['30d']['price_rub']} ₽",
+        callback_data="premium:order:rk:30d",
+    )
+    kb.button(
+        text=f"💳 90 дней — {TARIFFS['90d']['price_rub']} ₽",
+        callback_data="premium:order:rk:90d",
+    )
+    kb.button(
+        text="⬅️ Назад",
+        callback_data="profile:premium_buy",
+    )
+    kb.adjust(1)
+
+    test_line = "\n\n🧪 <b>Robokassa: тестовый режим включен</b>" if ROBOKASSA_IS_TEST else ""
+
+    text = (
+        "💳 <b>Оплата картой (Robokassa)</b>\n\n"
+        "Выбери тариф GlowShot Premium.\n\n"
+        "После оплаты тебя вернёт обратно в бот."
+        f"{test_line}"
+    )
+
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+
 @router.callback_query(F.data == "premium:buy:stars")
 async def premium_buy_stars(callback: CallbackQuery):
     """
@@ -212,13 +325,43 @@ async def premium_create_invoice(callback: CallbackQuery):
         return
 
     _, _, method, period_code = parts
-    if method not in ("rub", "stars"):
+    if method not in ("rub", "stars", "rk"):
         await callback.answer("Некорректный способ оплаты.", show_alert=True)
         return
 
     tariff = TARIFFS.get(period_code)
     if not tariff:
         await callback.answer("Тариф не найден.", show_alert=True)
+        return
+    
+    if method == "rk":
+        if not ROBOKASSA_ENABLED:
+            await callback.answer("Robokassa не настроена 😔", show_alert=True)
+            return
+
+        try:
+            pay_url = build_robokassa_pay_url(callback.from_user.id, period_code)
+        except Exception as e:
+            await callback.answer(f"Не удалось собрать ссылку: {e}", show_alert=True)
+            return
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Перейти к оплате 💳", url=pay_url)
+        kb.button(text="⬅️ Назад", callback_data="profile:premium_buy")
+        kb.adjust(1)
+
+        text = (
+            "💳 <b>Счёт готов</b>\n\n"
+            "Жми кнопку ниже — откроется страница Robokassa.\n"
+            "После оплаты тебя вернёт обратно в бот."
+        )
+
+        try:
+            await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb.as_markup())
+
+        await callback.answer()
         return
 
     if method == "rub":
