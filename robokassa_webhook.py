@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, RedirectResponse
 import hashlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from config import ROBOKASSA_PASSWORD2
-from database import set_user_premium_status
+from database import set_user_premium_status, get_user_premium_status
 from utils.time import get_moscow_now  # если у тебя есть, как в payments.py
 
 app = FastAPI()
@@ -77,7 +77,23 @@ async def robokassa_result(request: Request):
     tg_id = int(shp_tg_id)
     days = TARIFFS_DAYS[shp_period]
     now = get_moscow_now()
-    until_dt = now + timedelta(days=days)
+
+    # ✅ Продление премиума: добавляем дни к текущему сроку, если он ещё не истёк.
+    base_dt = now
+    try:
+        current = await get_user_premium_status(tg_id)
+        current_until = (current or {}).get("premium_until")
+        if current_until:
+            try:
+                cur_dt = datetime.fromisoformat(current_until)
+                if cur_dt > base_dt:
+                    base_dt = cur_dt
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    until_dt = base_dt + timedelta(days=days)
     premium_until_iso = until_dt.isoformat(timespec="seconds")
 
     await set_user_premium_status(tg_id, True, premium_until=premium_until_iso)

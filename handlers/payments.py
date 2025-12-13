@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -14,6 +14,7 @@ from config import PAYMENT_PROVIDER_TOKEN, ROBOKASSA_LOGIN, ROBOKASSA_PASSWORD1,
 from database import (
     set_user_premium_status,
     log_successful_payment,
+    get_user_premium_status,
 )
 from utils.time import get_moscow_now
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -445,7 +446,23 @@ async def process_successful_payment(message: Message):
 
     days = tariff["days"]
     now = get_moscow_now()
-    until_dt = now + timedelta(days=days)
+
+    # ✅ Продление премиума: если он уже активен и premium_until в будущем — добавляем дни к текущему сроку.
+    base_dt = now
+    try:
+        current = await get_user_premium_status(message.from_user.id)
+        current_until = (current or {}).get("premium_until")
+        if current_until:
+            try:
+                cur_dt = datetime.fromisoformat(current_until)
+                if cur_dt > base_dt:
+                    base_dt = cur_dt
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    until_dt = base_dt + timedelta(days=days)
     premium_until_iso = until_dt.isoformat(timespec="seconds")
     human_until = until_dt.strftime("%d.%m.%Y")
 
