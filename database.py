@@ -4,7 +4,9 @@ from datetime import datetime, timedelta
 from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
 
 
-DB_PATH = "db.sqlite3"
+from pathlib import Path
+
+DB_PATH = str(Path(__file__).resolve().parent / "db.sqlite3")
 
 
 async def init_db():
@@ -1049,32 +1051,28 @@ async def get_referral_stats_for_user(tg_id: int) -> dict:
 # ====== PHOTOS COUNT BY USER ======
 
 async def count_photos_by_user(user_id: int) -> int:
-    """
-    Вернуть количество активных (не удалённых) фотографий пользователя.
-    user_id — внутренний ID из таблицы users.id.
-    """
+    """Всего загружено фото за всю историю (включая удалённые)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM photos WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+    return int(row[0] or 0)
+
+
+async def count_active_photos_by_user(user_id: int) -> int:
+    """Активные фото сейчас: не удалены и видимы."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
             """
             SELECT COUNT(*)
             FROM photos
             WHERE user_id = ?
+              AND is_deleted = 0
               AND moderation_status = 'active'
             """,
-            (user_id,),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-
-    if not row or row[0] is None:
-        return 0
-    return int(row[0])
-
-
-async def count_active_photos_by_user(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM photos WHERE user_id = ? AND is_deleted = 0",
             (user_id,),
         )
         row = await cur.fetchone()
@@ -1589,31 +1587,29 @@ async def create_user(
 
 
 async def get_today_photo_for_user(user_id: int) -> dict | None:
-    """
-    Вернуть последнюю на сегодня запись фото пользователя (включая удалённые).
-    Используется для отображения статуса суточного лимита и полного отображения работы.
-    """
-    today_key = get_moscow_now().date().isoformat()
+    """Вернуть фото за сегодня (по Москве), если есть и оно не удалено."""
+    today = get_moscow_today()
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
+        cur = await db.execute(
             """
             SELECT *
             FROM photos
             WHERE user_id = ?
               AND day_key = ?
-            ORDER BY created_at DESC, id DESC
+              AND is_deleted = 0
             LIMIT 1
             """,
-            (user_id, today_key),
+            (user_id, today),
         )
-        row = await cursor.fetchone()
-        await cursor.close()
+        row = await cur.fetchone()
+        await cur.close()
 
-    if not row:
-        return None
-    return dict(row)
+    return dict(row) if row else None
 
+
+from utils.time import get_moscow_today, get_moscow_now_iso
 
 async def create_today_photo(
     user_id: int,
@@ -1625,52 +1621,51 @@ async def create_today_photo(
     description: str | None,
 ) -> int:
     """
-    Создать или обновить сегодняшнюю фотографию пользователя.
+    Создать сегодняшнюю фотографию для пользователя.
 
-    Логика:
-    - В таблице photos есть уникальный индекс (user_id, day_key), поэтому на один день
-      у пользователя может быть только одна запись.
-    - Если запись уже есть и мы снова вызываем эту функцию (например, после итогов дня),
-      то она не падает с UNIQUE-ошибкой, а просто обновляет существующую строку
-      (file_id, title, device_type, device_info, created_at, is_deleted, moderation_status).
+    ВАЖНО:
+    - day_key = YYYY-MM-DD (по Москве)
+    - is_deleted = 0
+    - moderation_status = 'active' (чтобы сразу шла в оценивание)
     """
-    now = get_moscow_now_iso()
+    now_iso = get_moscow_now_iso()
     day_key = get_moscow_today()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # UPSERT: при конфликте по (user_id, day_key) обновляем существующую запись
-        await db.execute(
+        cur = await db.execute(
             """
-            INSERT INTO photos (user_id, file_id, title, device_type, device_info, category, description, created_at, day_key, is_deleted, moderation_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active')
-            ON CONFLICT(user_id, day_key) DO UPDATE SET
-                file_id = excluded.file_id,
-                title = excluded.title,
-                device_type = excluded.device_type,
-                device_info = excluded.device_info,
-                category = excluded.category,
-                description = excluded.description,
-                created_at = excluded.created_at,
-                is_deleted = 0,
-                moderation_status = 'active'
+            INSERT INTO photos (
+                user_id,
+                file_id,
+                title,
+                device_type,
+                device_info,
+                category,
+                description,
+                created_at,
+                day_key,
+                is_deleted,
+                repeat_used,
+                moderation_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'active')
             """,
-            (user_id, file_id, title, device_type, device_info, category, description, now, day_key),
+            (
+                user_id,
+                file_id,
+                title,
+                device_type,
+                device_info,
+                category,
+                description,
+                now_iso,
+                day_key,
+            ),
         )
         await db.commit()
+        photo_id = cur.lastrowid
 
-        # cursor.lastrowid при UPSERT может быть не тем, поэтому явно достаём id
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT id FROM photos WHERE user_id = ? AND day_key = ?",
-            (user_id, day_key),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-
-        if not row:
-            raise RuntimeError("Не удалось получить id фотографии после UPSERT")
-
-        return row["id"]
+    return int(photo_id)
 
 
 async def mark_photo_deleted(photo_id: int) -> None:
@@ -3168,50 +3163,35 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
 
 async def get_random_photo_for_rating(user_id: int) -> dict | None:
     """
-    Выбрать случайную фотографию для оценивания.
+    Выбрать случайную фотографию для оценивания:
 
-    Правила:
-    • Берём только активные фото (is_deleted = 0, moderation_status = 'active').
-    • Не показываем фото самого пользователя.
-    • Не показываем фото, которые он уже оценивал (ratings.user_id = users.id).
-    • Фото только за СЕГОДНЯШНИЙ день по Москве (day_key = сегодняшняя дата).
-
-    user_id — это ВНУТРЕННИЙ ID (users.id).
+    - фото не удалено;
+    - фото активно (moderation_status = 'active');
+    - не принадлежит самому пользователю;
+    - пользователь её ещё не оценивал.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-
-        today_key = get_moscow_today()
-
-        cursor = await db.execute(
+        cur = await db.execute(
             """
-            SELECT
-                p.*,
-                u.tg_channel_link AS user_tg_channel_link,
-                u.is_premium      AS user_is_premium
-            FROM photos AS p
-            JOIN users AS u ON p.user_id = u.id
-            WHERE
-                p.is_deleted = 0
-                AND p.moderation_status = 'active'
-                AND p.user_id != ?
-                AND p.day_key = ?
-                AND p.id NOT IN (
-                    SELECT photo_id
-                    FROM ratings
-                    WHERE user_id = ?
-                )
+            SELECT p.*
+            FROM photos p
+            LEFT JOIN ratings r
+              ON r.photo_id = p.id
+             AND r.user_id = ?
+            WHERE p.is_deleted = 0
+              AND p.moderation_status = 'active'
+              AND p.user_id != ?
+              AND r.id IS NULL
             ORDER BY RANDOM()
             LIMIT 1
             """,
-            (user_id, today_key, user_id),
+            (user_id, user_id),
         )
-        row = await cursor.fetchone()
-        await cursor.close()
+        row = await cur.fetchone()
+        await cur.close()
 
-    if not row:
-        return None
-    return dict(row)
+    return dict(row) if row else None
 
 
 # ====== REFERRALS HELPERS (OVERRIDE) ======
@@ -3497,13 +3477,18 @@ async def link_and_reward_referral_if_needed(referee_tg_id: int) -> tuple[bool, 
 
 
 async def get_active_photos_for_user(user_id: int) -> list[dict]:
+    """
+    Все активные (не удалённые) фотки пользователя.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
             SELECT *
             FROM photos
-            WHERE user_id = ? AND is_deleted = 0
+            WHERE user_id = ?
+              AND is_deleted = 0
+              AND moderation_status = 'active'
             ORDER BY created_at DESC, id DESC
             """,
             (user_id,),
@@ -3514,13 +3499,17 @@ async def get_active_photos_for_user(user_id: int) -> list[dict]:
 
 
 async def get_latest_photos_for_user(user_id: int, limit: int = 10) -> list[dict]:
+    """
+    Последние не удалённые фотки пользователя (НЕ по дню, а вообще).
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
             SELECT *
             FROM photos
-            WHERE user_id = ? AND is_deleted = 0
+            WHERE user_id = ?
+              AND is_deleted = 0
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
