@@ -1,5 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from utils.time import get_moscow_now
 
 # --- Главное меню ---
 
@@ -20,6 +21,11 @@ def build_main_menu(
     kb.button(text="🔥 Оценивать", callback_data="rate:start")
     kb.button(text="🏆 Итоги дня", callback_data="results:day")
     kb.button(text="👤 Профиль", callback_data="profile:open")
+
+    now = get_moscow_now()
+    is_sunday = now.weekday() == 6  # воскресенье
+    if is_sunday:
+        kb.button(text="🌟 Итоги недели", callback_data="results:week")
 
     if is_moderator:
         kb.button(text="🛡 Модератор", callback_data="moderator:menu")

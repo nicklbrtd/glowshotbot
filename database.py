@@ -3458,3 +3458,25 @@ async def link_and_reward_referral_if_needed(referee_tg_id: int) -> tuple[bool, 
         await db.commit()
 
     return True, referrer_tg_id, referee_tg_id
+
+
+async def get_active_photos_for_user(user_id: int) -> list[dict]:
+    """
+    Получить все НЕ удалённые фотографии пользователя (любой день),
+    отсортированные от новых к старым.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM photos
+            WHERE user_id = ? AND is_deleted = 0
+            ORDER BY created_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]

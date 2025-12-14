@@ -25,6 +25,9 @@ from database import (
     get_weekly_photos_for_user,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
+    get_user_by_id,
+    is_user_premium_active,
+    get_active_photos_for_user,
 )
 from utils.time import get_moscow_now
 
@@ -190,41 +193,45 @@ def build_my_photo_caption(photo: dict) -> str:
     return "\n".join(caption_lines)
 
 
-def build_my_photo_keyboard(photo_id: int, can_promote: bool = False) -> InlineKeyboardMarkup:
-    """Клавиатура под разделом «Моя фотография» для конкретного кадра.
-
-    Кнопки:
-    • Статистика;
-    • Комментарии;
-    • Мои итоги;
-    • Продвигать (после итогов дня);
-    • Повторить (после итогов дня);
-    • Новая фотография (после итогов дня);
-    • Удалить;
-    • В меню.
-    """
-
+def build_my_photo_keyboard(
+    photo_id: int,
+    can_promote: bool = False,
+    is_premium: bool = False,
+    has_prev: bool = False,
+    has_next: bool = False,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
-    # Основные действия и навигация по работе
-    kb.button(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}")
+    # Основные действия
     kb.button(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}")
+    kb.button(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}")
 
+    # Личная сводка по работе
     kb.button(text="🏅 Мои итоги", callback_data=f"myphoto:myresults:{photo_id}")
 
-    # Продвижение в итоги недели (если доступно)
+    # Продвижение в итоги недели
     if can_promote:
         kb.button(text="🚀 Продвигать", callback_data=f"myphoto:promote:{photo_id}")
 
-    # Кнопки для пост-итогов (пока заглушки, но уже есть в интерфейсе)
-    kb.button(text="🔁 Повторить", callback_data=f"myphoto:repeat:{photo_id}")
-    kb.button(text="🖼 Новая фотография", callback_data=f"myphoto:new:{photo_id}")
+    # Повторить / добавить фотку
+    if is_premium:
+        kb.button(text="🔁 Повторить", callback_data=f"myphoto:repeat:{photo_id}")
+        kb.button(text="📤 Добавить фотографию", callback_data=f"myphoto:new:{photo_id}")
+    else:
+        kb.button(text="🖼 Новая фотография", callback_data=f"myphoto:new:{photo_id}")
 
-    # Удаление и выход в меню
+    # Навигация по своим фоткам
+    if has_prev or has_next:
+        if has_prev:
+            kb.button(text="⬅️ Назад", callback_data=f"myphoto:nav:{photo_id}:prev")
+        if has_next:
+            kb.button(text="➡️ Вперёд", callback_data=f"myphoto:nav:{photo_id}:next")
+
+    # Удалить и в меню
     kb.button(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}")
     kb.button(text="⬅️ В меню", callback_data="menu:back")
 
-    kb.adjust(2, 2, 2, 1, 1)
+    kb.adjust(2, 1, 2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -360,33 +367,40 @@ async def _compute_can_promote(photo: dict) -> bool:
     if now.date() <= day:
         return False
 
-    top5 = await get_daily_top_photos(day_key, limit=5)
-    in_top5 = any(p["id"] == photo["id"] for p in top5)
-    if not in_top5:
+    # Берём только топ-4 работ дня — продвигать можно 1–4 место
+    top4 = await get_daily_top_photos(day_key, limit=4)
+    in_top4 = any(p["id"] == photo["id"] for p in top4)
+    if not in_top4:
         return False
 
+    # Если эта конкретная фотография уже в недельном отборе — больше не продвигаем
     if await is_photo_in_weekly(photo["id"]):
         return False
+
+    # Ограничение: у пользователя может быть только одна активная работа в недельном отборе
+    user_id = photo.get("user_id")
+    if user_id:
+        weekly_photos = await get_weekly_photos_for_user(user_id)
+        if weekly_photos:
+            # уже есть хотя бы одна работа, участвующая в итогах недели
+            return False
 
     return True
 
 
 async def build_my_photo_main_text(photo: dict) -> str:
-    """Собрать основную подпись к работе в разделе «Моя фотография».
+    """Подпись для раздела «Моя фотография», когда работа уже есть.
 
-    Здесь показываем:
-    • название и устройство;
-    • категорию;
-    • базовую статистику (средний рейтинг, количество оценок);
-    • текущий статус итога дня по этой работе;
-    • таймер до возможности загрузить новую фотографию;
-    • описание (если есть).
+    Формат:
+    "Название" (эмодзи устройства / устройство)
+    <b>📝Описание:</b> текст описания — если описание есть.
     """
 
     # Информация об устройстве
     device_type_raw = (photo.get("device_type") or "").lower()
-    device_info = photo.get("device_info") or ""
+    device_info = (photo.get("device_info") or "").strip()
 
+    # Подбираем эмодзи под тип устройства
     if "смартфон" in device_type_raw or "phone" in device_type_raw:
         device_emoji = "📱"
     elif "фотокамера" in device_type_raw or "camera" in device_type_raw:
@@ -394,9 +408,9 @@ async def build_my_photo_main_text(photo: dict) -> str:
     else:
         device_emoji = "📸"
 
-    title = photo.get("title") or "Без названия"
+    title = (photo.get("title") or "Без названия").strip()
 
-    # Формируем хвост с устройством для заголовка
+    # Хвост с устройством
     if device_info:
         device_suffix = f" ({device_emoji} {device_info})"
     elif device_type_raw:
@@ -406,81 +420,12 @@ async def build_my_photo_main_text(photo: dict) -> str:
 
     title_line = f"\"{title}\"{device_suffix}"
 
-    lines: list[str] = [
-        f"<b>{title_line}</b>",
-        "",
-        "<b>Статистика</b>",
-    ]
+    lines: list[str] = [f"<b>{title_line}</b>"]
 
-    # Статистика по оценкам
-    stats = await get_photo_stats(photo["id"])
-    ratings_count = stats.get("ratings_count", 0)
-    avg = stats.get("avg_rating")
-
-    if ratings_count > 0 and avg is not None:
-        lines.append(f"• Средний рейтинг: <b>{avg:.1f}</b>")
-        lines.append(f"• Оценок: <b>{ratings_count}</b>")
-    else:
-        lines.append("• Эту фотографию ещё никто не оценил 😶")
-
-    # Итог по этой работе
-    day_key = photo.get("day_key")
-    now = get_moscow_now()
-
-    lines.append("")
-
-    if day_key:
-        try:
-            day = datetime.fromisoformat(day_key).date()
-        except Exception:
-            day = now.date()
-
-        # Итоги по этой работе считаем подведёнными, когда день фотографии полностью прошёл.
-        if now.date() <= day:
-            results_time_reached = False
-        else:
-            results_time_reached = True
-
-        if not results_time_reached:
-            lines.append(
-                "Итог этой фотографии: пока не подведён.\n"
-                "Итоги по этому дню появятся на следующий день."
-            )
-        else:
-            top = await get_daily_top_photos(day_key, limit=50)
-            place = None
-            top_entry = None
-            for idx, p in enumerate(top, start=1):
-                if p["id"] == photo["id"]:
-                    place = idx
-                    top_entry = p
-                    break
-
-            if place is not None and top_entry is not None:
-                best_count = top_entry.get("best_count") or 0
-                avg_top = top_entry.get("avg_rating")
-                avg_top_str = f"{avg_top:.1f}" if avg_top is not None else "—"
-                lines.append(
-                    f"Итог этой фотографии: место <b>{place}</b> в итогах дня.\n"
-                    f"Лучшие оценки (≥9): <b>{best_count}</b>, средний рейтинг: <b>{avg_top_str}</b>."
-                )
-            else:
-                lines.append(
-                    "Итог этой фотографии: в топ дня не попала, но её всё ещё могут оценивать ✨"
-                )
-    else:
-        lines.append("Итог этой фотографии: ещё не участвует в итогах дня.")
-
-    # Таймер до новой загрузки
-    remaining = _format_time_until_next_upload()
-    lines.append("")
-    lines.append(f"Новую фотографию можно выложить {remaining}.")
-
-    # Описание — в конце
-    description = photo.get("description")
+    description = (photo.get("description") or "").strip()
     if description:
         lines.append("")
-        lines.append(f"📝 {description}")
+        lines.append(f"<b>📝Описание:</b> {description}")
 
     return "\n".join(lines)
 
@@ -491,6 +436,8 @@ async def _show_my_photo_section(
     service_message: Message,
     state: FSMContext,
     photo: dict,
+    has_prev: bool = False,
+    has_next: bool = False,
 ) -> None:
     """Показ раздела «Моя фотография» одним сообщением с фото, подписью и кнопками.
 
@@ -500,9 +447,27 @@ async def _show_my_photo_section(
     3) Сохраняем id этого сообщения в FSM, чтобы потом можно было его удалить при выходе в меню.
     """
 
+    # Определяем, есть ли у автора этой работы активный премиум
+    is_premium_user = False
+    try:
+        author_user_id = photo.get("user_id")
+        if author_user_id:
+            author = await get_user_by_id(author_user_id)
+            if author and author.get("tg_id"):
+                is_premium_user = await is_user_premium_active(author["tg_id"])
+    except Exception:
+        # Если при проверке что-то пошло не так — просто считаем, что премиума нет
+        is_premium_user = False
+
     can_promote = await _compute_can_promote(photo)
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"], can_promote=can_promote)
+    kb = build_my_photo_keyboard(
+        photo["id"],
+        can_promote=can_promote,
+        is_premium=is_premium_user,
+        has_prev=has_prev,
+        has_next=has_next,
+    )
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
     try:
@@ -536,33 +501,37 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     is_admin = is_admin_user(user)
     user_id = user["id"]
 
-    photo = await get_today_photo_for_user(user_id)
+    photos = await get_active_photos_for_user(user_id)
+
+    photo: dict | None = None
+    if photos:
+        data = await state.get_data()
+        last_pid = data.get("myphoto_last_id")
+        if last_pid:
+            for p in photos:
+                if p["id"] == last_pid:
+                    photo = p
+                    break
+        if photo is None:
+            photo = photos[0]
 
     if photo is None:
         data = await state.get_data()
         last_pid = data.get("myphoto_last_id")
         if last_pid:
             candidate = await get_photo_by_id(last_pid)
-            if candidate is not None:
-                try:
-                    today_key = get_moscow_now().date().isoformat()
-                    if candidate.get("day_key") == today_key and not candidate.get("is_deleted"):
-                        photo = candidate
-                except Exception:
-                    pass
+            if candidate is not None and not candidate.get("is_deleted"):
+                photo = candidate
 
+    # Если сегодняшняя работа помечена как удалённая, но ты админ —
+    # пробуем вернуть последнюю живую работу (любого дня)
     if photo is not None and photo.get("is_deleted") and is_admin:
         data = await state.get_data()
         last_pid = data.get("myphoto_last_id")
         if last_pid:
             candidate = await get_photo_by_id(last_pid)
-            if candidate is not None:
-                try:
-                    today_key = get_moscow_now().date().isoformat()
-                    if candidate.get("day_key") == today_key and not candidate.get("is_deleted"):
-                        photo = candidate
-                except Exception:
-                    pass
+            if candidate is not None and not candidate.get("is_deleted"):
+                photo = candidate
 
     if photo is None:
         kb = InlineKeyboardBuilder()
@@ -608,11 +577,85 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
+    # Считаем, есть ли соседние работы для навигации
+    has_prev = False
+    has_next = False
+    if len(photos) > 1:
+        idx = 0
+        for i, p in enumerate(photos):
+            if p["id"] == photo["id"]:
+                idx = i
+                break
+        has_prev = idx > 0
+        has_next = idx < len(photos) - 1
+
     await _show_my_photo_section(
         chat_id=callback.message.chat.id,
         service_message=callback.message,
         state=state,
         photo=photo,
+        has_prev=has_prev,
+        has_next=has_next,
+    )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:nav:"))
+async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
+    """
+    Навигация по своим фотографиям: вперёд / назад.
+    Работает на основе списка активных работ пользователя.
+    """
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    # ['myphoto', 'nav', '<photo_id>', '<prev|next>']
+    if len(parts) != 4:
+        await callback.answer()
+        return
+
+    _, _, pid, direction = parts
+    try:
+        current_photo_id = int(pid)
+    except ValueError:
+        await callback.answer()
+        return
+
+    user_id = user["id"]
+    photos = await get_active_photos_for_user(user_id)
+    if not photos:
+        await callback.answer("У тебя пока нет активных фотографий.", show_alert=True)
+        return
+
+    # Ищем индекс текущего кадра
+    idx = 0
+    for i, p in enumerate(photos):
+        if p["id"] == current_photo_id:
+            idx = i
+            break
+
+    if direction == "prev" and idx > 0:
+        new_idx = idx - 1
+    elif direction == "next" and idx < len(photos) - 1:
+        new_idx = idx + 1
+    else:
+        new_idx = idx
+
+    photo = photos[new_idx]
+
+    has_prev = new_idx > 0
+    has_next = new_idx < len(photos) - 1
+
+    await _show_my_photo_section(
+        chat_id=callback.message.chat.id,
+        service_message=callback.message,
+        state=state,
+        photo=photo,
+        has_prev=has_prev,
+        has_next=has_next,
     )
 
     await callback.answer()
