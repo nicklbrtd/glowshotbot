@@ -181,12 +181,20 @@ async def profile_my_results(callback: CallbackQuery):
             reply_markup=kb,
         )
     except Exception:
-        # если текущее сообщение не фото — покажем текстом
         try:
             await callback.message.edit_text(caption, reply_markup=kb)
         except Exception:
-            await callback.message.answer(caption, reply_markup=kb)
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
 
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=caption,
+                reply_markup=kb,
+                disable_notification=True,
+            )
     await callback.answer()
 
 

@@ -781,13 +781,23 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 reply_markup=kb,
             )
         except Exception:
-            await message.bot.send_photo(
-                chat_id=report_chat_id,
-                photo=photo["file_id"],
-                caption=caption,
-                reply_markup=kb,
-                disable_notification=True,
-            )
+            try:
+                await message.bot.delete_message(chat_id=report_chat_id, message_id=report_msg_id)
+            except Exception:
+                pass
+
+            try:
+                await message.bot.send_photo(
+                    chat_id=report_chat_id,
+                    photo=photo["file_id"],
+                    caption=caption,
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+
+            
 # Новый хендлер для супер-оценки
 @router.callback_query(F.data.startswith("rate:super:"))
 async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
