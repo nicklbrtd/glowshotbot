@@ -1236,49 +1236,6 @@ async def get_weekly_rank_for_user(user_id: int) -> int | None:
             return idx
     return None
 
-
-async def save_pending_referral(new_user_tg_id: int, referral_code: str | None) -> None:
-    """
-    Сохраняем рефералку при /start, пока юзер ещё не зарегистрирован.
-    Самый простой вариант: если юзера ещё нет — создадим "черновую" запись.
-    Если не хочешь черновые записи — скажи, сделаю через отдельную таблицу pending_referrals.
-    """
-    if not referral_code:
-        return
-
-    p = _assert_pool()
-    now = datetime.utcnow().isoformat(timespec="seconds")
-
-    async with p.acquire() as conn:
-        ref_owner = await conn.fetchrow(
-            "SELECT id FROM users WHERE referral_code = $1 AND is_deleted = 0",
-            referral_code,
-        )
-        if not ref_owner:
-            return
-        ref_owner_id = int(ref_owner["id"])
-
-        existing = await conn.fetchrow("SELECT id FROM users WHERE tg_id = $1", new_user_tg_id)
-        if existing:
-            await conn.execute(
-                """
-                UPDATE users
-                SET referred_by_user_id = $1, updated_at = $2
-                WHERE tg_id = $3
-                """,
-                ref_owner_id, now, new_user_tg_id,
-            )
-        else:
-            # черновик, чтобы не потерять рефералку
-            await conn.execute(
-                """
-                INSERT INTO users (tg_id, name, gender, bio, created_at, updated_at, referred_by_user_id)
-                VALUES ($1, 'User', 'unknown', '', $2, $2, $3)
-                """,
-                new_user_tg_id, now, ref_owner_id,
-            )
-
-
 async def get_total_users() -> int:
     p = _assert_pool()
     async with p.acquire() as conn:
