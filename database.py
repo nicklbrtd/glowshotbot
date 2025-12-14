@@ -1235,3 +1235,222 @@ async def get_weekly_rank_for_user(user_id: int) -> int | None:
         if int(row["user_id"]) == int(user_id):
             return idx
     return None
+
+
+async def save_pending_referral(new_user_tg_id: int, referral_code: str | None) -> None:
+    """
+    Сохраняем рефералку при /start, пока юзер ещё не зарегистрирован.
+    Самый простой вариант: если юзера ещё нет — создадим "черновую" запись.
+    Если не хочешь черновые записи — скажи, сделаю через отдельную таблицу pending_referrals.
+    """
+    if not referral_code:
+        return
+
+    p = _assert_pool()
+    now = datetime.utcnow().isoformat(timespec="seconds")
+
+    async with p.acquire() as conn:
+        ref_owner = await conn.fetchrow(
+            "SELECT id FROM users WHERE referral_code = $1 AND is_deleted = 0",
+            referral_code,
+        )
+        if not ref_owner:
+            return
+        ref_owner_id = int(ref_owner["id"])
+
+        existing = await conn.fetchrow("SELECT id FROM users WHERE tg_id = $1", new_user_tg_id)
+        if existing:
+            await conn.execute(
+                """
+                UPDATE users
+                SET referred_by_user_id = $1, updated_at = $2
+                WHERE tg_id = $3
+                """,
+                ref_owner_id, now, new_user_tg_id,
+            )
+        else:
+            # черновик, чтобы не потерять рефералку
+            await conn.execute(
+                """
+                INSERT INTO users (tg_id, name, gender, bio, created_at, updated_at, referred_by_user_id)
+                VALUES ($1, 'User', 'unknown', '', $2, $2, $3)
+                """,
+                new_user_tg_id, now, ref_owner_id,
+            )
+
+
+async def get_total_users() -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        return int((await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted = 0")) or 0)
+
+
+async def get_moderators() -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM users WHERE is_deleted = 0 AND is_moderator = 1 ORDER BY id DESC")
+    return [dict(r) for r in rows]
+
+
+async def get_helpers() -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM users WHERE is_deleted = 0 AND is_helper = 1 ORDER BY id DESC")
+    return [dict(r) for r in rows]
+
+
+async def get_support_users() -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM users WHERE is_deleted = 0 AND is_support = 1 ORDER BY id DESC")
+    return [dict(r) for r in rows]
+
+
+async def is_moderator_by_tg_id(tg_id: int) -> bool:
+    u = await get_user_by_tg_id(tg_id)
+    return bool(u and int(u.get("is_moderator") or 0) == 1)
+
+
+async def set_user_moderator_by_tg_id(tg_id: int, value: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_moderator = $1 WHERE tg_id = $2",
+            1 if value else 0,
+            tg_id,
+        )
+
+
+async def set_user_admin_by_tg_id(tg_id: int, value: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_admin = $1 WHERE tg_id = $2",
+            1 if value else 0,
+            tg_id,
+        )
+
+
+async def get_user_block_status_by_tg_id(tg_id: int) -> bool:
+    """
+    Пока у тебя нет поля is_blocked — вернём False.
+    Если у тебя в коде реально используется блокировка, скажи — добавим колонку is_blocked и логику.
+    """
+    return False
+
+
+async def set_photo_moderation_status(photo_id: int, status: str) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE photos SET moderation_status = $1 WHERE id = $2",
+            status, int(photo_id),
+        )
+
+
+async def get_next_photo_for_moderation() -> dict | None:
+    """
+    Берём следующее фото со статусом pending.
+    Если у тебя другой статус-нейминг — подстроим.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT p.*, u.tg_id AS user_tg_id, u.username AS user_username, u.name AS user_name
+            FROM photos p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.is_deleted = 0
+              AND p.moderation_status = 'pending'
+            ORDER BY p.created_at ASC, p.id ASC
+            LIMIT 1
+            """
+        )
+    return dict(row) if row else None
+
+
+async def create_photo_report(user_id: int, photo_id: int, reason: str, text: str | None) -> int:
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO photo_reports (user_id, photo_id, reason, text, status, created_at)
+            VALUES ($1,$2,$3,$4,'pending',$5)
+            RETURNING id
+            """,
+            int(user_id), int(photo_id), reason, text, now,
+        )
+    return int(row["id"])
+
+
+async def get_photo_report_stats(photo_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        total = int((await conn.fetchval("SELECT COUNT(*) FROM photo_reports WHERE photo_id = $1", int(photo_id))) or 0)
+        pending = int((await conn.fetchval(
+            "SELECT COUNT(*) FROM photo_reports WHERE photo_id = $1 AND status = 'pending'",
+            int(photo_id),
+        )) or 0)
+    return {"total": total, "pending": pending}
+
+async def get_daily_top_photos(day_key: str | None = None, limit: int = 4) -> list[dict]:
+    """
+    Топ дня: берём фото за day_key (yyyy-mm-dd) и сортируем по среднему рейтингу.
+    """
+    if day_key is None:
+        day_key = get_moscow_today()
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                p.*,
+                COUNT(CASE WHEN r.value != 0 THEN 1 END) AS ratings_count,
+                AVG(NULLIF(r.value, 0))               AS avg_rating
+            FROM photos p
+            LEFT JOIN ratings r ON r.photo_id = p.id
+            WHERE p.is_deleted = 0
+              AND p.moderation_status = 'active'
+              AND p.day_key = $1
+            GROUP BY p.id
+            HAVING COUNT(CASE WHEN r.value != 0 THEN 1 END) > 0
+            ORDER BY avg_rating DESC NULLS LAST, ratings_count DESC, p.id ASC
+            LIMIT $2
+            """,
+            day_key, int(limit),
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_weekly_best_photo() -> dict | None:
+    """
+    Лучшее фото за последние 7 дней (по avg). Можно поменять на 'прошлая неделя' — но пока так.
+    """
+    today = get_moscow_now().date()
+    start = (today - timedelta(days=6)).isoformat()
+    end = today.isoformat()
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                p.*,
+                COUNT(CASE WHEN r.value != 0 THEN 1 END) AS ratings_count,
+                AVG(NULLIF(r.value, 0))               AS avg_rating
+            FROM photos p
+            LEFT JOIN ratings r ON r.photo_id = p.id
+            WHERE p.is_deleted = 0
+              AND p.moderation_status = 'active'
+              AND p.day_key BETWEEN $1 AND $2
+            GROUP BY p.id
+            HAVING COUNT(CASE WHEN r.value != 0 THEN 1 END) > 0
+            ORDER BY avg_rating DESC NULLS LAST, ratings_count DESC, p.id ASC
+            LIMIT 1
+            """,
+            start, end,
+        )
+    return dict(row) if row else None
+

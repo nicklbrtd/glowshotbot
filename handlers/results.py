@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 from utils.time import get_moscow_now
+# чтобы handlers/results.py не падал
+from utils.time import get_moscow_today as get_moscow_today
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -12,7 +14,6 @@ from aiogram.types import (
 from keyboards.common import build_back_to_menu_kb
 
 from database import (
-    get_moscow_today,
     get_weekly_best_photo,
     get_daily_top_photos,
 )
