@@ -57,6 +57,7 @@ async def init_db():
                 created_at TEXT NOT NULL,
                 day_key TEXT NOT NULL,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
+                repeat_used INTEGER NOT NULL DEFAULT 0,
                 moderation_status TEXT NOT NULL DEFAULT 'active',
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -300,7 +301,6 @@ async def init_db():
             )
         except aiosqlite.OperationalError:
             pass
-
         try:
             await db.execute(
                 "ALTER TABLE awards ADD COLUMN is_special INTEGER NOT NULL DEFAULT 0"
@@ -311,6 +311,10 @@ async def init_db():
             await db.execute(
                 "ALTER TABLE awards ADD COLUMN granted_by_user_id INTEGER"
             )
+        except aiosqlite.OperationalError:
+            pass
+        try:
+            await db.execute("ALTER TABLE photos ADD COLUMN repeat_used INTEGER NOT NULL DEFAULT 0")
         except aiosqlite.OperationalError:
             pass
 
@@ -3480,3 +3484,25 @@ async def get_active_photos_for_user(user_id: int) -> list[dict]:
         await cursor.close()
 
     return [dict(r) for r in rows]
+
+
+async def is_photo_repeat_used(photo_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT repeat_used FROM photos WHERE id = ? LIMIT 1",
+            (photo_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    if not row:
+        return False
+    return bool(row[0])
+
+
+async def mark_photo_repeat_used(photo_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE photos SET repeat_used = 1 WHERE id = ?",
+            (photo_id,),
+        )
+        await db.commit()

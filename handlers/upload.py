@@ -28,6 +28,8 @@ from database import (
     get_user_by_id,
     is_user_premium_active,
     get_active_photos_for_user,
+    is_photo_repeat_used,
+    mark_photo_repeat_used,
 )
 from utils.time import get_moscow_now
 
@@ -195,44 +197,46 @@ def build_my_photo_caption(photo: dict) -> str:
 
 def build_my_photo_keyboard(
     photo_id: int,
-    can_promote: bool = False,
-    is_premium: bool = False,
     has_prev: bool = False,
     has_next: bool = False,
 ) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
+    """
+    Новая клавиатура «Моя фотография».
 
-    # Основные действия
-    kb.button(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}")
-    kb.button(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}")
+    • Кнопки по 2 на строку.
+    • Все кнопки всегда показываются (ограничения — внутри обработчиков).
+    • Если фото одно — «В меню» одной строкой.
+    • Если фото два — снизу строка: (Назад?) + В меню + (Вперёд?)
+    """
+    rows: list[list[InlineKeyboardButton]] = []
 
-    # Личная сводка по работе
-    kb.button(text="🏅 Мои итоги", callback_data=f"myphoto:myresults:{photo_id}")
+    rows.append([
+        InlineKeyboardButton(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}:0"),
+        InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
+    ])
 
-    # Продвижение в итоги недели
-    if can_promote:
-        kb.button(text="🚀 Продвигать", callback_data=f"myphoto:promote:{photo_id}")
+    rows.append([
+        InlineKeyboardButton(text="🔁 Повторить", callback_data=f"myphoto:repeat:{photo_id}"),
+        InlineKeyboardButton(text="🚀 Продвигать", callback_data=f"myphoto:promote:{photo_id}"),
+    ])
 
-    # Повторить / добавить фотку
-    if is_premium:
-        kb.button(text="🔁 Повторить", callback_data=f"myphoto:repeat:{photo_id}")
-        kb.button(text="📤 Добавить фотографию", callback_data=f"myphoto:new:{photo_id}")
-    else:
-        kb.button(text="🖼 Новая фотография", callback_data=f"myphoto:new:{photo_id}")
+    rows.append([
+        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
+        InlineKeyboardButton(text="📤 Добавить фотографию", callback_data="myphoto:add"),
+    ])
 
-    # Навигация по своим фоткам
     if has_prev or has_next:
+        nav_row: list[InlineKeyboardButton] = []
         if has_prev:
-            kb.button(text="⬅️ Назад", callback_data=f"myphoto:nav:{photo_id}:prev")
+            nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:nav:{photo_id}:prev"))
+        nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
         if has_next:
-            kb.button(text="➡️ Вперёд", callback_data=f"myphoto:nav:{photo_id}:next")
+            nav_row.append(InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"myphoto:nav:{photo_id}:next"))
+        rows.append(nav_row)
+    else:
+        rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")])
 
-    # Удалить и в меню
-    kb.button(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}")
-    kb.button(text="⬅️ В меню", callback_data="menu:back")
-
-    kb.adjust(2, 1, 2, 2, 1, 1)
-    return kb.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
@@ -389,18 +393,18 @@ async def _compute_can_promote(photo: dict) -> bool:
 
 
 async def build_my_photo_main_text(photo: dict) -> str:
-    """Подпись для раздела «Моя фотография», когда работа уже есть.
+    """
+    Новый шаблон:
+    "название" (📱)
 
-    Формат:
-    "Название" (эмодзи устройства / устройство)
-    <b>📝Описание:</b> текст описания — если описание есть.
+    📅 Опубликовано: 12.12.2025г
+    💖 Оценок: 99
+    📉/📈 Рейтинг: 8.2
+
+    📝Описание: ...
     """
 
-    # Информация об устройстве
     device_type_raw = (photo.get("device_type") or "").lower()
-    device_info = (photo.get("device_info") or "").strip()
-
-    # Подбираем эмодзи под тип устройства
     if "смартфон" in device_type_raw or "phone" in device_type_raw:
         device_emoji = "📱"
     elif "фотокамера" in device_type_raw or "camera" in device_type_raw:
@@ -410,22 +414,45 @@ async def build_my_photo_main_text(photo: dict) -> str:
 
     title = (photo.get("title") or "Без названия").strip()
 
-    # Хвост с устройством
-    if device_info:
-        device_suffix = f" ({device_emoji} {device_info})"
-    elif device_type_raw:
-        device_suffix = f" ({device_emoji})"
+    # дата публикации берём по day_key (московская дата)
+    day_key = (photo.get("day_key") or "").strip()
+    pub_str = day_key
+    if day_key:
+        try:
+            pub_dt = datetime.fromisoformat(day_key)
+            pub_str = pub_dt.strftime("%d.%m.%Y")
+        except Exception:
+            pub_str = day_key or "—"
+
+    # статистика
+    stats = await get_photo_stats(photo["id"])
+    ratings_count = int(stats.get("ratings_count") or 0)
+    avg = stats.get("avg_rating")
+
+    if avg is None:
+        avg_str = "—"
+        trend = "📉"
     else:
-        device_suffix = ""
-
-    title_line = f"\"{title}\"{device_suffix}"
-
-    lines: list[str] = [f"<b>{title_line}</b>"]
+        try:
+            avg_f = float(avg)
+            avg_str = f"{avg_f:.2f}".rstrip("0").rstrip(".")
+            trend = "📈" if avg_f >= 7 else "📉"
+        except Exception:
+            avg_str = "—"
+            trend = "📉"
 
     description = (photo.get("description") or "").strip()
+
+    lines: list[str] = []
+    lines.append(f"<b>\"{title}\" ({device_emoji})</b>")
+    lines.append("")
+    lines.append(f"📅 Опубликовано: {pub_str}г")
+    lines.append(f"💖 Оценок: {ratings_count}")
+    lines.append(f"{trend} Рейтинг: <b>{avg_str}</b>")
+
     if description:
         lines.append("")
-        lines.append(f"<b>📝Описание:</b> {description}")
+        lines.append(f"📝Описание: {description}")
 
     return "\n".join(lines)
 
@@ -462,12 +489,10 @@ async def _show_my_photo_section(
     can_promote = await _compute_can_promote(photo)
     caption = await build_my_photo_main_text(photo)
     kb = build_my_photo_keyboard(
-        photo["id"],
-        can_promote=can_promote,
-        is_premium=is_premium_user,
-        has_prev=has_prev,
-        has_next=has_next,
-    )
+    photo["id"],
+    has_prev=has_prev,
+    has_next=has_next,
+)
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
     try:
@@ -500,8 +525,22 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
 
     is_admin = is_admin_user(user)
     user_id = user["id"]
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
 
     photos = await get_active_photos_for_user(user_id)
+    # сортируем новые сверху
+    try:
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+    except Exception:
+        pass
+
+    # применяем лимиты
+    photos = photos[: (2 if is_premium_user else 1)]
 
     photo: dict | None = None
     if photos:
@@ -676,6 +715,28 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         return
 
     user_id = user["id"]
+    active_photos = await get_active_photos_for_user(user_id)
+
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    max_allowed = 2 if is_premium_user else 1
+    if len(active_photos) >= max_allowed:
+        if not is_premium_user:
+            await callback.answer(
+                "У тебя уже есть активная фотография. Удали её или купи GlowShot Premium 💎, чтобы добавить вторую.",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                "У тебя уже загружено 2 активные фотографии — это максимум даже для Premium.",
+                show_alert=True,
+            )
+        return
     is_admin = is_admin_user(user)
 
     photo = await get_today_photo_for_user(user_id)
@@ -1278,102 +1339,216 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("myphoto:comments:"))
-async def myphoto_comments(callback: CallbackQuery):
+async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    # myphoto:comments:<photo_id>:<page>
+    if len(parts) < 3:
+        await callback.answer()
+        return
 
     try:
-        _, _, pid = callback.data.split(":", 2)
-        photo_id = int(pid)
-    except Exception:
-        await callback.answer("Странная фотография, не могу показать комментарии.", show_alert=True)
+        photo_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
         return
 
-    photo = await get_photo_by_id(photo_id)
-    if photo is None:
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    comments = await get_comments_for_photo(photo_id, limit=10)
-
-    lines: list[str] = ["<b>Комментарии к этой фотографии:</b>"]
-    if not comments:
-        lines.append("Пока ни одного комментария 😶")
-    else:
-        for c in comments:
-            is_public = bool(c.get("is_public", 1))
-            author = "Аноним"
-            if is_public:
-                name = c.get("name") or ""
-                username = c.get("username")
-                if username:
-                    if name:
-                        author = f"{name} (@{username})"
-                    else:
-                        author = f"@{username}"
-                elif name:
-                    author = name
-
-            text = c.get("text") or ""
-            rating = c.get("rating_value")
-            rating_str = f" ({rating})" if rating is not None else ""
-
-            lines.append(f"• <b>{author}</b>: {text}{rating_str}")
-
-    text = "\n".join(lines)
-
-    kb = build_my_photo_keyboard(photo_id)
-
-    if callback.message.photo:
+    page = 0
+    if len(parts) >= 4:
         try:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        except TelegramBadRequest:
-            # Телега сказала "message is not modified" — значит, и так всё ок.
-            # Просто игнорируем эту ошибку, чтобы не засирать лог.
-            pass
+            page = int(parts[3])
+        except Exception:
+            page = 0
+
+    comments = await get_comments_for_photo(photo_id) or []
+    per_page = 5
+    total = len(comments)
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = max(0, min(page, pages - 1))
+
+    start = page * per_page
+    chunk = comments[start:start + per_page]
+
+    lines: list[str] = ["💬 <b>Комментарии</b>", ""]
+
+    if total == 0:
+        lines.append("Пока нет ни одного комментария.\nБудь первым 😌")
     else:
-        await callback.message.edit_text(text, reply_markup=kb)
+        for c in chunk:
+            text = (c.get("text") or "").strip()
+            is_public = bool(c.get("is_public", 1))
+
+            if is_public:
+                name = (c.get("user_name") or "").strip()
+                username = (c.get("user_username") or "").strip()
+                if username:
+                    who = f"<a href=\"https://t.me/{username}\">{name or '@' + username}</a>"
+                else:
+                    who = name or "Пользователь"
+            else:
+                who = "🕵 Аноним"
+
+            lines.append(f"• <b>{who}</b>: {text}")
+
+    kb = _build_comments_nav_kb(photo_id, page, pages)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption="\n".join(lines), reply_markup=kb)
+        else:
+            await callback.message.edit_text("\n".join(lines), reply_markup=kb)
+    except Exception:
+        pass
 
     await callback.answer()
 
 
+def _build_comments_nav_kb(photo_id: int, page: int, pages: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
 
-@router.callback_query(F.data.startswith("myphoto:stats:"))
-async def myphoto_stats(callback: CallbackQuery):
+    if pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}"))
+        nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}"))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "noop")
+async def noop_handler(callback: CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:back:"))
+async def myphoto_back(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
 
     try:
-        _, _, pid = callback.data.split(":", 2)
-        photo_id = int(pid)
-    except Exception:
-        await callback.answer("Странная фотография, не могу показать статистику.", show_alert=True)
+        photo_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
         return
 
     photo = await get_photo_by_id(photo_id)
-    if photo is None:
+    if photo is None or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    # лимит 1/2 в навигации
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    photos = await get_active_photos_for_user(user["id"])
+    try:
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+    except Exception:
+        pass
+    photos = photos[: (2 if is_premium_user else 1)]
+
+    has_prev = False
+    has_next = False
+    if len(photos) > 1:
+        idx = 0
+        for i, p in enumerate(photos):
+            if p["id"] == photo_id:
+                idx = i
+                break
+        has_prev = idx > 0
+        has_next = idx < len(photos) - 1
+
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(photo_id, has_prev=has_prev, has_next=has_next)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=caption, reply_markup=kb)
+        else:
+            await callback.message.edit_text(caption, reply_markup=kb)
+    except Exception:
+        pass
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:stats:"))
+async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
 
     stats = await get_photo_stats(photo_id)
-    ratings_count = stats["ratings_count"]
-    avg = stats["avg_rating"]
-    skips = stats["skips_count"]
+    ratings_count = int(stats.get("ratings_count") or 0)
+    avg = stats.get("avg_rating")
+    avg_str = "—" if avg is None else f"{float(avg):.2f}".rstrip("0").rstrip(".")
 
-    lines: list[str] = ["<b>Статистика по этой фотографии:</b>"]
+    super_count = int(stats.get("super_ratings_count") or 0)
+    comments_count = int(stats.get("comments_count") or 0)
 
-    if ratings_count > 0 and avg is not None:
-        lines.append(f"• Средняя оценка: <b>{avg:.1f}</b>")
-        lines.append(f"• Количество оценок: <b>{ratings_count}</b>")
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    lines: list[str] = ["📊 <b>Статистика фотографии</b>", ""]
+    lines.append(f"💖 Оценок: <b>{ratings_count}</b>")
+    lines.append(f"📈 Средняя оценка: <b>{avg_str}</b>")
+    lines.append(f"💬 Комментариев: <b>{comments_count}</b>")
+    lines.append(f"💥 Супер-оценок: <b>{super_count}</b>")
+
+    lines.append("")
+    if is_premium_user:
+        lines.append("💎 <b>Premium</b>: расширенная статистика будет доступна тут (в разработке).")
     else:
-        lines.append("• Эту фотографию ещё никто не оценил 😶")
+        lines.append("💎 Хочешь больше статистики? Это будет доступно в GlowShot Premium.")
 
-    if skips > 0:
-        lines.append(f"• Пропусков: <b>{skips}</b>")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")]]
+    )
 
-    text = "\n".join(lines)
-    kb = build_my_photo_keyboard(photo_id)
-
-    if callback.message.photo:
-        await callback.message.edit_caption(caption=text, reply_markup=kb)
-    else:
-        await callback.message.edit_text(text, reply_markup=kb)
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption="\n".join(lines), reply_markup=kb)
+        else:
+            await callback.message.edit_text("\n".join(lines), reply_markup=kb)
+    except Exception:
+        pass
 
     await callback.answer()
 
@@ -1477,17 +1652,107 @@ async def myphoto_new_stub(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("myphoto:repeat:"))
-async def myphoto_repeat_stub(callback: CallbackQuery):
-    """
-    Заглушка под механику «Повторить» — повторное участие работы в следующем дне,
-    если она не попала в топ‑5.
-    """
+async def myphoto_repeat(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
 
-    await callback.answer(
-        "Функция «Повторить» пока в разработке.\n\n"
-        "Идея: дать работе ещё один шанс в следующий конкурсный день.",
-        show_alert=True,
-    )
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    if int(photo.get("user_id") or 0) != int(user["id"]):
+        await callback.answer("Это не твоя фотография.", show_alert=True)
+        return
+
+    # можно повторить только если у пользователя одна активная фотка (по твоему правилу)
+    active_photos = await get_active_photos_for_user(user["id"])
+    try:
+        active_photos = sorted(active_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+    except Exception:
+        pass
+
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    active_photos = active_photos[: (2 if is_premium_user else 1)]
+    if len(active_photos) != 1:
+        await callback.answer("🔁 Повторить можно только когда у тебя одна активная фотография.", show_alert=True)
+        return
+
+    if await is_photo_repeat_used(photo_id):
+        await callback.answer("Ты уже использовал(а) «Повторить» для этой работы — третьего шанса нет 🙃", show_alert=True)
+        return
+
+    # фото НЕ должно попадать в топ-10 дня
+    day_key = photo.get("day_key")
+    if day_key:
+        top10 = await get_daily_top_photos(day_key, limit=10)
+        if any(int(p["id"]) == int(photo_id) for p in top10):
+            await callback.answer("Эта работа уже попадала в топ дня — повторить можно только если она не была в топе.", show_alert=True)
+            return
+
+    # дневной лимит
+    today_photo = await get_today_photo_for_user(user["id"])
+    if today_photo is not None and not today_photo.get("is_deleted"):
+        await callback.answer("Сегодня у тебя уже есть опубликованная работа. Повтори позже — на следующий день.", show_alert=True)
+        return
+
+    # не повторяем в тот же день
+    now = get_moscow_now().date()
+    try:
+        photo_day = datetime.fromisoformat(day_key).date() if day_key else None
+    except Exception:
+        photo_day = None
+    if photo_day is not None and photo_day == now:
+        await callback.answer("Эту работу нельзя повторить в тот же день. Попробуй завтра.", show_alert=True)
+        return
+
+    # создаём новую запись на сегодня
+    try:
+        new_photo = await create_today_photo(
+            user_id=user["id"],
+            file_id=photo["file_id"],
+            title=photo.get("title") or "Без названия",
+            device_type=photo.get("device_type") or "",
+            device_info=photo.get("device_info"),
+            category=photo.get("category") or "photo",
+            description=photo.get("description"),
+        )
+    except Exception:
+        await callback.answer("Не получилось повторить работу. Попробуй позже.", show_alert=True)
+        return
+
+    try:
+        await mark_photo_repeat_used(photo_id)
+    except Exception:
+        pass
+
+    try:
+        # если create_today_photo возвращает dict с id
+        if isinstance(new_photo, dict) and new_photo.get("id"):
+            await state.update_data(myphoto_last_id=new_photo["id"])
+    except Exception:
+        pass
+
+    await callback.answer("Готово! Работа опубликована ещё раз ✨")
+    await my_photo_menu(callback, state)
 
 
 @router.callback_query(F.data.startswith("myphoto:extra:"))
@@ -1559,6 +1824,14 @@ async def myphoto_promote(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Эта фотография уже участвует в итогах недели.", show_alert=True)
         return
 
+    can_promote = await _compute_can_promote(photo)
+    if not can_promote:
+        await callback.answer(
+            "🚀 Продвигать можно только если работа была в топ-4 дня и день уже завершён.\n"
+            "Также можно продвинуть только одну фотографию в неделю.",
+            show_alert=True,
+        )
+        return
     await add_weekly_candidate(photo_id)
 
     avg = top_entry.get("avg_rating")
