@@ -478,10 +478,16 @@ async def profile_back_to_profile(callback: CallbackQuery):
             reply_markup=markup,
         )
     except Exception:
-        # В крайнем случае — отправляем новое сообщение
-        await callback.message.answer(
-            text,
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
             reply_markup=markup,
+            disable_notification=True,
         )
 
     await callback.answer()

@@ -780,22 +780,13 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     has_prev = new_idx > 0
     has_next = new_idx < len(photos) - 1
 
-    await _show_my_photo_section(
-        chat_id=callback.message.chat.id,
-        service_message=callback.message,
+    await _edit_or_replace_my_photo_message(
+        callback=callback,
         state=state,
         photo=photo,
         has_prev=has_prev,
         has_next=has_next,
     )
-
-    await _edit_or_replace_my_photo_message(
-    callback=callback,
-    state=state,
-    photo=photo,
-    has_prev=has_prev,
-    has_next=has_next,
-)
     await callback.answer()
 
 

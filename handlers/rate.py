@@ -762,7 +762,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
 
     photo = await get_photo_by_id(photo_id)
     if photo is not None:
-        caption = build_my_photo_caption(photo)
+        caption = build_rate_caption(photo)
 
         is_premium = False
         try:
