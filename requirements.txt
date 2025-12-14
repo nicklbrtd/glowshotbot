@@ -4,4 +4,5 @@ aiosqlite>=0.20.0
 python-multipart
 fastapi
 uvicorn[standard]
+aiosqlite>=0.20.0
 asyncpg-0.31.0
