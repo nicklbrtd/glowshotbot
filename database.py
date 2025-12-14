@@ -103,6 +103,28 @@ async def init_db():
                 FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS my_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source_photo_id INTEGER UNIQUE,
+                file_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                device_type TEXT,
+                device_info TEXT,
+                category TEXT,
+                description TEXT,
+                day_key TEXT,
+                kind TEXT NOT NULL,            -- 'daily_top10' или 'weekly_candidate'
+                place INTEGER,                 -- место 1..10 если было в топ-10
+                avg_rating REAL,
+                ratings_count INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_my_results_user_created
+                ON my_results(user_id, created_at);
+
             CREATE TABLE IF NOT EXISTS awards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -3505,4 +3527,83 @@ async def mark_photo_repeat_used(photo_id: int) -> None:
             "UPDATE photos SET repeat_used = 1 WHERE id = ?",
             (photo_id,),
         )
+        await db.commit()
+
+
+async def archive_photo_to_my_results(
+    *,
+    user_id: int,
+    photo: dict,
+    kind: str,
+    place: int | None = None,
+    avg_rating: float | None = None,
+    ratings_count: int | None = None,
+) -> None:
+    """Сохранить снимок в архив «Мои итоги» (снапшот)."""
+
+    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO my_results (
+                user_id,
+                source_photo_id,
+                file_id,
+                title,
+                device_type,
+                device_info,
+                category,
+                description,
+                day_key,
+                kind,
+                place,
+                avg_rating,
+                ratings_count,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                int(photo.get("id")) if photo.get("id") is not None else None,
+                photo.get("file_id"),
+                photo.get("title") or "Без названия",
+                photo.get("device_type"),
+                photo.get("device_info"),
+                photo.get("category"),
+                photo.get("description"),
+                photo.get("day_key"),
+                kind,
+                place,
+                avg_rating,
+                ratings_count,
+                now_iso,
+            ),
+        )
+        await db.commit()
+
+
+async def get_my_results_for_user(user_id: int) -> list[dict]:
+    """Список «Мои итоги» (новые сверху)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT *
+            FROM my_results
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+    return [dict(r) for r in rows]
+
+
+async def hard_delete_photo(photo_id: int) -> None:
+    """Полностью удалить фото из базы (и каскадно связанные сущности)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM photos WHERE id = ?", (photo_id,))
         await db.commit()

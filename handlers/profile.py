@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
@@ -23,6 +23,7 @@ from database import (
     get_today_photo_for_user,
     get_awards_for_user,
     get_user_by_id,
+    get_my_results_for_user,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -84,6 +85,114 @@ def _format_time_until_next_upload() -> str:
     return "через " + " ".join(parts)
 
 
+def _build_my_results_kb(idx: int, total: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+
+    row: list[InlineKeyboardButton] = []
+    if idx > 0:
+        row.append(InlineKeyboardButton(text="⬅️", callback_data=f"myresults:{idx-1}"))
+    row.append(InlineKeyboardButton(text=f"{idx+1}/{total}", callback_data="noop"))
+    if idx < total - 1:
+        row.append(InlineKeyboardButton(text="➡️", callback_data=f"myresults:{idx+1}"))
+
+    kb.row(*row)
+    kb.row(InlineKeyboardButton(text="⬅️ В профиль", callback_data="menu:profile"))
+    return kb.as_markup()
+
+
+@router.callback_query(F.data.startswith("myresults:"))
+async def profile_my_results(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        await callback.answer()
+        return
+
+    try:
+        idx = int(parts[1])
+    except Exception:
+        idx = 0
+
+    items = await get_my_results_for_user(user["id"])
+
+    if not items:
+        await callback.message.edit_text(
+            "🏅 <b>Мои итоги</b>\n\nПока нет фотографий, которые попадали в итоги.",
+            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+        )
+        await callback.answer()
+        return
+
+    total = len(items)
+    idx = max(0, min(idx, total - 1))
+    it = items[idx]
+
+    kind = (it.get("kind") or "").strip()
+    place = it.get("place")
+    day_key = it.get("day_key")
+
+    if kind == "weekly_candidate":
+        kind_line = "🗓 Продвинуто в недельный отбор"
+    else:
+        kind_line = f"📅 Итоги дня • место #{place}" if place else "📅 Итоги дня"
+
+    date_str = "—"
+    if day_key:
+        try:
+            date_str = datetime.fromisoformat(day_key).strftime("%d.%m.%Y")
+        except Exception:
+            date_str = str(day_key)
+
+    avg = it.get("avg_rating")
+    cnt = it.get("ratings_count")
+
+    if avg is None:
+        rating_line = "⭐ Рейтинг: —"
+    else:
+        try:
+            avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
+            rating_line = f"⭐ Рейтинг: <b>{avg_str}</b>"
+        except Exception:
+            rating_line = "⭐ Рейтинг: —"
+
+    if cnt is not None:
+        rating_line += f" ({cnt} оценок)"
+
+    title = it.get("title") or "Без названия"
+
+    caption = "\n".join([
+        "🏅 <b>Мои итоги</b>",
+        "",
+        f"<b>\"{title}\"</b>",
+        f"📅 Дата: {date_str}",
+        kind_line,
+        rating_line,
+    ])
+
+    kb = _build_my_results_kb(idx, total)
+
+    try:
+        await callback.message.edit_media(
+            media=InputMediaPhoto(media=it["file_id"], caption=caption),
+            reply_markup=kb,
+        )
+    except Exception:
+        # если текущее сообщение не фото — покажем текстом
+        try:
+            await callback.message.edit_text(caption, reply_markup=kb)
+        except Exception:
+            await callback.message.answer(caption, reply_markup=kb)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def noop_profile(callback: CallbackQuery):
+    await callback.answer()
 
 
 async def build_profile_view(user: dict):
@@ -294,6 +403,7 @@ async def build_profile_view(user: dict):
 
     kb = InlineKeyboardBuilder()
     kb.button(text="🏆 Награды", callback_data="profile:awards")
+    kb.button(text="🏅 Итоги", callback_data="myresults:0")
     kb.button(text="✏️ Редактировать профиль", callback_data="profile:edit")
     kb.button(text="⚙️ Настройки", callback_data="profile:settings")
 

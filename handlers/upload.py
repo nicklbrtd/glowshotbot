@@ -30,6 +30,8 @@ from database import (
     get_active_photos_for_user,
     is_photo_repeat_used,
     mark_photo_repeat_used,
+    archive_photo_to_my_results,
+    hard_delete_photo,
 )
 from utils.time import get_moscow_now
 
@@ -390,6 +392,39 @@ async def _compute_can_promote(photo: dict) -> bool:
             return False
 
     return True
+
+
+async def _photo_result_status(photo: dict) -> tuple[bool, str | None, int | None]:
+    """
+    Определить, «светилась» ли фотография в итогах.
+
+    Возвращает: (is_in_results, kind, place)
+    kind:
+      - 'daily_top10' если входила в топ-10 дня
+      - 'weekly_candidate' если была продвинута в недельный отбор
+    place:
+      - место 1..10 если применимо
+    """
+    day_key = photo.get("day_key")
+
+    # 1) Топ-10 дня
+    if day_key:
+        try:
+            top10 = await get_daily_top_photos(day_key, limit=10)
+            for i, p in enumerate(top10, start=1):
+                if int(p.get("id")) == int(photo.get("id")):
+                    return True, "daily_top10", i
+        except Exception:
+            pass
+
+    # 2) Недельный отбор
+    try:
+        if await is_photo_in_weekly(int(photo.get("id"))):
+            return True, "weekly_candidate", None
+    except Exception:
+        pass
+
+    return False, None, None
 
 
 async def build_my_photo_main_text(photo: dict) -> str:
@@ -1282,12 +1317,19 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
 
 @router.callback_query(F.data.startswith("myphoto:delete:"))
 async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
 
     try:
-        _, _, pid = callback.data.split(":", 2)
-        photo_id = int(pid)
-    except Exception:
-        await callback.answer("Странная фотография, не могу удалить.", show_alert=True)
+        photo_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
         return
 
     photo = await get_photo_by_id(photo_id)
@@ -1295,67 +1337,59 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
 
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    if photo["user_id"] != user["id"]:
+    if int(photo.get("user_id") or 0) != int(user.get("id") or 0):
         await callback.answer("Это не твоя фотография.", show_alert=True)
         return
 
-    # === Блокируем удаление, если день фотографии уже завершился по Москве ===
-    now = get_moscow_now()
-    day_key = photo.get("day_key")
-    try:
-        day = datetime.fromisoformat(day_key).date() if day_key else now.date()
-    except Exception:
-        day = now.date()
+    # Проверяем участие в итогах
+    in_results, kind, place = await _photo_result_status(photo)
 
-    # Считаем, что итоги дня подводятся после завершения календарного дня по Москве
-    results_time_reached = now.date() > day
-
-    if results_time_reached:
-        # Фото уже участвует в итогах дня — не даём его удалять, чтобы не ломать статистику
-        await callback.answer(
-            "Эта фотография уже участвует в итогах дня, удалить её нельзя.\n\n"
-            "Итоги — это история, их мы не переписываем.",
-            show_alert=True,
-        )
-        return
-
-    # === Обычное удаление (до итогов дня) ===
-    await mark_photo_deleted(photo_id)
-
-    data = await state.get_data()
-    photo_msg_id = data.get("myphoto_photo_msg_id")
-    if photo_msg_id:
+    if in_results:
+        # Берём снапшот статистики (чтобы в «Мои итоги» было красиво)
         try:
-            await callback.message.bot.delete_message(
-                chat_id=callback.message.chat.id,
-                message_id=photo_msg_id,
+            stats = await get_photo_stats(photo_id)
+            avg = stats.get("avg_rating")
+            cnt = int(stats.get("ratings_count") or 0)
+        except Exception:
+            avg = None
+            cnt = None
+
+        # Архивируем
+        try:
+            await archive_photo_to_my_results(
+                user_id=user["id"],
+                photo=photo,
+                kind=kind or "daily_top10",
+                place=place,
+                avg_rating=float(avg) if avg is not None else None,
+                ratings_count=cnt,
             )
         except Exception:
+            await callback.answer(
+                "Не получилось перенести фото в «Мои итоги». Попробуй позже.",
+                show_alert=True,
+            )
+            return
+
+        # Убираем из активных (чтобы освободить слот)
+        try:
+            await mark_photo_deleted(photo_id)
+        except Exception:
             pass
-        await _clear_photo_message_id(state)
 
-    kb = build_back_to_menu_kb()
+        await callback.answer("Фото перенесено в «Мои итоги» и убрано из «Моя фотография».", show_alert=True)
+        await my_photo_menu(callback, state)
+        return
 
-    remaining = _format_time_until_next_upload()
-    text = (
-        "Фотография удалена.\n\n"
-        f"Новый кадр можно будет выложить {remaining}."
-    )
-
+    # Фото нигде не участвовало → удаляем полностью
     try:
-        await callback.message.edit_text(text, reply_markup=kb)
+        await hard_delete_photo(photo_id)
     except Exception:
-        await callback.message.answer(
-            text,
-            reply_markup=kb,
-            disable_notification=True,
-        )
+        await callback.answer("Не удалось удалить фото. Попробуй позже.", show_alert=True)
+        return
 
-    await callback.answer("Фотография удалена.")
+    await callback.answer("Фото удалено.", show_alert=True)
+    await my_photo_menu(callback, state)
 
 
 @router.callback_query(F.data.startswith("myphoto:comments:"))
