@@ -588,6 +588,8 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
         reply_markup=kb,
     )
 
+    await state.clear()
+
 
 @router.message(RateStates.waiting_report_text)
 async def rate_report_text(message: Message, state: FSMContext) -> None:
@@ -797,7 +799,10 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             except Exception:
                 pass
 
-            
+    await state.clear()
+    return
+
+
 # Новый хендлер для супер-оценки
 @router.callback_query(F.data.startswith("rate:super:"))
 async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:

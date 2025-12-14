@@ -3508,6 +3508,30 @@ async def get_active_photos_for_user(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_latest_photos_for_user(user_id: int, limit: int = 10) -> list[dict]:
+    """
+    Вернуть последние (по времени) не удалённые фото пользователя.
+    НЕ привязано к day_key/«сегодня».
+    Нужно для «Моя фотография», чтобы фото не «пропадало» после полуночи.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT *
+            FROM photos
+            WHERE user_id = ? AND is_deleted = 0
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+
+    return [dict(r) for r in rows]
+
+
 async def is_photo_repeat_used(photo_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(

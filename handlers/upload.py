@@ -28,6 +28,7 @@ from database import (
     get_user_by_id,
     is_user_premium_active,
     get_active_photos_for_user,
+    get_latest_photos_for_user,
     is_photo_repeat_used,
     mark_photo_repeat_used,
     archive_photo_to_my_results,
@@ -604,7 +605,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     except Exception:
         is_premium_user = False
 
-    photos = await get_active_photos_for_user(user_id)
+    photos = await get_latest_photos_for_user(user_id, limit=10)
     # сортируем новые сверху
     try:
         photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
@@ -651,7 +652,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         kb.button(text="❓ Помощь", callback_data="myphoto:help")
         kb.adjust(1, 2)
 
-        await callback.message.edit_text(
+        text = (
             "📸 <b>Загрузить фотографию!</b>\n\n"
             "Здесь оценивают кадры, а не твою внешность.\n\n"
             "<b>Правила загрузки:</b>\n"
@@ -659,13 +660,31 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             "• Без ссылок, @username и рекламы в названии и описании;\n"
             "• Только свои фотографии;\n"
             "• Без откровенного контента и насилия.\n\n"
-            "Когда будешь готов — жми «Добавить фото» ниже.",
-            reply_markup=kb.as_markup(),
+            "Когда будешь готов — жми «Добавить фото» ниже."
         )
+
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+            else:
+                await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+            )
+
         await callback.answer()
         return
 
-    if photo["is_deleted"]:
+    if photo.get("is_deleted"):
         kb = InlineKeyboardBuilder()
 
         if is_admin:
@@ -684,7 +703,24 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         kb.button(text="⬅️ В меню", callback_data="menu:back")
         kb.adjust(1)
 
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+            else:
+                await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+            )
+
         await callback.answer()
         return
 
@@ -746,7 +782,7 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     except Exception:
         is_premium_user = False
 
-    photos = await get_active_photos_for_user(user_id)
+    photos = await get_latest_photos_for_user(user_id, limit=10)
     if not photos:
         await callback.answer("У тебя пока нет активных фотографий.", show_alert=True)
         return
