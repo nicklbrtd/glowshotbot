@@ -1454,3 +1454,30 @@ async def get_weekly_best_photo() -> dict | None:
         )
     return dict(row) if row else None
 
+
+async def save_pending_referral(new_user_tg_id: int, referral_code: str | None) -> None:
+    """
+    Сохраняем рефералку при /start, даже если юзер ещё не зарегистрирован.
+    Потом при регистрации можно будет применить (link_and_reward_referral_if_needed).
+    """
+    if not referral_code:
+        return
+
+    global pool
+    if pool is None:
+        raise RuntimeError("DB pool is not initialized. Call init_db() first.")
+
+    now = get_moscow_now_iso()
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO pending_referrals (new_user_tg_id, referral_code, created_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (new_user_tg_id)
+            DO UPDATE SET referral_code = EXCLUDED.referral_code, created_at = EXCLUDED.created_at
+            """,
+            int(new_user_tg_id),
+            str(referral_code),
+            now,
+        )
