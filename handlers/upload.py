@@ -353,7 +353,7 @@ async def _compute_can_promote(photo: dict) -> bool:
 
     Условие:
     • текущая дата строго позже дня фотографии;
-    • фотография входит в топ-5 дня;
+    • фотография входит в топ-4 дня;
     • её ещё нет в недельном отборе.
     """
 
@@ -509,25 +509,12 @@ async def _show_my_photo_section(
     3) Сохраняем id этого сообщения в FSM, чтобы потом можно было его удалить при выходе в меню.
     """
 
-    # Определяем, есть ли у автора этой работы активный премиум
-    is_premium_user = False
-    try:
-        author_user_id = photo.get("user_id")
-        if author_user_id:
-            author = await get_user_by_id(author_user_id)
-            if author and author.get("tg_id"):
-                is_premium_user = await is_user_premium_active(author["tg_id"])
-    except Exception:
-        # Если при проверке что-то пошло не так — просто считаем, что премиума нет
-        is_premium_user = False
-
-    can_promote = await _compute_can_promote(photo)
     caption = await build_my_photo_main_text(photo)
     kb = build_my_photo_keyboard(
-    photo["id"],
-    has_prev=has_prev,
-    has_next=has_next,
-)
+        photo["id"],
+        has_prev=has_prev,
+        has_next=has_next,
+    )
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
     try:

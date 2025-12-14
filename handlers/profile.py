@@ -411,7 +411,7 @@ async def build_profile_view(user: dict):
     kb.button(text=premium_button_text, callback_data="profile:premium")
 
     kb.button(text="⬅️ В меню", callback_data="menu:back")
-    kb.adjust(1)
+    kb.adjust(2, 2, 1, 1)
     return text, kb.as_markup()
 
 
@@ -775,7 +775,7 @@ async def profile_edit_age(callback: CallbackQuery, state: FSMContext):
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
     kb = InlineKeyboardBuilder()
     kb.button(text="Пропустить / убрать возраст", callback_data="profile:age_clear")
-    kb.adjust(1)
+    kb.adjust(2, 2, 1, 1)
     await callback.message.edit_text(
         "📅 Введи новый возраст числом или нажми «Пропустить / убрать возраст».",
         reply_markup=kb.as_markup(),
@@ -977,7 +977,7 @@ async def profile_awards_menu(callback: CallbackQuery):
         )
         kb = InlineKeyboardBuilder()
         kb.button(text="⬅️ Назад", callback_data="menu:profile")
-        kb.adjust(1)
+        kb.adjust(2, 2, 1, 1)
         await callback.message.edit_text(
             text,
             reply_markup=kb.as_markup(),
@@ -1221,7 +1221,7 @@ async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Зарегистрироваться заново", callback_data="auth:start")
-    kb.adjust(1)
+    kb.adjust(2, 2, 1, 1)
 
     await callback.message.edit_text(
         "✅ Аккаунт деактивирован.\n\nЕсли захочешь вернуться, "

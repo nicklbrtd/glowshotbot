@@ -113,9 +113,6 @@ def build_referral_thanks_keyboard() -> InlineKeyboardMarkup:
 
 
 # Специальная подпись для раздела оценивания
-from html import escape  # у тебя уже есть, просто не удаляй
-
-# Специальная подпись для раздела оценивания
 def build_rate_caption(photo: dict) -> str:
     """
     Подпись для раздела оценивания.
