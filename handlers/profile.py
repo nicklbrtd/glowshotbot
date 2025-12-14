@@ -253,8 +253,9 @@ async def build_profile_view(user: dict):
     if user_id:
         # Всего загружено фото
         try:
-            total = await count_photos_by_user(user_id)
-            total_photos = str(total)
+            total = await count_photos_by_user(user_id)          # теперь “всё время”
+            active = await count_active_photos_by_user(user_id)  # “сейчас”
+            total_photos = f"{total} (активных: {active})"
         except Exception:
             total_photos = "—"
 

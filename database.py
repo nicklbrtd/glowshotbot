@@ -1059,7 +1059,6 @@ async def count_photos_by_user(user_id: int) -> int:
             SELECT COUNT(*)
             FROM photos
             WHERE user_id = ?
-              AND is_deleted = 0
               AND moderation_status = 'active'
             """,
             (user_id,),
@@ -1070,6 +1069,17 @@ async def count_photos_by_user(user_id: int) -> int:
     if not row or row[0] is None:
         return 0
     return int(row[0])
+
+
+async def count_active_photos_by_user(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM photos WHERE user_id = ? AND is_deleted = 0",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+    return int(row[0] or 0)
 
 
 # ====== USER RATING SUMMARY & MOST POPULAR PHOTO ======
@@ -3487,13 +3497,9 @@ async def link_and_reward_referral_if_needed(referee_tg_id: int) -> tuple[bool, 
 
 
 async def get_active_photos_for_user(user_id: int) -> list[dict]:
-    """
-    Получить все НЕ удалённые фотографии пользователя (любой день),
-    отсортированные от новых к старым.
-    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
+        cur = await db.execute(
             """
             SELECT *
             FROM photos
@@ -3502,18 +3508,12 @@ async def get_active_photos_for_user(user_id: int) -> list[dict]:
             """,
             (user_id,),
         )
-        rows = await cursor.fetchall()
-        await cursor.close()
-
+        rows = await cur.fetchall()
+        await cur.close()
     return [dict(r) for r in rows]
 
 
 async def get_latest_photos_for_user(user_id: int, limit: int = 10) -> list[dict]:
-    """
-    Вернуть последние (по времени) не удалённые фото пользователя.
-    НЕ привязано к day_key/«сегодня».
-    Нужно для «Моя фотография», чтобы фото не «пропадало» после полуночи.
-    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -3528,7 +3528,6 @@ async def get_latest_photos_for_user(user_id: int, limit: int = 10) -> list[dict
         )
         rows = await cur.fetchall()
         await cur.close()
-
     return [dict(r) for r in rows]
 
 
