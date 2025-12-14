@@ -317,11 +317,24 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
 @router.callback_query(F.data == "results:day")
 async def results_day(callback: CallbackQuery):
     """
-    Итоги дня всегда считаем за вчерашний календарный день по Москве.
-    Весь день пользователи оценивают сегодняшние работы, а итоги показываем
-    для прошедшего дня.
+    Итоги дня всегда считаем за вчерашний календарный день по Москве,
+    НО показываем их только после 07:00 по московскому времени.
     """
     now = get_moscow_now()
+
+    # До 07:00 по МСК итоги за вчера ещё «готовятся»
+    if now.hour < 7:
+        kb = build_back_to_menu_kb()
+        text = (
+            "⏰ Итоги дня появляются каждый день после <b>07:00 по МСК</b>.\n\n"
+            f"Сейчас: <b>{now.strftime('%H:%M')}</b>.\n"
+            "Загляни чуть позже, когда мы полностью подсчитаем оценки за вчерашний день."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    # После 07:00 считаем итоги за вчерашний календарный день
     day_key = (now.date() - timedelta(days=1)).isoformat()
     await _render_results_day(callback, day_key, step=0)
 
