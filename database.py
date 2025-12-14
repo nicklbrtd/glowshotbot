@@ -3,11 +3,16 @@ import random
 from datetime import datetime, timedelta
 from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
 
+import os
+import asyncpg
 
-from pathlib import Path
+DB_DSN = os.getenv("DATABASE_URL")
+pool: asyncpg.Pool | None = None
 
-DB_PATH = str(Path(__file__).resolve().parent / "db.sqlite3")
-
+async def init_db():
+    global pool
+    if pool is None:
+        pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=10)
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
