@@ -85,6 +85,42 @@ async def _show_text_result(
     text: str,
     reply_markup: InlineKeyboardMarkup,
 ) -> None:
+    """
+    UX-правило:
+    1) пытаемся отредактировать текущее сообщение;
+    2) если не вышло — удаляем его и отправляем новое.
+    """
+    msg = callback.message
+
+    # 1) Пробуем отредактировать
+    try:
+        if msg.photo:
+            await msg.edit_caption(caption=text, reply_markup=reply_markup)
+        else:
+            await msg.edit_text(text, reply_markup=reply_markup)
+        return
+    except Exception:
+        pass
+
+    # 2) Фоллбек: удаляем и отправляем новое
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+    try:
+        await msg.bot.send_message(
+            chat_id=msg.chat.id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_notification=True,
+        )
+    except Exception:
+        # прям самый последний шанс
+        try:
+            await msg.answer(text, reply_markup=reply_markup)
+        except Exception:
+            pass
     try:
         if callback.message.photo:
             await callback.message.edit_caption(

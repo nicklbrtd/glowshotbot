@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from sqlite3 import IntegrityError as SQLiteIntegrityError
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -536,6 +536,56 @@ async def _show_my_photo_section(
     await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
 
 
+async def _edit_or_replace_my_photo_message(
+    callback: CallbackQuery,
+    state: FSMContext,
+    photo: dict,
+    has_prev: bool,
+    has_next: bool,
+) -> None:
+    """
+    UX:
+    1) если текущее сообщение с фото — делаем edit_media;
+    2) если не получилось — удаляем и отправляем новое.
+    """
+    msg = callback.message
+    chat_id = msg.chat.id
+
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(
+        photo["id"],
+        has_prev=has_prev,
+        has_next=has_next,
+    )
+
+    # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
+    try:
+        if msg.photo:
+            await msg.edit_media(
+                media=InputMediaPhoto(media=photo["file_id"], caption=caption),
+                reply_markup=kb,
+            )
+            await _store_photo_message_id(state, msg.message_id, photo_id=photo["id"])
+            return
+    except Exception:
+        pass
+
+    # 2) Фоллбек: удалить и отправить заново
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+    sent = await msg.bot.send_photo(
+        chat_id=chat_id,
+        photo=photo["file_id"],
+        caption=caption,
+        reply_markup=kb,
+        disable_notification=True,
+    )
+    await _store_photo_message_id(state, sent.message_id, photo_id=photo["id"])
+
+
 # ========= ВХОД В РАЗДЕЛ "МОЯ ФОТОГРАФИЯ" =========
 
 
@@ -739,6 +789,13 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
         has_next=has_next,
     )
 
+    await _edit_or_replace_my_photo_message(
+    callback=callback,
+    state=state,
+    photo=photo,
+    has_prev=has_prev,
+    has_next=has_next,
+)
     await callback.answer()
 
 

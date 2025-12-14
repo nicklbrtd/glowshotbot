@@ -31,7 +31,6 @@ from database import (
     get_awards_for_user,
     link_and_reward_referral_if_needed,
 )
-from handlers.upload import build_my_photo_caption
 from html import escape
 
 router = Router()
@@ -235,8 +234,12 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
                 # Обычное текстовое сообщение — меняем текст
                 await message.edit_text(text, reply_markup=kb)
         except Exception:
-            # Фоллбек: если редактирование не удалось (сообщение удалено и т.п.),
-            # отправляем новое сообщение без звука.
+            # Если не получилось отредактировать — удаляем текущее и отправляем новое
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
             try:
                 await message.bot.send_message(
                     chat_id=message.chat.id,

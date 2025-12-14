@@ -443,10 +443,17 @@ async def profile_menu(callback: CallbackQuery):
                 reply_markup=markup,
             )
         except Exception:
-            # В крайнем случае — отправляем новое сообщение
-            await callback.message.answer(
-                text,
+            # Если не получилось отредактировать — удаляем и отправляем новое
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+
+            await callback.message.bot.send_message(
+                chat_id=chat_id,
+                text=text,
                 reply_markup=markup,
+                disable_notification=True,
             )
 
     await callback.answer()
