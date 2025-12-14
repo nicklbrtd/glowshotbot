@@ -1351,6 +1351,7 @@ async def get_photo_report_stats(photo_id: int) -> dict:
         )) or 0)
     return {"total": total, "pending": pending}
 
+
 async def get_daily_top_photos(day_key: str | None = None, limit: int = 4) -> list[dict]:
     """
     Топ дня: берём фото за day_key (yyyy-mm-dd) и сортируем по среднему рейтингу.
@@ -1420,13 +1421,10 @@ async def save_pending_referral(new_user_tg_id: int, referral_code: str | None) 
     if not referral_code:
         return
 
-    global pool
-    if pool is None:
-        raise RuntimeError("DB pool is not initialized. Call init_db() first.")
-
+    p = _assert_pool()
     now = get_moscow_now_iso()
 
-    async with pool.acquire() as conn:
+    async with p.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO pending_referrals (new_user_tg_id, referral_code, created_at)
