@@ -664,7 +664,27 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
         return
 
     user_id = user["id"]
+
+    # Применяем те же правила, что и в my_photo_menu:
+    # сортировка + лимит активных фото (1 без Premium, 2 с Premium)
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
     photos = await get_active_photos_for_user(user_id)
+    if not photos:
+        await callback.answer("У тебя пока нет активных фотографий.", show_alert=True)
+        return
+
+    try:
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+    except Exception:
+        pass
+
+    photos = photos[: (2 if is_premium_user else 1)]
     if not photos:
         await callback.answer("У тебя пока нет активных фотографий.", show_alert=True)
         return
