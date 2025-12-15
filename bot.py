@@ -1,11 +1,15 @@
 import asyncio
+import traceback
+from config import BOT_TOKEN
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import TelegramObject
+from typing import Callable, Dict, Any, Awaitable
 
-from config import BOT_TOKEN
-from database import init_db
+from database import init_db, log_bot_error
+
 
 from handlers import (
     start,
@@ -24,6 +28,59 @@ from handlers import (
 )
 
 
+class ErrorsToDbMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        try:
+            return await handler(event, data)
+        except Exception as e:
+            tb = traceback.format_exc()
+
+            # пытаемся достать чат / юзера максимально безопасно
+            chat_id = None
+            tg_user_id = None
+            try:
+                if hasattr(event, "chat") and event.chat:
+                    chat_id = event.chat.id
+            except Exception:
+                pass
+            try:
+                if hasattr(event, "from_user") and event.from_user:
+                    tg_user_id = event.from_user.id
+            except Exception:
+                pass
+
+            handler_name = None
+            try:
+                h = data.get("handler")
+                if h and hasattr(h, "__name__"):
+                    handler_name = h.__name__
+            except Exception:
+                pass
+
+            update_type = type(event).__name__
+
+            try:
+                await log_bot_error(
+                    chat_id=chat_id,
+                    tg_user_id=tg_user_id,
+                    handler=handler_name,
+                    update_type=update_type,
+                    error_type=type(e).__name__,
+                    error_text=str(e),
+                    traceback_text=tb,
+                )
+            except Exception:
+                # если даже логирование упало — не добиваем бота
+                pass
+
+            raise
+
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set in environment (.env)")
@@ -36,6 +93,7 @@ async def main():
     )
     dp = Dispatcher()
 
+    dp.update.middleware(ErrorsToDbMiddleware())
     dp.include_router(start.router)
     dp.include_router(registration.router)
     dp.include_router(profile.router)
@@ -50,8 +108,22 @@ async def main():
     dp.include_router(terms.router)
     dp.include_router(referrals.router)
 
+
     print("🤖 GlowShot запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        tb = traceback.format_exc()
+        await log_bot_error(
+            chat_id=None,
+            tg_user_id=None,
+            handler="start_polling",
+            update_type=None,
+            error_type=type(e).__name__,
+            error_text=str(e),
+            traceback_text=tb,
+        )
+        raise
 
 
 if __name__ == "__main__":

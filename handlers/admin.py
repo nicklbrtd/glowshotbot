@@ -34,6 +34,8 @@ from database import (
     update_award_text,
     update_award_icon,
     create_custom_award_for_user,
+    get_bot_error_logs_page,
+    clear_bot_error_logs,
     # статистика и выборки пользователей
     get_users_sample,
     get_active_users_last_24h,
@@ -4069,3 +4071,100 @@ async def admin_achievements_beta_grant(message: Message, state: FSMContext):
     except Exception:
         # Не кричим, если не получилось отправить (например, пользователь закрыл ЛС)
         pass
+
+
+LOGS_PAGE_SIZE = 10
+
+
+def _short(s: str | None, n: int = 120) -> str:
+    s = (s or "").strip()
+    if len(s) <= n:
+        return s
+    return s[: n - 1] + "…"
+
+
+@router.callback_query(F.data.startswith("admin:logs:page:"))
+async def admin_logs_page(callback: CallbackQuery):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    page = 1
+    if len(parts) >= 4:
+        try:
+            page = int(parts[3])
+        except Exception:
+            page = 1
+
+    if page < 1:
+        page = 1
+
+    total, rows = await get_bot_error_logs_page(limit=LOGS_PAGE_SIZE, offset=(page - 1) * LOGS_PAGE_SIZE)
+    max_page = max(1, (total + LOGS_PAGE_SIZE - 1) // LOGS_PAGE_SIZE)
+    if page > max_page:
+        page = max_page
+        total, rows = await get_bot_error_logs_page(limit=LOGS_PAGE_SIZE, offset=(page - 1) * LOGS_PAGE_SIZE)
+
+    lines = [
+        "<b>🧾 Логи / ошибки</b>",
+        f"Всего: <b>{total}</b>",
+        f"Страница: <b>{page}/{max_page}</b>",
+        "",
+    ]
+
+    if not rows:
+        lines.append("Пока пусто. И это охуенно 😌")
+    else:
+        for r in rows:
+            created = r.get("created_at")
+            try:
+                created_h = created.strftime("%d.%m.%Y %H:%M:%S") if created else "—"
+            except Exception:
+                created_h = str(created) if created else "—"
+
+            lines.append(
+                f"#{r['id']} — <b>{created_h}</b>\n"
+                f"• handler: <code>{_short(r.get('handler'), 40) or '—'}</code>\n"
+                f"• type: <code>{_short(r.get('error_type'), 40) or '—'}</code>\n"
+                f"• text: {_short(r.get('error_text'), 160) or '—'}\n"
+            )
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    if page > 1:
+        kb.button(text="⬅️", callback_data=f"admin:logs:page:{page-1}")
+    kb.button(text="🧹 Очистить", callback_data="admin:logs:clear")
+    if page < max_page:
+        kb.button(text="➡️", callback_data=f"admin:logs:page:{page+1}")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(3, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:logs:clear")
+async def admin_logs_clear(callback: CallbackQuery):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    await clear_bot_error_logs()
+    await callback.answer("Логи очищены ✅", show_alert=True)
+
+    # обновим экран
+    try:
+        callback.data = "admin:logs:page:1"
+    except Exception:
+        pass
+    await admin_logs_page(callback)
