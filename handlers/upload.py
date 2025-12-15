@@ -1,6 +1,6 @@
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import datetime, timedelta
-from sqlite3 import IntegrityError as SQLiteIntegrityError
+from asyncpg.exceptions import UniqueViolationError
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
@@ -33,6 +33,7 @@ from database import (
     mark_photo_repeat_used,
     archive_photo_to_my_results,
     hard_delete_photo,
+    count_today_photos_for_user,
 )
 from utils.time import get_moscow_now
 
@@ -262,8 +263,8 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
     # Проверяем глобальную блокировку пользователя (используется модерацией).
     block = await get_user_block_status_by_tg_id(from_user.id)
     is_blocked = bool(block.get("is_blocked"))
-    blocked_until_str = block.get("blocked_until")
-    blocked_reason = block.get("blocked_reason")
+    blocked_until_str = block.get("block_until")
+    blocked_reason = block.get("block_reason")
 
     # Если есть срок блокировки, проверяем, не истёк ли он.
     if blocked_until_str:
@@ -275,13 +276,13 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
         blocked_until_dt = None
 
     # Если срок указан и уже прошёл — автоматически снимаем блокировку.
-    if is_blocked and blocked_until_dt is not None and blocked_until_dt <= datetime.utcnow():
+    if is_blocked and blocked_until_dt is not None and blocked_until_dt <= get_moscow_now():
         try:
             await set_user_block_status_by_tg_id(
                 from_user.id,
                 is_blocked=False,
-                blocked_until=None,
                 reason=None,
+                until_iso=None,
             )
         except Exception:
             # Если не удалось обновить статус, не ломаем логику — просто считаем, что блок не активен.
@@ -289,7 +290,7 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
         return user
 
     # Если блок активен без срока или срок ещё не истёк — не даём продолжать.
-    if is_blocked and (blocked_until_dt is None or blocked_until_dt > datetime.utcnow()):
+    if is_blocked and (blocked_until_dt is None or blocked_until_dt > get_moscow_now()):
         # Собираем текст уведомления.
         lines: list[str] = [
             "Твой аккаунт временно ограничен модераторами.",
@@ -298,7 +299,7 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
 
         if blocked_until_dt is not None:
             # Показываем время в человекочитаемом формате (по Москве).
-            blocked_until_msk = blocked_until_dt + timedelta(hours=3)
+            blocked_until_msk = blocked_until_dt
             lines.append("")
             lines.append(
                 f"Ограничение действует до {blocked_until_msk.strftime('%d.%m.%Y %H:%M')} по Москве."
@@ -458,7 +459,7 @@ async def build_my_photo_main_text(photo: dict) -> str:
             pub_dt = datetime.fromisoformat(day_key)
             pub_str = pub_dt.strftime("%d.%m.%Y")
         except Exception:
-            pub_str = day_key or "—"
+            pub_str = "—"
 
     # статистика
     stats = await get_photo_stats(photo["id"])
@@ -864,29 +865,24 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
             )
         return
     is_admin = is_admin_user(user)
-
     photo = await get_today_photo_for_user(user_id)
 
-    # По‑прежнему один проект в день для обычных пользователей
-    if photo is not None and not is_admin:
-        remaining = _format_time_until_next_upload()
-        if photo.get("is_deleted"):
-            msg = (
-                "Ты уже выкладывал(а) фото сегодня и удалил(а) его.\n\n"
-                f"Новый кадр можно будет выложить {remaining}."
-            )
-        else:
-            msg = (
-                "Ты уже выложил(а) фото сегодня.\n\n"
-                f"Новый кадр можно будет выложить {remaining}."
-            )
-        await callback.answer(msg, show_alert=True)
-        return
+    today_count = await count_today_photos_for_user(user_id)
+    daily_limit = 2 if is_premium_user else 1
 
-    # Админу всё ещё позволяем перезаливать, помечая старый кадр удалённым
-    if photo is not None and is_admin:
-        if not photo.get("is_deleted"):
-            await mark_photo_deleted(photo["id"])
+    if (today_count >= daily_limit) and (not is_admin):
+        remaining = _format_time_until_next_upload()
+        await callback.answer(
+            f"Ты уже выложил(а) {today_count} фото сегодня.\n\n"
+            f"Новый кадр можно будет выложить {remaining}.",
+            show_alert=True,
+        )
+        return
+    
+
+    # Админу позволяем перезаливать: если сегодня уже есть активный кадр — мягко удаляем его
+    if is_admin and photo is not None and not photo.get("is_deleted"):
+        await mark_photo_deleted(photo["id"])
 
     await state.set_state(MyPhotoStates.waiting_category)
     await state.update_data(
@@ -906,11 +902,27 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     kb.button(text="📷 Обычная фотография", callback_data="myphoto:category:photo")
     kb.adjust(1, 1)
 
-    await callback.message.edit_text(
+    text = (
         "Выбери категорию работы:\n\n"
-        "Это можно будет использовать для отдельных рейтингов постеров и обычных фотографий.",
-        reply_markup=kb.as_markup(),
+        "Это можно будет использовать для отдельных рейтингов постеров и обычных фотографий."
     )
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+        else:
+            await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except TelegramBadRequest:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb.as_markup(),
+            disable_notification=True,
+        )
     await callback.answer()
 
 
@@ -1310,7 +1322,7 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
             device_info=None,
             description=description,
         )
-    except SQLiteIntegrityError:
+    except UniqueViolationError:
         existing_photo = await get_today_photo_for_user(user_id)
         if existing_photo is not None:
             photo = existing_photo
