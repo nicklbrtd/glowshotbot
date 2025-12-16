@@ -2531,25 +2531,19 @@ async def log_bot_error(
     tg_user_id: int | None,
     handler: str | None,
     update_type: str | None,
-    error_type: str,
-    error_text: str,
-    traceback_text: str | None = None,
+    error_type: str | None,
+    error_text: str | None,
+    traceback_text: str | None,
 ) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO bot_error_logs (chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback, created_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            INSERT INTO bot_error_logs
+              (chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback_text)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
             """,
-            int(chat_id) if chat_id is not None else None,
-            int(tg_user_id) if tg_user_id is not None else None,
-            handler,
-            update_type,
-            error_type,
-            error_text,
-            traceback_text,
-            get_moscow_now_iso(),
+            chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback_text
         )
 
 
@@ -2573,33 +2567,6 @@ async def clear_bot_error_logs() -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
         await conn.execute("TRUNCATE bot_error_logs")
-
-
-async def log_bot_error(
-    *,
-    chat_id: int | None,
-    tg_user_id: int | None,
-    handler: str | None,
-    update_type: str | None,
-    error_type: str | None,
-    error_text: str | None,
-    traceback_text: str | None,
-) -> None:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO bot_error_logs (chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback_text)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
-            """,
-            chat_id,
-            tg_user_id,
-            handler,
-            update_type,
-            error_type,
-            error_text,
-            traceback_text,
-        )
 
 
 async def get_bot_error_logs_page(*, limit: int = 30, offset: int = 0) -> tuple[int, list[dict]]:

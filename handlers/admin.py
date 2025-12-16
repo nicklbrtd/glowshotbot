@@ -301,8 +301,10 @@ async def _render_admin_user_profile(
 async def admin_users_find_profile(message: Message, state: FSMContext):
     """Поиск и показ подробного профиля пользователя для админа."""
     identifier = (message.text or "").strip()
-    await message.delete()
-
+    try:
+        await message.delete()
+    except Exception:
+        pass
     if not identifier:
         await _edit_user_prompt_or_answer(
             message,
