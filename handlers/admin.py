@@ -5,6 +5,7 @@ from typing import Optional, Union
 from datetime import timedelta, datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
@@ -273,13 +274,13 @@ async def _render_admin_user_profile(
     avg_rating = rating_summary.get("avg_rating")
     ratings_count = rating_summary.get("ratings_count")
 
-    messages_total = admin_stats["messages_total"]
-    ratings_given = admin_stats["ratings_given"]
-    comments_given = admin_stats["comments_given"]
-    reports_created = admin_stats["reports_created"]
-    active_photos = admin_stats["active_photos"]
-    total_photos = admin_stats["total_photos"]
-    upload_bans_count = admin_stats["upload_bans_count"]
+    messages_total = int(admin_stats.get("messages_total", 0) or 0) if admin_stats else 0
+    ratings_given = int(admin_stats.get("ratings_given", 0) or 0) if admin_stats else 0
+    comments_given = int(admin_stats.get("comments_given", 0) or 0) if admin_stats else 0
+    reports_created = int(admin_stats.get("reports_created", 0) or 0) if admin_stats else 0
+    active_photos = int(admin_stats.get("active_photos", 0) or 0) if admin_stats else 0
+    total_photos = int(admin_stats.get("total_photos", 0) or 0) if admin_stats else 0
+    upload_bans_count = int(admin_stats.get("upload_bans_count", 0) or 0) if admin_stats else 0
 
     awards_count = len(awards)
     has_beta_award = any(
@@ -1723,7 +1724,14 @@ async def admin_menu_callback(callback: CallbackQuery, state: FSMContext):
             reply_markup=build_admin_menu(),
         )
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except TelegramBadRequest as e:
+        # старый/протухший callback – можно тихо игнорировать
+        if "query is too old" in str(e) or "query ID is invalid" in str(e):
+            pass
+        else:
+            raise
 
 
 # ====== Конфиг ролей для управления ======

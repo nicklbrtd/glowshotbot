@@ -2065,52 +2065,6 @@ async def get_users_with_multiple_daily_top3_by_hits(min_hits: int = 2, limit: i
     return await get_users_with_multiple_daily_top3(min_wins=min_hits, limit=limit)
 
 
-async def get_user_admin_stats(user_tg_id: int) -> dict:
-    """Сводка по пользователю для админки."""
-    u = await get_user_by_tg_id(int(user_tg_id))
-    if not u:
-        return {
-            "exists": False,
-            "photos_active": 0,
-            "ratings_given": 0,
-            "comments_written": 0,
-            "reports_made": 0,
-            "last_activity_at": None,
-        }
-    p = _assert_pool()
-    uid = int(u["id"])
-    async with p.acquire() as conn:
-        photos_active = await conn.fetchval(
-            "SELECT COUNT(*) FROM photos WHERE user_id=$1 AND is_deleted=0",
-            uid,
-        )
-        ratings_given = await conn.fetchval(
-            "SELECT COUNT(*) FROM ratings WHERE user_id=$1",
-            uid,
-        )
-        comments_written = await conn.fetchval(
-            "SELECT COUNT(*) FROM comments WHERE user_id=$1",
-            uid,
-        )
-        reports_made = await conn.fetchval(
-            "SELECT COUNT(*) FROM photo_reports WHERE user_id=$1",
-            uid,
-        )
-        last_activity_at = await conn.fetchval(
-            "SELECT MAX(created_at) FROM activity_events WHERE user_id=$1",
-            uid,
-        )
-
-    return {
-        "exists": True,
-        "user": u,
-        "photos_active": int(photos_active or 0),
-        "ratings_given": int(ratings_given or 0),
-        "comments_written": int(comments_written or 0),
-        "reports_made": int(reports_made or 0),
-        "last_activity_at": str(last_activity_at) if last_activity_at else None,
-    }
-
 
 async def get_photo_admin_stats(photo_id: int) -> dict:
     p = _assert_pool()
@@ -2476,54 +2430,75 @@ async def get_next_photo_for_self_moderation(user_id: int | None = None) -> dict
     return dict(row) if row else None
 
 
-async def get_user_admin_stats(user_tg_id: int) -> dict:
-    """Сводка по пользователю для админки."""
-    u = await get_user_by_tg_id(int(user_tg_id))
-    if not u:
-        return {
-            "exists": False,
-            "photos_active": 0,
-            "ratings_given": 0,
-            "comments_written": 0,
-            "reports_made": 0,
-            "last_activity_at": None,
-        }
+async def get_user_admin_stats(user_id: int) -> dict:
+    """
+    Возвращает агрегированную статистику активности пользователя для админ-панели.
+    Всегда отдает полный набор ключей, даже если где-то нет данных.
 
+    Ключи:
+      - messages_total
+      - ratings_given
+      - comments_given
+      - reports_created
+      - active_photos
+      - total_photos
+      - upload_bans_count
+    """
     p = _assert_pool()
-    uid = int(u["id"])
+    uid = int(user_id)
+
     async with p.acquire() as conn:
-        photos_active = await conn.fetchval(
-            "SELECT COUNT(*) FROM photos WHERE user_id=$1 AND is_deleted=0",
-            uid,
-        )
+        # Сколько оценок пользователь поставил другим
         ratings_given = await conn.fetchval(
             "SELECT COUNT(*) FROM ratings WHERE user_id=$1",
             uid,
-        )
-        comments_written = await conn.fetchval(
+        ) or 0
+
+        # Сколько комментариев оставил
+        comments_given = await conn.fetchval(
             "SELECT COUNT(*) FROM comments WHERE user_id=$1",
             uid,
-        )
-        reports_made = await conn.fetchval(
+        ) or 0
+
+        # Сколько жалоб отправил
+        reports_created = await conn.fetchval(
             "SELECT COUNT(*) FROM photo_reports WHERE user_id=$1",
             uid,
-        )
-        last_activity_at = await conn.fetchval(
-            "SELECT MAX(created_at) FROM activity_events WHERE user_id=$1",
+        ) or 0
+
+        # Сколько фото сейчас активно (не удалены и в статусе active)
+        active_photos = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM photos
+            WHERE user_id=$1
+              AND is_deleted=0
+              AND (moderation_status IS NULL OR moderation_status='active')
+            """,
             uid,
-        )
+        ) or 0
+
+        # Сколько фото всего когда-либо загружал
+        total_photos = await conn.fetchval(
+            "SELECT COUNT(*) FROM photos WHERE user_id=$1",
+            uid,
+        ) or 0
+
+    messages_total = int(ratings_given) + int(comments_given) + int(reports_created)
+
+    # Сейчас отдельной таблицы для подсчёта количества блокировок нет –
+    # ставим 0, чтобы не падало.
+    upload_bans_count = 0
 
     return {
-        "exists": True,
-        "user": u,
-        "photos_active": int(photos_active or 0),
-        "ratings_given": int(ratings_given or 0),
-        "comments_written": int(comments_written or 0),
-        "reports_made": int(reports_made or 0),
-        "last_activity_at": str(last_activity_at) if last_activity_at else None,
+        "messages_total": int(messages_total),
+        "ratings_given": int(ratings_given),
+        "comments_given": int(comments_given),
+        "reports_created": int(reports_created),
+        "active_photos": int(active_photos),
+        "total_photos": int(total_photos),
+        "upload_bans_count": int(upload_bans_count),
     }
-
-
 async def log_bot_error(
     *,
     chat_id: int | None,
