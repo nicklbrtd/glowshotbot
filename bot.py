@@ -20,7 +20,6 @@ from handlers import (
     admin,
     registration,
     moderator,
-    support_link,
     premium,
     payments,
     referrals,
