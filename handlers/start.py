@@ -9,7 +9,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup
 from utils.time import get_moscow_now
 
-from database import get_user_by_tg_id, is_user_premium_active, save_pending_referral
+from database import(
+get_user_by_tg_id, 
+is_user_premium_active, 
+save_pending_referral
+)
 from keyboards.common import build_main_menu
 
 router = Router()

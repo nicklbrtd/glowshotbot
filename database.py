@@ -684,51 +684,93 @@ async def get_referral_stats_for_user(user_tg_id: int) -> dict:
     return {"invited_qualified": int(v or 0)}
 
 
-async def link_and_reward_referral_if_needed(invited_user_id: int) -> None:
-    invited = await get_user_by_id(invited_user_id)
-    if not invited:
-        return
+async def link_and_reward_referral_if_needed(invited_tg_id: int) -> None:
     p = _assert_pool()
+
     async with p.acquire() as conn:
-        pr = await conn.fetchrow("SELECT referral_code FROM pending_referrals WHERE new_user_tg_id=$1",
-                                 int(invited["tg_id"]))
-        if not pr:
+        invited = await conn.fetchrow(
+            "SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0",
+            int(invited_tg_id),
+        )
+        if not invited:
             return
-        code = str(pr["referral_code"])
-        inviter = await conn.fetchrow("SELECT id FROM users WHERE referral_code=$1 AND is_deleted=0", code)
+
+        invited_user_id = int(invited["id"])
+
+        # уже есть рефералка → ничего не делаем
+        exists = await conn.fetchval(
+            "SELECT 1 FROM referrals WHERE invited_user_id=$1",
+            invited_user_id
+        )
+        if exists:
+            return
+
+        pending = await conn.fetchrow(
+            "SELECT referral_code FROM pending_referrals WHERE new_user_tg_id=$1",
+            int(invited_tg_id),
+        )
+        if not pending:
+            return
+
+        ref_code = pending["referral_code"]
+
+        inviter = await conn.fetchrow(
+            "SELECT id FROM users WHERE referral_code=$1 AND is_deleted=0",
+            ref_code
+        )
         if not inviter:
             return
 
+        inviter_user_id = int(inviter["id"])
         now = get_moscow_now_iso()
+
         await conn.execute(
             """
-            INSERT INTO referrals (inviter_user_id, invited_user_id, created_at, qualified, qualified_at)
-            VALUES ($1,$2,$3,1,$3)
-            ON CONFLICT (invited_user_id) DO NOTHING
+            INSERT INTO referrals (inviter_user_id, invited_user_id, qualified, qualified_at, created_at)
+            VALUES ($1, $2, 1, $3, $3)
             """,
-            int(inviter["id"]), int(invited_user_id), now
+            inviter_user_id,
+            invited_user_id,
+            now
         )
 
-        async def _extend(uid: int, days: int) -> None:
-            row = await conn.fetchrow("SELECT is_premium, premium_until FROM users WHERE id=$1", uid)
-            base = None
-            if row and row["premium_until"]:
-                try:
-                    base = datetime.fromisoformat(str(row["premium_until"]))
-                except Exception:
-                    base = None
-            now_dt = get_moscow_now()
-            if base is None or base < now_dt:
-                base = now_dt
-            new_until = (base + timedelta(days=days)).isoformat()
-            await conn.execute("UPDATE users SET is_premium=1, premium_until=$1, updated_at=$2 WHERE id=$3",
-                               new_until, get_moscow_now_iso(), uid)
+        await conn.execute(
+            "DELETE FROM pending_referrals WHERE new_user_tg_id=$1",
+            int(invited_tg_id)
+        )
 
-        await _extend(int(inviter["id"]), 2)
-        await _extend(int(invited_user_id), 2)
+        await _add_premium_days(conn, inviter_user_id, days=2)
+        await _add_premium_days(conn, invited_user_id, days=2)
 
-        await conn.execute("DELETE FROM pending_referrals WHERE new_user_tg_id=$1", int(invited["tg_id"]))
+async def _add_premium_days(conn, user_id: int, days: int) -> None:
+    row = await conn.fetchrow(
+        "SELECT premium_until FROM users WHERE id=$1",
+        int(user_id),
+    )
+    now = get_moscow_now()
 
+    base = now
+    if row and row["premium_until"]:
+        try:
+            current = datetime.fromisoformat(row["premium_until"])
+            base = current if current > now else now
+        except Exception:
+            base = now
+
+    new_until = base + timedelta(days=days)
+
+    await conn.execute(
+        """
+        UPDATE users
+        SET is_premium=1,
+            premium_until=$2,
+            updated_at=$3
+        WHERE id=$1
+        """,
+        int(user_id),
+        new_until.isoformat(),
+        get_moscow_now_iso(),
+    )
 
 # -------------------- payments --------------------
 
