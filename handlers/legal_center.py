@@ -3,7 +3,17 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import HELP_TELEGRAPH_URL, SUPPORT_URL
+
+import config
+
+# Делает импорт безопасным: если переменные ещё не добавлены в config/.env,
+# модуль всё равно загрузится и /help не отвалится.
+HELP_TELEGRAPH_URL = getattr(
+    config,
+    "HELP_TELEGRAPH_URL",
+    "https://telegra.ph/GlowShot---Informaciya-dlya-polzovatelej-12-16",
+)
+SUPPORT_URL = getattr(config, "SUPPORT_URL", "https://t.me/glowshotbot")
 
 router = Router(name="help_center")
 
@@ -73,7 +83,7 @@ def page(title: str, quote: str, extra: str = "") -> str:
 
 def kb_help():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🌐 Информация)", url=HELP_TELEGRAPH_URL)
+    kb.button(text="🌐 Информация", url=HELP_TELEGRAPH_URL)
     kb.button(text="📄 Terms", callback_data="help:open:terms")
     kb.button(text="🔐 Privacy", callback_data="help:open:privacy")
     kb.button(text="📄 Rules", callback_data="help:open:rules")
