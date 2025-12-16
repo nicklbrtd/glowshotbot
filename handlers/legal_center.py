@@ -101,7 +101,6 @@ def kb_support_back():
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    # удаляем /help пользователя
     try:
         await message.delete()
     except Exception:
