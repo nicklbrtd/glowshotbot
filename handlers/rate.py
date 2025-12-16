@@ -1031,7 +1031,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
     await add_rating(user["id"], photo_id, value)
 
-    # Рефералька: проверяем, не пора ли выдать бонусы
+    # Рефералка: проверяем, не пора ли выдать бонусы
     try:
         rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
     except Exception:

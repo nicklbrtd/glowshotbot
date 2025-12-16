@@ -684,7 +684,7 @@ async def get_referral_stats_for_user(user_tg_id: int) -> dict:
     return {"invited_qualified": int(v or 0)}
 
 
-async def link_and_reward_referral_if_needed(invited_tg_id: int) -> None:
+async def link_and_reward_referral_if_needed(invited_tg_id: int):
     p = _assert_pool()
 
     async with p.acquire() as conn:
@@ -693,35 +693,33 @@ async def link_and_reward_referral_if_needed(invited_tg_id: int) -> None:
             int(invited_tg_id),
         )
         if not invited:
-            return
+            return False, None, None
 
         invited_user_id = int(invited["id"])
 
-        # уже есть рефералка → ничего не делаем
         exists = await conn.fetchval(
             "SELECT 1 FROM referrals WHERE invited_user_id=$1",
             invited_user_id
         )
         if exists:
-            return
+            return False, None, None
 
         pending = await conn.fetchrow(
             "SELECT referral_code FROM pending_referrals WHERE new_user_tg_id=$1",
             int(invited_tg_id),
         )
         if not pending:
-            return
-
-        ref_code = pending["referral_code"]
+            return False, None, None
 
         inviter = await conn.fetchrow(
-            "SELECT id FROM users WHERE referral_code=$1 AND is_deleted=0",
-            ref_code
+            "SELECT id, tg_id FROM users WHERE referral_code=$1 AND is_deleted=0",
+            pending["referral_code"]
         )
         if not inviter:
-            return
+            return False, None, None
 
         inviter_user_id = int(inviter["id"])
+        inviter_tg_id = int(inviter["tg_id"])
         now = get_moscow_now_iso()
 
         await conn.execute(
@@ -741,6 +739,8 @@ async def link_and_reward_referral_if_needed(invited_tg_id: int) -> None:
 
         await _add_premium_days(conn, inviter_user_id, days=2)
         await _add_premium_days(conn, invited_user_id, days=2)
+
+        return True, inviter_tg_id, invited_tg_id
 
 async def _add_premium_days(conn, user_id: int, days: int) -> None:
     row = await conn.fetchrow(
