@@ -1468,7 +1468,7 @@ async def _find_user_by_identifier(identifier: str) -> dict | None:
     if not ident:
         return None
 
-    # Только цифры: пробуем как tg_id и как внутренний id
+    # --- Вариант 1: только цифры → пробуем как tg_id и как внутренний id ---
     if ident.isdigit():
         # Сначала считаем, что это Telegram ID
         try:
@@ -1500,7 +1500,7 @@ async def _find_user_by_identifier(identifier: str) -> dict | None:
 
         return None
 
-    # username с @ или без
+    # --- Вариант 2: username с @ или без ---
     username = ident
     if username.startswith("@"):
         username = username[1:].strip()
