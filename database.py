@@ -2113,53 +2113,103 @@ async def get_user_admin_stats(user_tg_id: int) -> dict:
 
 
 async def get_photo_admin_stats(photo_id: int) -> dict:
-    """Сводка по фото для админки."""
-    ph = await get_photo_by_id(int(photo_id))
-    if not ph:
-        return {
-            "exists": False,
-            "ratings_count": 0,
-            "avg_rating": None,
-            "comments_count": 0,
-            "reports_total": 0,
-            "reports_pending": 0,
-        }
-
     p = _assert_pool()
     pid = int(photo_id)
+
     async with p.acquire() as conn:
-        rr = await conn.fetchrow(
-            "SELECT COUNT(*) AS ratings_count, AVG(value)::double precision AS avg_rating FROM ratings WHERE photo_id=$1",
+        # Средняя оценка и количество обычных оценок
+        row = await conn.fetchrow(
+            """
+            SELECT AVG(value) AS avg, COUNT(*) AS cnt
+            FROM ratings
+            WHERE photo_id = $1
+            """,
             pid,
         )
-        comments_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM comments WHERE photo_id=$1",
-            pid,
-        )
-        reports_total = await conn.fetchval(
-            "SELECT COUNT(*) FROM photo_reports WHERE photo_id=$1",
-            pid,
-        )
-        reports_pending = await conn.fetchval(
-            "SELECT COUNT(*) FROM photo_reports WHERE photo_id=$1 AND status='pending'",
-            pid,
+        avg_rating = float(row["avg"]) if row and row["avg"] is not None else None
+        ratings_count = int(row["cnt"] or 0) if row else 0
+
+        # Количество супер-оценок
+        super_ratings_count = int(
+            (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM super_ratings
+                    WHERE photo_id = $1
+                    """,
+                    pid,
+                )
+            )
+            or 0
         )
 
-    ratings_count = int((rr["ratings_count"] if rr else 0) or 0)
-    avg_rating = rr["avg_rating"] if rr else None
-    try:
-        avg_rating = float(avg_rating) if avg_rating is not None else None
-    except Exception:
-        avg_rating = None
+        # Количество комментариев
+        comments_count = int(
+            (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM comments
+                    WHERE photo_id = $1
+                    """,
+                    pid,
+                )
+            )
+            or 0
+        )
+
+        # Жалобы на фото: всего / в ожидании / решённые
+        reports_total = int(
+            (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM photo_reports
+                    WHERE photo_id = $1
+                    """,
+                    pid,
+                )
+            )
+            or 0
+        )
+
+        reports_pending = int(
+            (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM photo_reports
+                    WHERE photo_id = $1 AND status = 'pending'
+                    """,
+                    pid,
+                )
+            )
+            or 0
+        )
+
+        reports_resolved = int(
+            (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM photo_reports
+                    WHERE photo_id = $1 AND status = 'resolved'
+                    """,
+                    pid,
+                )
+            )
+            or 0
+        )
 
     return {
-        "exists": True,
-        "photo": ph,
-        "ratings_count": ratings_count,
         "avg_rating": avg_rating,
-        "comments_count": int(comments_count or 0),
-        "reports_total": int(reports_total or 0),
-        "reports_pending": int(reports_pending or 0),
+        "ratings_count": ratings_count,
+        "super_ratings_count": super_ratings_count,
+        "comments_count": comments_count,
+        "reports_total": reports_total,
+        "reports_pending": reports_pending,
+        "reports_resolved": reports_resolved,
     }
 # ==================== admin / stats compatibility ====================
 
@@ -2472,57 +2522,6 @@ async def get_user_admin_stats(user_tg_id: int) -> dict:
         "reports_made": int(reports_made or 0),
         "last_activity_at": str(last_activity_at) if last_activity_at else None,
     }
-
-
-async def get_photo_admin_stats(photo_id: int) -> dict:
-    """Сводка по фото для админки."""
-    ph = await get_photo_by_id(int(photo_id))
-    if not ph:
-        return {
-            "exists": False,
-            "ratings_count": 0,
-            "avg_rating": None,
-            "comments_count": 0,
-            "reports_total": 0,
-            "reports_pending": 0,
-        }
-
-    p = _assert_pool()
-    pid = int(photo_id)
-    async with p.acquire() as conn:
-        rr = await conn.fetchrow(
-            "SELECT COUNT(*) AS ratings_count, AVG(value)::double precision AS avg_rating FROM ratings WHERE photo_id=$1",
-            pid,
-        )
-        comments_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM comments WHERE photo_id=$1",
-            pid,
-        )
-        reports_total = await conn.fetchval(
-            "SELECT COUNT(*) FROM photo_reports WHERE photo_id=$1",
-            pid,
-        )
-        reports_pending = await conn.fetchval(
-            "SELECT COUNT(*) FROM photo_reports WHERE photo_id=$1 AND status='pending'",
-            pid,
-        )
-
-    ratings_count = int((rr["ratings_count"] if rr else 0) or 0)
-    avg_rating = rr["avg_rating"] if rr else None
-    try:
-        avg_rating = float(avg_rating) if avg_rating is not None else None
-    except Exception:
-        avg_rating = None
-
-    return {
-        "exists": True,
-        "photo": ph,
-        "ratings_count": ratings_count,
-        "avg_rating": avg_rating,
-        "comments_count": int(comments_count or 0),
-        "reports_total": int(reports_total or 0),
-        "reports_pending": int(reports_pending or 0),
-    }   
 
 
 async def log_bot_error(

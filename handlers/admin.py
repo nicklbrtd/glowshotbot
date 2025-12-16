@@ -116,6 +116,69 @@ async def _edit_user_prompt_or_answer(
     except Exception:
         pass
 
+
+# Помощник: поиск пользователя по тому, что ввёл админ (ID / @username)
+async def _find_user_by_identifier(identifier: str) -> dict | None:
+    """
+    Пытаемся найти пользователя:
+    - если строка состоит только из цифр — сначала считаем, что это tg_id,
+      если не нашли, пробуем как внутренний id;
+    - если начинается с @ — ищем по username;
+    - иначе — тоже пытаемся как username.
+    Никаких исключений наружу не кидаем — максимум возвращаем None.
+    """
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+
+    # --- Вариант 1: только цифры → пробуем как tg_id и как внутренний id ---
+    if ident.isdigit():
+        # Сначала считаем, что это Telegram ID
+        try:
+            tg_id = int(ident)
+        except ValueError:
+            tg_id = None
+
+        if tg_id is not None:
+            try:
+                user = await get_user_by_tg_id(tg_id)
+            except Exception:
+                user = None
+            if user:
+                return user
+
+        # Если по tg_id не нашли — пробуем как внутренний id в таблице users
+        try:
+            internal_id = int(ident)
+        except ValueError:
+            internal_id = None
+
+        if internal_id is not None:
+            try:
+                user = await get_user_by_id(internal_id)
+            except Exception:
+                user = None
+            if user:
+                return user
+
+        return None
+
+    # --- Вариант 2: username с @ или без ---
+    username = ident
+    if username.startswith("@"):
+        username = username[1:].strip()
+
+    if not username:
+        return None
+
+    try:
+        user = await get_user_by_username(username)
+    except Exception:
+        user = None
+
+    return user
+
+
 class UserAdminStates(StatesGroup):
     """
     FSM для раздела «Пользователи»:
@@ -1452,69 +1515,6 @@ async def _ensure_admin(event: UserEvent) -> Optional[dict]:
         return None
 
     return user
-
-
-# Помощник: поиск пользователя по тому, что ввёл админ (ID / @username)
-async def _find_user_by_identifier(identifier: str) -> dict | None:
-    """
-    Пытаемся найти пользователя:
-    - если строка состоит только из цифр — сначала считаем, что это tg_id,
-      если не нашли, пробуем как внутренний id;
-    - если начинается с @ — ищем по username;
-    - иначе — тоже пытаемся как username.
-    Никаких исключений наружу не кидаем — максимум возвращаем None.
-    """
-    ident = (identifier or "").strip()
-    if not ident:
-        return None
-
-    # --- Вариант 1: только цифры → пробуем как tg_id и как внутренний id ---
-    if ident.isdigit():
-        # Сначала считаем, что это Telegram ID
-        try:
-            tg_id = int(ident)
-        except ValueError:
-            tg_id = None
-
-        if tg_id is not None:
-            try:
-                user = await get_user_by_tg_id(tg_id)
-            except Exception:
-                user = None
-            if user:
-                return user
-
-        # Если по tg_id не нашли — пробуем как внутренний id в таблице users
-        try:
-            internal_id = int(ident)
-        except ValueError:
-            internal_id = None
-
-        if internal_id is not None:
-            try:
-                user = await get_user_by_id(internal_id)
-            except Exception:
-                user = None
-            if user:
-                return user
-
-        return None
-
-    # --- Вариант 2: username с @ или без ---
-    username = ident
-    if username.startswith("@"):
-        username = username[1:].strip()
-
-    if not username:
-        return None
-
-    try:
-        user = await get_user_by_username(username)
-    except Exception:
-        user = None
-
-    return user
-
 
 # ================= КЛАВИАТУРЫ =================
 
