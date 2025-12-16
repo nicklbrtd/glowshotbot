@@ -13,6 +13,7 @@ from handlers.payments import TARIFFS
 
 from database import (
     get_user_by_tg_id,
+    get_user_by_id,
     get_user_block_status_by_tg_id,
     set_user_admin_by_tg_id,
     get_total_users,
@@ -353,6 +354,8 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="📸 Фотография", callback_data="admin:users:photo")
     kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
     is_blocked = bool(block_status.get("is_blocked"))
     if is_blocked:
         kb.button(text="♻️ Разбан", callback_data="admin:users:unban")
@@ -546,6 +549,8 @@ async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext
     kb = InlineKeyboardBuilder()
     kb.button(text="📸 Фотография", callback_data="admin:users:photo")
     kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
     is_blocked = bool(block_status.get("is_blocked"))
     if is_blocked:
         kb.button(text="♻️ Разбан", callback_data="admin:users:unban")
@@ -4168,3 +4173,124 @@ async def admin_logs_clear(callback: CallbackQuery):
     except Exception:
         pass
     await admin_logs_page(callback)
+# ====== USERS: AWARDS / ACHIEVEMENTS ======
+
+
+@router.callback_query(F.data == "admin:users:awards")
+async def admin_users_awards(callback: CallbackQuery, state: FSMContext):
+    """Показать список наград пользователя и быстрые действия."""
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    internal_id = data.get("selected_user_id")
+    if not internal_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    awards = await get_awards_for_user(int(internal_id))
+
+    lines: list[str] = [
+        "<b>Награды / ачивки пользователя</b>",
+        "",
+    ]
+
+    if not awards:
+        lines.append("Пока нет ни одной награды.")
+    else:
+        for a in awards:
+            icon = (a.get("icon") or "🏅").strip() or "🏅"
+            title = (a.get("title") or a.get("code") or "—").strip()
+            code = (a.get("code") or "—").strip()
+            created_at = a.get("created_at")
+            try:
+                dt = datetime.fromisoformat(created_at) if created_at else None
+                created_human = dt.strftime("%d.%m.%Y %H:%M") if dt else (created_at or "—")
+            except Exception:
+                created_human = created_at or "—"
+            lines.append(f"• {icon} <b>{title}</b>  (<code>{code}</code>) — {created_human}")
+
+    lines.append("")
+    lines.append("Быстрое действие: можно выдать «Бета‑тестер» одной кнопкой ниже.")
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
+    kb.button(text="⬅️ Назад к профилю", callback_data="admin:users:profile")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_user_prompt_or_answer(
+        callback.message,
+        state,
+        "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:users:award:beta")
+async def admin_users_award_beta(callback: CallbackQuery, state: FSMContext):
+    """Выдать пользователю ачивку beta_tester (без дублей)."""
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    target_tg_id = data.get("selected_user_tg_id")
+    internal_id = data.get("selected_user_id")
+
+    if not target_tg_id or not internal_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    ok = False
+    try:
+        ok = await give_achievement_to_user_by_code(int(target_tg_id), "beta_tester", granted_by_tg_id=callback.from_user.id)
+    except Exception:
+        ok = False
+
+    # Пере-рендерим профиль, чтобы сразу увидеть награду
+    user = await get_user_by_id(int(internal_id))
+    if not user:
+        await callback.answer("Не удалось обновить профиль пользователя.", show_alert=True)
+        return
+
+    block_status = await get_user_block_status_by_tg_id(int(target_tg_id))
+    rating_summary = await get_user_rating_summary(int(internal_id))
+    admin_stats = await get_user_admin_stats(int(internal_id))
+    awards = await get_awards_for_user(int(internal_id))
+
+    text = await _render_admin_user_profile(
+        user=user,
+        block_status=block_status,
+        rating_summary=rating_summary,
+        admin_stats=admin_stats,
+        awards=awards,
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📸 Фотография", callback_data="admin:users:photo")
+    kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
+
+    is_blocked = bool(block_status.get("is_blocked"))
+    if is_blocked:
+        kb.button(text="♻️ Разбан", callback_data="admin:users:unban")
+    else:
+        kb.button(text="🚫 Бан", callback_data="admin:users:ban")
+
+    kb.button(text="⛔ Ограничить доступ", callback_data="admin:users:limit")
+    kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 2, 2)
+
+    await _edit_user_prompt_or_answer(
+        callback.message,
+        state,
+        text=text,
+        reply_markup=kb.as_markup(),
+    )
+
+    await callback.answer("✅ Выдано" if ok else "ℹ️ Уже было / не удалось")
