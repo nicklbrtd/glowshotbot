@@ -12,6 +12,7 @@ from database import init_db, log_bot_error
 
 
 from handlers import (
+    legal_center,
     start,
     upload,
     rate,
@@ -23,7 +24,6 @@ from handlers import (
     support_link,
     premium,
     payments,
-    terms,
     referrals,
 )
 
@@ -105,9 +105,8 @@ async def main():
     dp.include_router(support_link.router)
     dp.include_router(premium.router)
     dp.include_router(payments.router)
-    dp.include_router(terms.router)
+    dp.include_router(legal_center.router)
     dp.include_router(referrals.router)
-
 
     print("🤖 GlowShot запущен")
     try:
