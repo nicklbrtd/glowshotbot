@@ -1454,31 +1454,66 @@ async def _ensure_admin(event: UserEvent) -> Optional[dict]:
     return user
 
 
-# ====== Поиск пользователя по ID или username ======
-async def _find_user_by_identifier(identifier: str) -> Optional[dict]:
+# Помощник: поиск пользователя по тому, что ввёл админ (ID / @username)
+async def _find_user_by_identifier(identifier: str) -> dict | None:
     """
-    Пытается найти пользователя по числовому tg_id или по @username.
-    identifier может быть '123456789' или '@username'.
+    Пытаемся найти пользователя:
+    - если строка состоит только из цифр — сначала считаем, что это tg_id,
+      если не нашли, пробуем как внутренний id;
+    - если начинается с @ — ищем по username;
+    - иначе — тоже пытаемся как username.
+    Никаких исключений наружу не кидаем — максимум возвращаем None.
     """
-    if not identifier:
+    ident = (identifier or "").strip()
+    if not ident:
         return None
 
-    identifier = identifier.strip()
+    # Только цифры: пробуем как tg_id и как внутренний id
+    if ident.isdigit():
+        # Сначала считаем, что это Telegram ID
+        try:
+            tg_id = int(ident)
+        except ValueError:
+            tg_id = None
 
-    # По username
-    if identifier.startswith("@"):
-        username = identifier[1:].strip()
-        if not username:
-            return None
+        if tg_id is not None:
+            try:
+                user = await get_user_by_tg_id(tg_id)
+            except Exception:
+                user = None
+            if user:
+                return user
+
+        # Если по tg_id не нашли — пробуем как внутренний id в таблице users
+        try:
+            internal_id = int(ident)
+        except ValueError:
+            internal_id = None
+
+        if internal_id is not None:
+            try:
+                user = await get_user_by_id(internal_id)
+            except Exception:
+                user = None
+            if user:
+                return user
+
+        return None
+
+    # username с @ или без
+    username = ident
+    if username.startswith("@"):
+        username = username[1:].strip()
+
+    if not username:
+        return None
+
+    try:
         user = await get_user_by_username(username)
-        return user
+    except Exception:
+        user = None
 
-    # По ID
-    if identifier.isdigit():
-        user = await get_user_by_tg_id(int(identifier))
-        return user
-
-    return None
+    return user
 
 
 # ================= КЛАВИАТУРЫ =================
