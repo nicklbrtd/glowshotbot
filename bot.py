@@ -10,9 +10,8 @@ from typing import Callable, Dict, Any, Awaitable
 
 from database import init_db, log_bot_error
 
-
+from handlers.legal_center import router as help_center_router
 from handlers import (
-    legal_center,
     start,
     upload,
     rate,
@@ -102,11 +101,10 @@ async def main():
     dp.include_router(results.router)
     dp.include_router(admin.router)
     dp.include_router(moderator.router)
-    dp.include_router(support_link.router)
     dp.include_router(premium.router)
     dp.include_router(payments.router)
-    dp.include_router(legal_center.router)
     dp.include_router(referrals.router)
+    dp.include_router(help_center_router)
 
     print("🤖 GlowShot запущен")
     try:
