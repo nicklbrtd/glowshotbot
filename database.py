@@ -774,6 +774,51 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
 
 # -------------------- payments --------------------
 
+async def log_bot_error(
+    chat_id: int | None = None,
+    tg_user_id: int | None = None,
+    handler: str | None = None,
+    update_type: str | None = None,
+    error_type: str | None = None,
+    error_text: str | None = None,
+    traceback_text: str | None = None,
+) -> None:
+    """Сохраняет ошибку бота в таблицу bot_error_logs для админки."""
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+
+    # Ограничим размеры, чтобы не убить базу огромным traceback
+    def _cut(s: str | None, n: int) -> str | None:
+        if s is None:
+            return None
+        s = str(s)
+        return s if len(s) <= n else s[: n - 3] + "..."
+
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO bot_error_logs (
+              chat_id,
+              tg_user_id,
+              handler,
+              update_type,
+              error_type,
+              error_text,
+              traceback_text,
+              created_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            """,
+            int(chat_id) if chat_id is not None else None,
+            int(tg_user_id) if tg_user_id is not None else None,
+            _cut(handler, 200),
+            _cut(update_type, 100),
+            _cut(error_type, 200),
+            _cut(error_text, 2000),
+            _cut(traceback_text, 20000),
+            now,
+        )
+
 async def log_successful_payment(tg_id: int, provider: str = "unknown",
                                  amount_rub: int | None = None, amount_stars: int | None = None,
                                  period_code: str | None = None, inv_id: str | None = None) -> None:
