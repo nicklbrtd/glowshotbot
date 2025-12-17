@@ -774,6 +774,7 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
 
 # -------------------- payments --------------------
 
+
 async def log_bot_error(
     chat_id: int | None = None,
     tg_user_id: int | None = None,
@@ -818,6 +819,30 @@ async def log_bot_error(
             _cut(traceback_text, 20000),
             now,
         )
+
+
+async def get_bot_error_logs_page(offset: int, limit: int) -> list[dict]:
+    """Возвращает страницу логов ошибок (для админки), newest-first."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM bot_error_logs
+            ORDER BY created_at DESC, id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset),
+            int(limit),
+        )
+    return [dict(r) for r in rows]
+
+
+async def clear_bot_error_logs() -> None:
+    """Полностью очищает таблицу bot_error_logs (для админки)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute("DELETE FROM bot_error_logs")
 
 async def log_successful_payment(tg_id: int, provider: str = "unknown",
                                  amount_rub: int | None = None, amount_stars: int | None = None,
