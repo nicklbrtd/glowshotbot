@@ -302,7 +302,7 @@ async def ensure_schema() -> None:
               update_type TEXT,
               error_type TEXT,
               error_text TEXT,
-              traceback TEXT,
+              traceback_text TEXT,
               created_at TEXT NOT NULL
             );
             """
@@ -853,6 +853,12 @@ async def create_today_photo(
     now_iso = get_moscow_now_iso()
     day_key = _today_key()
 
+    # Если описания нет, явно сохраняем метку "нет"
+    if description is not None:
+        description = description.strip() or None
+    if not description:
+        description = "нет"
+
     if not category:
         category = "photo"
 
@@ -1003,7 +1009,8 @@ async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
             SELECT p.*,
                    u.is_premium AS user_is_premium,
                    u.premium_until AS user_premium_until,
-                   u.tg_channel_link AS user_tg_channel_link
+                   u.tg_channel_link AS user_tg_channel_link,
+                   u.tg_channel_link AS tg_channel_link
             FROM photos p
             JOIN users u ON u.id=p.user_id
             WHERE p.is_deleted=0
@@ -1177,13 +1184,20 @@ async def get_daily_top_photos(day_key: str | None = None, limit: int = 4) -> li
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT p.*,
-                   COUNT(r.id) AS ratings_count,
-                   AVG(r.value)::double precision AS avg_rating
+            SELECT
+              p.*,
+              u.name     AS user_name,
+              u.username AS user_username,
+              COUNT(r.id) AS ratings_count,
+              AVG(r.value)::double precision AS avg_rating
             FROM photos p
-            JOIN ratings r ON r.photo_id=p.id
-            WHERE p.is_deleted=0 AND p.day_key=$1 AND p.moderation_status='active'
-            GROUP BY p.id
+            JOIN ratings r ON r.photo_id = p.id
+            JOIN users   u ON u.id = p.user_id
+            WHERE p.is_deleted=0
+              AND p.day_key = $1
+              AND p.moderation_status = 'active'
+              AND u.is_deleted = 0
+            GROUP BY p.id, u.id
             ORDER BY AVG(r.value) DESC, COUNT(r.id) DESC, p.id DESC
             LIMIT $2
             """,
@@ -1399,7 +1413,10 @@ async def get_weekly_rank_for_user(user_id: int) -> int | None:
     return None
 
 
-# -------------------- admin minimal lists --------------------
+# ========== ADMIN & STATS ==========
+
+# --- basic user lists / roles ---
+
 
 async def get_total_users() -> int:
     p = _assert_pool()
@@ -1416,50 +1433,87 @@ async def get_all_users_tg_ids() -> list[int]:
 
 
 async def get_moderators() -> list[int]:
+    """Telegram IDs of moderators."""
     p = _assert_pool()
     async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM users WHERE is_moderator=1 AND is_deleted=0")
+        rows = await conn.fetch(
+            "SELECT tg_id FROM users WHERE is_moderator=1 AND is_deleted=0"
+        )
     return [int(r["tg_id"]) for r in rows]
 
 
 async def get_helpers() -> list[int]:
+    """Telegram IDs of helpers."""
     p = _assert_pool()
     async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM users WHERE is_helper=1 AND is_deleted=0")
+        rows = await conn.fetch(
+            "SELECT tg_id FROM users WHERE is_helper=1 AND is_deleted=0"
+        )
     return [int(r["tg_id"]) for r in rows]
 
 
 async def get_support_users() -> list[int]:
+    """Telegram IDs of support users."""
     p = _assert_pool()
     async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM users WHERE is_support=1 AND is_deleted=0")
+        rows = await conn.fetch(
+            "SELECT tg_id FROM users WHERE is_support=1 AND is_deleted=0"
+        )
     return [int(r["tg_id"]) for r in rows]
 
 
 async def get_premium_users() -> list[dict]:
+    """Full rows for all premium users (for admin lists)."""
     p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM users WHERE is_premium=1 AND is_deleted=0 ORDER BY premium_until DESC NULLS LAST")
-    return [dict(r) for r in rows]
-
-
-async def get_users_sample(limit: int = 20, only_active: bool = True) -> list[dict]:
-    """Return a random sample of users for admin UI.
-
-    - limit: max number of users
-    - only_active: if True, excludes soft-deleted users
-    """
-    p = _assert_pool()
-    where = "WHERE is_deleted=0" if only_active else ""
     async with p.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT * FROM users {where} ORDER BY random() LIMIT $1",
-            int(limit),
+            """
+            SELECT *
+            FROM users
+            WHERE is_premium=1 AND is_deleted=0
+            ORDER BY premium_until DESC NULLS LAST, id DESC
+            """
         )
     return [dict(r) for r in rows]
 
 
+async def get_users_sample(
+    limit: int = 20,
+    offset: int | None = None,
+    only_active: bool = True,
+) -> list[dict]:
+    """
+    Универсальная выборка пользователей для админки.
+
+    Поддерживает старые вызовы:
+      - get_users_sample(limit=20)
+      - get_users_sample(limit=20, offset=0)
+      - get_users_sample(limit=20, only_active=False)
+    """
+    p = _assert_pool()
+    where = "WHERE is_deleted=0" if only_active else ""
+    off = int(offset or 0)
+
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT *
+            FROM users
+            {where}
+            ORDER BY id DESC
+            OFFSET $2 LIMIT $1
+            """,
+            int(limit),
+            off,
+        )
+    return [dict(r) for r in rows]
+
+
+# --- activity / online ---
+
+
 async def get_active_users_last_24h(limit: int = 20) -> tuple[int, list[dict]]:
+    """(total, sample) of users with any activity in last 24h."""
     p = _assert_pool()
     since_iso = (get_moscow_now() - timedelta(hours=24)).isoformat()
     async with p.acquire() as conn:
@@ -1490,12 +1544,14 @@ async def get_active_users_last_24h(limit: int = 20) -> tuple[int, list[dict]]:
     return int(total or 0), [dict(r) for r in rows]
 
 
-# ==================== admin stats helpers (compat layer) ====================
-# Эти функции нужны, потому что handlers/admin.py вызывает их с конкретными именами
-# и именованными аргументами (limit/window_minutes/min_wins и т.д.).
-
 async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> tuple[int, list[dict]]:
-    """Users who have any activity_events within the last N minutes."""
+    """
+    Пользователи, у которых есть activity_events за последние N минут.
+    Совместимо с вызовами:
+      get_online_users_recent()
+      get_online_users_recent(10)
+      get_online_users_recent(window_minutes=5, limit=20)
+    """
     p = _assert_pool()
     since_iso = (get_moscow_now() - timedelta(minutes=int(window_minutes))).isoformat()
     async with p.acquire() as conn:
@@ -1525,330 +1581,9 @@ async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> t
         )
     return int(total or 0), [dict(r) for r in rows]
 
-
-async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, list[dict]]:
-    """Users created within the last N days."""
-    p = _assert_pool()
-    since_iso = (get_moscow_now() - timedelta(days=int(days))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
-            since_iso,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND created_at >= $1
-            ORDER BY created_at DESC, id DESC
-            LIMIT $2
-            """,
-            since_iso,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_premium_stats(limit: int = 20) -> dict:
-    """Summary for admin premium screen.
-
-    Returns:
-      {
-        'total': int,
-        'active': int,
-        'expired': int,
-        'sample': list[dict],
-      }
-    """
-    p = _assert_pool()
-    now_dt = get_moscow_now()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_premium=1"
-        )
-        # active: premium_until is null/empty OR in future
-        active = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM users
-            WHERE is_deleted=0 AND is_premium=1
-              AND (
-                premium_until IS NULL
-                OR premium_until = ''
-                OR premium_until::timestamp > $1
-              )
-            """,
-            now_dt,
-        )
-        expired = (int(total or 0) - int(active or 0))
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND is_premium=1
-            ORDER BY premium_until DESC NULLS LAST, id DESC
-            LIMIT $1
-            """,
-            int(limit),
-        )
-
-    return {
-        "total": int(total or 0),
-        "active": int(active or 0),
-        "expired": int(expired or 0),
-        "sample": [dict(r) for r in rows],
-    }
-
-
-async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
-    """Paged list of blocked users for admin screen."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_blocked=1"
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND is_blocked=1
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset),
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_users_with_multiple_daily_top3(min_wins: int = 2, limit: int = 50) -> list[dict]:
-    """Users who have at least N appearances in daily top-3.
-
-    We read from my_results (it stores archived winners). If your project uses
-    a different kind string, extend the WHERE clause.
-    """
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT u.*, t.wins
-            FROM (
-              SELECT user_id, COUNT(*) AS wins
-              FROM my_results
-              WHERE (place IS NOT NULL AND place <= 3)
-                AND (
-                  kind IN ('daily_top', 'daily', 'day', 'daily_results', 'top_day')
-                )
-              GROUP BY user_id
-              HAVING COUNT(*) >= $1
-              ORDER BY COUNT(*) DESC
-              LIMIT $2
-            ) t
-            JOIN users u ON u.id=t.user_id
-            WHERE u.is_deleted=0
-            ORDER BY t.wins DESC, u.id DESC
-            """,
-            int(min_wins),
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-
-
-# Backward-compatible alias (если где-то осталось старое имя аргумента)
-async def get_users_with_multiple_daily_top3_by_hits(min_hits: int = 2, limit: int = 50) -> list[dict]:
-    return await get_users_with_multiple_daily_top3(min_wins=min_hits, limit=limit)
-# ==================== admin compatibility layer ====================
-# handlers/admin.py ожидает конкретные сигнатуры и типы (dict),
-# поэтому тут даём совместимые реализации поверх текущей схемы.
-
-async def get_total_users() -> int:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted=0")
-    return int(v or 0)
-
-
-async def get_all_users_tg_ids() -> list[int]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM users WHERE is_deleted=0 ORDER BY id ASC")
-    return [int(r["tg_id"]) for r in rows]
-
-
-async def get_moderators() -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE is_deleted=0 AND is_moderator=1 ORDER BY id DESC"
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_helpers() -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE is_deleted=0 AND is_helper=1 ORDER BY id DESC"
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_support_users() -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE is_deleted=0 AND is_support=1 ORDER BY id DESC"
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> tuple[int, list[dict]]:
-    """Пользователи, у которых есть activity_events за последние N минут."""
-    p = _assert_pool()
-    since_iso = (get_moscow_now() - timedelta(minutes=int(window_minutes))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            """
-            SELECT COUNT(DISTINCT user_id)
-            FROM activity_events
-            WHERE user_id IS NOT NULL AND created_at >= $1
-            """,
-            since_iso,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT u.*
-            FROM users u
-            JOIN (
-              SELECT DISTINCT user_id
-              FROM activity_events
-              WHERE user_id IS NOT NULL AND created_at >= $1
-            ) a ON a.user_id = u.id
-            WHERE u.is_deleted=0
-            ORDER BY u.updated_at DESC NULLS LAST, u.created_at DESC, u.id DESC
-            LIMIT $2
-            """,
-            since_iso,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, list[dict]]:
-    p = _assert_pool()
-    since_iso = (get_moscow_now() - timedelta(days=int(days))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
-            since_iso,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND created_at >= $1
-            ORDER BY created_at DESC, id DESC
-            LIMIT $2
-            """,
-            since_iso,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_premium_stats(limit: int = 20) -> dict:
-    """Сводка премиумов для админки.
-
-    Возвращает dict с ключами: total, active, expired, sample
-    """
-    p = _assert_pool()
-    now_dt = get_moscow_now()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_premium=1"
-        )
-        active = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM users
-            WHERE is_deleted=0 AND is_premium=1
-              AND (
-                premium_until IS NULL
-                OR premium_until = ''
-                OR premium_until::timestamp > $1
-              )
-            """,
-            now_dt,
-        )
-        expired = int(total or 0) - int(active or 0)
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND is_premium=1
-            ORDER BY premium_until DESC NULLS LAST, id DESC
-            LIMIT $1
-            """,
-            int(limit),
-        )
-
-    return {
-        "total": int(total or 0),
-        "active": int(active or 0),
-        "expired": int(expired or 0),
-        "sample": [dict(r) for r in rows],
-    }
-
-
-async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_blocked=1"
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND is_blocked=1
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset),
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_users_with_multiple_daily_top3(min_wins: int = 2, limit: int = 50) -> list[dict]:
-    """Победители топ-3 дня (по my_results)."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT u.*, t.wins
-            FROM (
-              SELECT user_id, COUNT(*) AS wins
-              FROM my_results
-              WHERE (place IS NOT NULL AND place <= 3)
-              GROUP BY user_id
-              HAVING COUNT(*) >= $1
-              ORDER BY COUNT(*) DESC
-              LIMIT $2
-            ) t
-            JOIN users u ON u.id=t.user_id
-            WHERE u.is_deleted=0
-            ORDER BY t.wins DESC, u.id DESC
-            """,
-            int(min_wins),
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-
-
-# Back-compat: если где-то ещё зовётся старым именем аргумента
-async def get_users_with_multiple_daily_top3_by_hits(min_hits: int = 2, limit: int = 50) -> list[dict]:
-    return await get_users_with_multiple_daily_top3(min_wins=min_hits, limit=limit)
- 
-# ==================== admin compatibility layer (override) ====================
-# Админка ожидает конкретные сигнатуры, именованные аргументы и возвраты.
-# Этот блок должен быть ПОСЛЕДНИМ в файле.
 
 async def get_total_activity_events() -> int:
+    """Total number of activity events (admin stats)."""
     p = _assert_pool()
     async with p.acquire() as conn:
         v = await conn.fetchval("SELECT COUNT(*) FROM activity_events")
@@ -1856,6 +1591,7 @@ async def get_total_activity_events() -> int:
 
 
 async def get_total_activity_events_last_days(days: int = 7) -> int:
+    """Total events for last N days (for graphs)."""
     p = _assert_pool()
     since_iso = (get_moscow_now() - timedelta(days=int(days))).isoformat()
     async with p.acquire() as conn:
@@ -1866,118 +1602,17 @@ async def get_total_activity_events_last_days(days: int = 7) -> int:
     return int(v or 0)
 
 
-async def get_total_users() -> int:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted=0")
-    return int(v or 0)
-
-
-async def get_users_sample(limit: int = 20, offset: int = 0) -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0
-            ORDER BY id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset),
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_all_users_tg_ids() -> list[int]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM users WHERE is_deleted=0 ORDER BY id ASC")
-    return [int(r["tg_id"]) for r in rows]
-
-
-async def get_moderators() -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE is_deleted=0 AND is_moderator=1 ORDER BY id DESC"
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_helpers() -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE is_deleted=0 AND is_helper=1 ORDER BY id DESC"
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_support_users() -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE is_deleted=0 AND is_support=1 ORDER BY id DESC"
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> tuple[int, list[dict]]:
-    """Онлайн = есть activity_events за последние N минут."""
-    p = _assert_pool()
-    since_iso = (get_moscow_now() - timedelta(minutes=int(window_minutes))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            """
-            SELECT COUNT(DISTINCT user_id)
-            FROM activity_events
-            WHERE user_id IS NOT NULL AND created_at >= $1
-            """,
-            since_iso,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT u.*
-            FROM users u
-            JOIN (
-              SELECT DISTINCT user_id
-              FROM activity_events
-              WHERE user_id IS NOT NULL AND created_at >= $1
-            ) a ON a.user_id = u.id
-            WHERE u.is_deleted=0
-            ORDER BY u.updated_at DESC NULLS LAST, u.created_at DESC, u.id DESC
-            LIMIT $2
-            """,
-            since_iso,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, list[dict]]:
-    p = _assert_pool()
-    since_iso = (get_moscow_now() - timedelta(days=int(days))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
-            since_iso,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND created_at >= $1
-            ORDER BY created_at DESC, id DESC
-            LIMIT $2
-            """,
-            since_iso,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
+# --- premium / new / blocked ---
 
 
 async def get_premium_stats(limit: int = 20) -> dict:
-    """Возвращает dict: total, active, expired, sample"""
+    """
+    Возвращает dict:
+      - total   — всего премиум-пользователей
+      - active  — у кого подписка ещё активна
+      - expired — истёкшие
+      - sample  — список пользователей (dict) для предпросмотра
+    """
     p = _assert_pool()
     now_dt = get_moscow_now()
     async with p.acquire() as conn:
@@ -2000,7 +1635,8 @@ async def get_premium_stats(limit: int = 20) -> dict:
         expired = int(total or 0) - int(active or 0)
         sample_rows = await conn.fetch(
             """
-            SELECT * FROM users
+            SELECT *
+            FROM users
             WHERE is_deleted=0 AND is_premium=1
             ORDER BY premium_until DESC NULLS LAST, id DESC
             LIMIT $1
@@ -2015,7 +1651,31 @@ async def get_premium_stats(limit: int = 20) -> dict:
     }
 
 
+async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, list[dict]]:
+    """(total, sample) for users created within last N days."""
+    p = _assert_pool()
+    cutoff = (get_moscow_now() - timedelta(days=int(days))).isoformat()
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
+            cutoff,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM users
+            WHERE is_deleted=0 AND created_at >= $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            """,
+            cutoff,
+            int(limit),
+        )
+    return int(total or 0), [dict(r) for r in rows]
+
+
 async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, users_page) for blocked users pagination."""
     p = _assert_pool()
     async with p.acquire() as conn:
         total = await conn.fetchval(
@@ -2023,7 +1683,8 @@ async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int,
         )
         rows = await conn.fetch(
             """
-            SELECT * FROM users
+            SELECT *
+            FROM users
             WHERE is_deleted=0 AND is_blocked=1
             ORDER BY updated_at DESC NULLS LAST, id DESC
             OFFSET $1 LIMIT $2
@@ -2034,25 +1695,28 @@ async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int,
     return int(total or 0), [dict(r) for r in rows]
 
 
+# --- winners / top-3 ---
+
+
 async def get_users_with_multiple_daily_top3(min_wins: int = 2, limit: int = 50) -> list[dict]:
-    """Победители топ-3 дня по таблице my_results."""
+    """
+    Admin helper: users who hit daily top-3 multiple times.
+    Uses my_results as source.
+    """
     p = _assert_pool()
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT u.*, t.wins
-            FROM (
-              SELECT user_id, COUNT(*) AS wins
-              FROM my_results
-              WHERE (place IS NOT NULL AND place <= 3)
-              GROUP BY user_id
-              HAVING COUNT(*) >= $1
-              ORDER BY COUNT(*) DESC
-              LIMIT $2
-            ) t
-            JOIN users u ON u.id=t.user_id
+            SELECT u.*, COUNT(m.id) AS wins
+            FROM my_results m
+            JOIN users u ON u.id=m.user_id
             WHERE u.is_deleted=0
-            ORDER BY t.wins DESC, u.id DESC
+              AND (m.kind = 'daily' OR m.kind IS NULL)
+              AND m.place IS NOT NULL AND m.place <= 3
+            GROUP BY u.id
+            HAVING COUNT(m.id) >= $1
+            ORDER BY wins DESC, u.id DESC
+            LIMIT $2
             """,
             int(min_wins),
             int(limit),
@@ -2060,18 +1724,17 @@ async def get_users_with_multiple_daily_top3(min_wins: int = 2, limit: int = 50)
     return [dict(r) for r in rows]
 
 
-# На случай, если где-то в коде старое имя аргумента
 async def get_users_with_multiple_daily_top3_by_hits(min_hits: int = 2, limit: int = 50) -> list[dict]:
+    """Alias for backward compatibility with old name."""
     return await get_users_with_multiple_daily_top3(min_wins=min_hits, limit=limit)
 
 
-
 async def get_photo_admin_stats(photo_id: int) -> dict:
+    """Подробная статистика по одному фото для админки."""
     p = _assert_pool()
     pid = int(photo_id)
 
     async with p.acquire() as conn:
-        # Средняя оценка и количество обычных оценок
         row = await conn.fetchrow(
             """
             SELECT AVG(value) AS avg, COUNT(*) AS cnt
@@ -2083,77 +1746,23 @@ async def get_photo_admin_stats(photo_id: int) -> dict:
         avg_rating = float(row["avg"]) if row and row["avg"] is not None else None
         ratings_count = int(row["cnt"] or 0) if row else 0
 
-        # Количество супер-оценок
         super_ratings_count = int(
             (
                 await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM super_ratings
-                    WHERE photo_id = $1
-                    """,
+                    "SELECT COUNT(*) FROM super_ratings WHERE photo_id = $1",
                     pid,
                 )
             )
             or 0
         )
 
-        # Количество комментариев
         comments_count = int(
             (
                 await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM comments
-                    WHERE photo_id = $1
-                    """,
+                    "SELECT COUNT(*) FROM comments WHERE photo_id=$1",
                     pid,
                 )
-            )
-            or 0
-        )
-
-        # Жалобы на фото: всего / в ожидании / решённые
-        reports_total = int(
-            (
-                await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM photo_reports
-                    WHERE photo_id = $1
-                    """,
-                    pid,
-                )
-            )
-            or 0
-        )
-
-        reports_pending = int(
-            (
-                await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM photo_reports
-                    WHERE photo_id = $1 AND status = 'pending'
-                    """,
-                    pid,
-                )
-            )
-            or 0
-        )
-
-        reports_resolved = int(
-            (
-                await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM photo_reports
-                    WHERE photo_id = $1 AND status = 'resolved'
-                    """,
-                    pid,
-                )
-            )
-            or 0
+            ) or 0
         )
 
     return {
@@ -2161,410 +1770,5 @@ async def get_photo_admin_stats(photo_id: int) -> dict:
         "ratings_count": ratings_count,
         "super_ratings_count": super_ratings_count,
         "comments_count": comments_count,
-        "reports_total": reports_total,
-        "reports_pending": reports_pending,
-        "reports_resolved": reports_resolved,
     }
-# ==================== admin / stats compatibility ====================
 
-async def get_total_activity_events() -> int:
-    """Total number of activity events (admin stats)."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM activity_events")
-    return int(v or 0)
-
-
-async def get_online_users_recent(*, window_minutes: int = 5, limit: int = 20):
-    """Return (total, sample) for users active in last N minutes."""
-    p = _assert_pool()
-    cutoff = (get_moscow_now() - timedelta(minutes=int(window_minutes))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            """
-            SELECT COUNT(DISTINCT user_id)
-            FROM activity_events
-            WHERE created_at >= $1
-            """,
-            cutoff,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT u.*
-            FROM users u
-            WHERE u.is_deleted=0
-              AND EXISTS (
-                SELECT 1 FROM activity_events a
-                WHERE a.user_id=u.id AND a.created_at >= $1
-              )
-            ORDER BY u.updated_at DESC NULLS LAST, u.id DESC
-            LIMIT $2
-            """,
-            cutoff,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_new_users_last_days(*, days: int = 3, limit: int = 20):
-    """Return (total, sample) for users created within last N days."""
-    p = _assert_pool()
-    cutoff = (get_moscow_now() - timedelta(days=int(days))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
-            cutoff,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND created_at >= $1
-            ORDER BY created_at DESC, id DESC
-            LIMIT $2
-            """,
-            cutoff,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_premium_stats(*, limit: int = 20) -> list[dict]:
-    """Admin premium stats: returns a list of premium users (most relevant info)."""
-    # If you already have a more detailed implementation elsewhere, admin can use it.
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, tg_id, username, name, premium_until, created_at, updated_at
-            FROM users
-            WHERE is_deleted=0 AND is_premium=1
-            ORDER BY premium_until DESC NULLS LAST, id DESC
-            LIMIT $1
-            """,
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_blocked_users_page(*, limit: int = 20, offset: int = 0):
-    """Return (total, users_page) for blocked users pagination."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_blocked=1"
-        )
-        rows = await conn.fetch(
-            """
-            SELECT * FROM users
-            WHERE is_deleted=0 AND is_blocked=1
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset),
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_users_with_multiple_daily_top3(*, min_wins: int = 2, limit: int = 50):
-    """Admin helper: users who hit daily top-N multiple times. Uses my_results as source."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT u.*, COUNT(m.id) AS wins
-            FROM my_results m
-            JOIN users u ON u.id=m.user_id
-            WHERE u.is_deleted=0
-              AND (m.kind = 'daily' OR m.kind IS NULL)
-              AND m.place IS NOT NULL AND m.place <= 3
-            GROUP BY u.id
-            HAVING COUNT(m.id) >= $1
-            ORDER BY wins DESC, u.id DESC
-            LIMIT $2
-            """,
-            int(min_wins),
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-# ============================================================
-# Compatibility layer for handlers (admin/moderator stats etc.)
-# These definitions MUST be last in the file to override older ones.
-# ============================================================
-
-async def get_online_users_recent(*, window_minutes: int = 5, limit: int = 20):
-    """Return (total, sample) for users active in last N minutes."""
-    p = _assert_pool()
-    cutoff = (get_moscow_now() - timedelta(minutes=int(window_minutes))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            """
-            SELECT COUNT(DISTINCT user_id)
-            FROM activity_events
-            WHERE created_at >= $1
-            """,
-            cutoff,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT u.*,
-                   MAX(a.created_at) AS last_activity_at
-            FROM activity_events a
-            JOIN users u ON u.id = a.user_id
-            WHERE a.created_at >= $1
-              AND u.is_deleted = 0
-            GROUP BY u.id
-            ORDER BY last_activity_at DESC NULLS LAST, u.id DESC
-            LIMIT $2
-            """,
-            cutoff,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_new_users_last_days(*, days: int = 3, limit: int = 20):
-    """Return (total, sample) for users created within last N days."""
-    p = _assert_pool()
-    cutoff = (get_moscow_now() - timedelta(days=int(days))).isoformat()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
-            cutoff,
-        )
-        rows = await conn.fetch(
-            """
-            SELECT *
-            FROM users
-            WHERE is_deleted=0 AND created_at >= $1
-            ORDER BY created_at DESC, id DESC
-            LIMIT $2
-            """,
-            cutoff,
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_premium_stats(*, limit: int = 20) -> list[dict]:
-    """Admin premium stats: returns a list of premium users (most relevant info)."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, tg_id, username, name, premium_until, created_at, updated_at
-            FROM users
-            WHERE is_deleted=0 AND is_premium=1
-            ORDER BY premium_until DESC NULLS LAST, id DESC
-            LIMIT $1
-            """,
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_blocked_users_page(*, limit: int = 20, offset: int = 0):
-    """Return (total, users_page) for blocked users pagination."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_blocked=1"
-        )
-        rows = await conn.fetch(
-            """
-            SELECT *
-            FROM users
-            WHERE is_deleted=0 AND is_blocked=1
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset),
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def get_users_with_multiple_daily_top3(*, min_wins: int = 2, limit: int = 50):
-    """Admin helper: users who hit daily top-3 multiple times. Uses my_results as source."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT u.*, COUNT(m.id) AS wins
-            FROM my_results m
-            JOIN users u ON u.id=m.user_id
-            WHERE u.is_deleted=0
-              AND (m.kind = 'daily' OR m.kind IS NULL)
-              AND m.place IS NOT NULL AND m.place <= 3
-            GROUP BY u.id
-            HAVING COUNT(m.id) >= $1
-            ORDER BY wins DESC, u.id DESC
-            LIMIT $2
-            """,
-            int(min_wins),
-            int(limit),
-        )
-    return [dict(r) for r in rows]
-
-
-async def get_total_activity_events() -> int:
-    """Total number of activity events (admin stats)."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM activity_events")
-    return int(v or 0)
-
-
-async def get_next_photo_for_self_moderation(user_id: int | None = None) -> dict | None:
-    """Return next random active photo for self-check moderation."""
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT * FROM photos
-            WHERE is_deleted=0 AND moderation_status='active'
-            ORDER BY random()
-            LIMIT 1
-            """
-        )
-    return dict(row) if row else None
-
-
-async def get_user_admin_stats(user_id: int) -> dict:
-    """
-    Возвращает агрегированную статистику активности пользователя для админ-панели.
-    Всегда отдает полный набор ключей, даже если где-то нет данных.
-
-    Ключи:
-      - messages_total
-      - ratings_given
-      - comments_given
-      - reports_created
-      - active_photos
-      - total_photos
-      - upload_bans_count
-    """
-    p = _assert_pool()
-    uid = int(user_id)
-
-    async with p.acquire() as conn:
-        # Сколько оценок пользователь поставил другим
-        ratings_given = await conn.fetchval(
-            "SELECT COUNT(*) FROM ratings WHERE user_id=$1",
-            uid,
-        ) or 0
-
-        # Сколько комментариев оставил
-        comments_given = await conn.fetchval(
-            "SELECT COUNT(*) FROM comments WHERE user_id=$1",
-            uid,
-        ) or 0
-
-        # Сколько жалоб отправил
-        reports_created = await conn.fetchval(
-            "SELECT COUNT(*) FROM photo_reports WHERE user_id=$1",
-            uid,
-        ) or 0
-
-        # Сколько фото сейчас активно (не удалены и в статусе active)
-        active_photos = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM photos
-            WHERE user_id=$1
-              AND is_deleted=0
-              AND (moderation_status IS NULL OR moderation_status='active')
-            """,
-            uid,
-        ) or 0
-
-        # Сколько фото всего когда-либо загружал
-        total_photos = await conn.fetchval(
-            "SELECT COUNT(*) FROM photos WHERE user_id=$1",
-            uid,
-        ) or 0
-
-    messages_total = int(ratings_given) + int(comments_given) + int(reports_created)
-
-    # Сейчас отдельной таблицы для подсчёта количества блокировок нет –
-    # ставим 0, чтобы не падало.
-    upload_bans_count = 0
-
-    return {
-        "messages_total": int(messages_total),
-        "ratings_given": int(ratings_given),
-        "comments_given": int(comments_given),
-        "reports_created": int(reports_created),
-        "active_photos": int(active_photos),
-        "total_photos": int(total_photos),
-        "upload_bans_count": int(upload_bans_count),
-    }
-async def log_bot_error(
-    *,
-    chat_id: int | None,
-    tg_user_id: int | None,
-    handler: str | None,
-    update_type: str | None,
-    error_type: str | None,
-    error_text: str | None,
-    traceback_text: str | None,
-) -> None:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO bot_error_logs
-              (chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback_text)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
-            """,
-            chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback_text
-        )
-
-
-async def get_bot_error_logs_page(*, limit: int = 30, offset: int = 0) -> tuple[int, list[dict]]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM bot_error_logs")
-        rows = await conn.fetch(
-            """
-            SELECT * FROM bot_error_logs
-            ORDER BY id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset),
-            int(limit),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def clear_bot_error_logs() -> None:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        await conn.execute("TRUNCATE bot_error_logs")
-
-
-async def get_bot_error_logs_page(*, limit: int = 30, offset: int = 0) -> tuple[int, list[dict]]:
-    """
-    Возвращает (total, rows).
-    rows — список dict, сортировка: новые сверху.
-    """
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM bot_error_logs")
-        rows = await conn.fetch(
-            """
-            SELECT id, chat_id, tg_user_id, handler, update_type, error_type, error_text, traceback_text, created_at
-            FROM bot_error_logs
-            ORDER BY created_at DESC, id DESC
-            LIMIT $1 OFFSET $2
-            """,
-            int(limit),
-            int(offset),
-        )
-    return int(total or 0), [dict(r) for r in rows]
-
-
-async def clear_bot_error_logs() -> None:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        await conn.execute("TRUNCATE bot_error_logs RESTART IDENTITY")

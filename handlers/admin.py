@@ -747,6 +747,8 @@ async def admin_users_awards(callback: CallbackQuery, state: FSMContext):
         f"ID в базе: <code>{internal_id}</code>",
     ]
 
+    kb = InlineKeyboardBuilder()
+
     if not awards:
         lines.append("")
         lines.append("Пока нет ни одной награды. Можно выдать первую ачивку ниже ✨")
@@ -756,19 +758,110 @@ async def admin_users_awards(callback: CallbackQuery, state: FSMContext):
             icon = a.get("icon") or "🏅"
             title = a.get("title") or "Без названия"
             desc = (a.get("description") or "").strip()
+            award_id = a.get("id")
+
             line = f"{icon} <b>{title}</b>"
             if desc:
                 line += f"\n   {desc}"
             lines.append(line)
 
+            # Кнопка удаления конкретной награды
+            if award_id is not None:
+                safe_title = title[:20]
+                kb.button(
+                    text=f"🗑 Удалить: {safe_title}",
+                    callback_data=f"admin:users:award:del:{award_id}",
+                )
+
     text = "\n".join(lines)
 
-    kb = InlineKeyboardBuilder()
+    # Общие кнопки управления наградами
     kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
     kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
     kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1, 1, 2)
+    kb.adjust(1)
+@router.callback_query(F.data.startswith("admin:users:award:del:"))
+async def admin_users_award_delete(callback: CallbackQuery, state: FSMContext):
+    """Удаление конкретной награды пользователя из админ-раздела."""
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    internal_id = data.get("selected_user_id")
+
+    if not internal_id:
+        await callback.answer("Сначала найди пользователя через раздел «Пользователи».", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer("Не удалось определить награду.", show_alert=True)
+        return
+
+    try:
+        award_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный идентификатор награды.", show_alert=True)
+        return
+
+    award = await get_award_by_id(award_id)
+    if not award or int(award.get("user_id", 0)) != int(internal_id):
+        await callback.answer("Эта награда не найдена или принадлежит другому пользователю.", show_alert=True)
+        return
+
+    await delete_award_by_id(award_id)
+
+    # Перерисовываем список наград
+    awards = await get_awards_for_user(internal_id)
+
+    lines: list[str] = [
+        "✅ Награда удалена.",
+        "",
+        "🏆 <b>Награды пользователя</b>",
+        "",
+        f"ID в базе: <code>{internal_id}</code>",
+    ]
+
+    kb = InlineKeyboardBuilder()
+
+    if not awards:
+        lines.append("")
+        lines.append("Пока нет ни одной награды. Можно выдать первую ачивку ниже ✨")
+    else:
+        lines.append("")
+        for a in awards:
+            icon = a.get("icon") or "🏅"
+            title = a.get("title") or "Без названия"
+            desc = (a.get("description") or "").strip()
+            aid = a.get("id")
+
+            line = f"{icon} <b>{title}</b>"
+            if desc:
+                line += f"\n   {desc}"
+            lines.append(line)
+
+            if aid is not None:
+                safe_title = title[:20]
+                kb.button(
+                    text=f"🗑 Удалить: {safe_title}",
+                    callback_data=f"admin:users:award:del:{aid}",
+                )
+
+    text = "\n".join(lines)
+
+    kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
+    kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
 
     try:
         await callback.message.edit_text(text, reply_markup=kb.as_markup())
@@ -806,6 +899,26 @@ async def admin_users_award_beta(callback: CallbackQuery, state: FSMContext):
         prefix = "Ачивка «Бета‑тестер бота» выдана.\n\n"
     else:
         prefix = "У пользователя уже есть ачивка «Бета‑тестер бота».\n\n"
+
+    # Если ачивка реально выдана впервые — отправляем пользователю пуш
+    if created and target_tg_id:
+        notify_text = (
+            "🏆 <b>Новая награда!</b>\n\n"
+            "Тебе выдана ачивка: <b>Бета‑тестер бота</b>.\n"
+            "Ты помог(ла) тестировать GlowShot на ранних стадиях до релиза 💚"
+        )
+        kb_notify = InlineKeyboardBuilder()
+        kb_notify.button(text="✅ Просмотрено", callback_data="award:seen")
+        kb_notify.adjust(1)
+        try:
+            await callback.message.bot.send_message(
+                chat_id=target_tg_id,
+                text=notify_text,
+                reply_markup=kb_notify.as_markup(),
+                disable_notification=False,
+            )
+        except Exception:
+            pass
 
     lines: list[str] = [prefix.rstrip(), "🏆 <b>Награды пользователя</b>", "", f"ID в базе: <code>{internal_id}</code>"]
 
@@ -942,6 +1055,43 @@ async def admin_users_award_create_text(message: Message, state: FSMContext):
         is_special=False,
         granted_by_user_id=granted_by_user_id,
     )
+
+    # Пытаемся найти tg_id пользователя, чтобы отправить пуш
+    target_tg_id = None
+    user = data.get("selected_user_profile")
+    if user and user.get("tg_id"):
+        target_tg_id = user["tg_id"]
+    else:
+        try:
+            db_user = await get_user_by_id(internal_id)
+            if db_user and db_user.get("tg_id"):
+                target_tg_id = db_user["tg_id"]
+        except Exception:
+            target_tg_id = None
+
+    if target_tg_id:
+        notify_lines = [
+            "🏆 <b>Новая награда!</b>",
+            "",
+            f"Тебе выдана награда: <b>{title}</b>",
+        ]
+        if description:
+            notify_lines.append("")
+            notify_lines.append(description)
+        notify_text = "\n".join(notify_lines)
+
+        kb_notify = InlineKeyboardBuilder()
+        kb_notify.button(text="✅ Просмотрено", callback_data="award:seen")
+        kb_notify.adjust(1)
+        try:
+            await message.bot.send_message(
+                chat_id=target_tg_id,
+                text=notify_text,
+                reply_markup=kb_notify.as_markup(),
+                disable_notification=False,
+            )
+        except Exception:
+            pass
 
     # После создания — возвращаемся к экрану наград и показываем обновлённый список
     awards = await get_awards_for_user(internal_id)
@@ -4636,3 +4786,15 @@ async def admin_users_award_beta(callback: CallbackQuery, state: FSMContext):
     )
 
     await callback.answer("✅ Выдано" if ok else "ℹ️ Уже было / не удалось")
+# Хендлер для кнопки "Просмотрено" — удаляет пуш-сообщение о награде
+@router.callback_query(F.data == "award:seen")
+async def award_seen(callback: CallbackQuery):
+    """Пользователь подтверждает, что увидел пуш о награде — удаляем сообщение."""
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    try:
+        await callback.answer("Спасибо! 🎉")
+    except Exception:
+        pass
