@@ -772,6 +772,61 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
         get_moscow_now_iso(),
     )
 
+# -------------------- user admin stats --------------------
+async def get_user_admin_stats(user_id: int) -> dict:
+    """Статистика пользователя для админки.
+
+    Ожидаемые ключи (см. handlers/admin.py):
+    - messages_total: суммарно действий (оценки + комментарии + жалобы)
+    - ratings_given: сколько оценок поставил
+    - comments_given: сколько комментариев оставил
+    - reports_created: сколько жалоб создал
+    - active_photos: сколько фото сейчас активно (не удалено)
+    - total_photos: сколько всего фото загружал (включая удалённые)
+    - upload_bans_count: сколько раз получал ограничения на загрузку (если нет истории — 0)
+
+    user_id здесь — внутренний users.id.
+    """
+    p = _assert_pool()
+
+    async with p.acquire() as conn:
+        ratings_given = await conn.fetchval(
+            "SELECT COUNT(*) FROM ratings WHERE user_id=$1",
+            int(user_id),
+        )
+        comments_given = await conn.fetchval(
+            "SELECT COUNT(*) FROM comments WHERE user_id=$1",
+            int(user_id),
+        )
+        reports_created = await conn.fetchval(
+            "SELECT COUNT(*) FROM photo_reports WHERE user_id=$1",
+            int(user_id),
+        )
+
+        # Фото пользователя
+        total_photos = await conn.fetchval(
+            "SELECT COUNT(*) FROM photos WHERE user_id=$1",
+            int(user_id),
+        )
+        active_photos = await conn.fetchval(
+            "SELECT COUNT(*) FROM photos WHERE user_id=$1 AND is_deleted=0",
+            int(user_id),
+        )
+
+    ratings_given_i = int(ratings_given or 0)
+    comments_given_i = int(comments_given or 0)
+    reports_created_i = int(reports_created or 0)
+
+    return {
+        "messages_total": ratings_given_i + comments_given_i + reports_created_i,
+        "ratings_given": ratings_given_i,
+        "comments_given": comments_given_i,
+        "reports_created": reports_created_i,
+        "active_photos": int(active_photos or 0),
+        "total_photos": int(total_photos or 0),
+        "upload_bans_count": 0,
+    }
+
 # -------------------- payments --------------------
 
 
