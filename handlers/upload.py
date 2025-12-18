@@ -888,7 +888,7 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     await state.update_data(
         upload_msg_id=callback.message.message_id,
         upload_chat_id=callback.message.chat.id,
-        upload_is_photo=False,
+        upload_is_photo=bool(getattr(callback.message, "photo", None)),
         upload_user_id=user_id,
         category=None,
         file_id=None,
@@ -962,16 +962,39 @@ async def myphoto_choose_category(callback: CallbackQuery, state: FSMContext):
         description=None,
     )
 
+    # Replacement block for safe edit of text/caption
     await state.set_state(MyPhotoStates.waiting_photo)
 
-    await callback.message.bot.edit_message_text(
-        chat_id=upload_chat_id,
-        message_id=upload_msg_id,
-        text=(
-            f"{draft_text}\n\n"
-            "Теперь отправь фотографию (1 шт.), которую хочешь выложить на сегодня."
-        ),
+    new_text = (
+        f"{draft_text}\n\n"
+        "Теперь отправь фотографию (1 шт.), которую хочешь выложить на сегодня."
     )
+
+    try:
+        if data.get("upload_is_photo"):
+            await callback.message.bot.edit_message_caption(
+                chat_id=upload_chat_id,
+                message_id=upload_msg_id,
+                caption=new_text,
+            )
+        else:
+            await callback.message.bot.edit_message_text(
+                chat_id=upload_chat_id,
+                message_id=upload_msg_id,
+                text=new_text,
+            )
+    except TelegramBadRequest:
+        # Фоллбек: если сообщение нельзя отредактировать — отправим новое и переедем на него
+        sent = await callback.message.bot.send_message(
+            chat_id=upload_chat_id,
+            text=new_text,
+            disable_notification=True,
+        )
+        await state.update_data(
+            upload_msg_id=sent.message_id,
+            upload_chat_id=upload_chat_id,
+            upload_is_photo=False,
+        )
     await callback.answer()
 
 

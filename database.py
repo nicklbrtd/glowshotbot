@@ -1021,11 +1021,15 @@ async def create_today_photo(
 
 
 async def get_today_photo_for_user(user_id: int) -> dict | None:
-    """Вернуть фото пользователя за текущий день (по Москве), если оно есть и не удалено."""
+    items = await get_today_photos_for_user(user_id, limit=1)
+    return items[0] if items else None
+
+
+async def get_today_photos_for_user(user_id: int, limit: int = 50) -> list[dict]:
     p = _assert_pool()
     day_key = _today_key()
     async with p.acquire() as conn:
-        row = await conn.fetchrow(
+        rows = await conn.fetch(
             """
             SELECT *
             FROM photos
@@ -1033,12 +1037,13 @@ async def get_today_photo_for_user(user_id: int) -> dict | None:
               AND day_key=$2
               AND is_deleted=0
             ORDER BY created_at DESC, id DESC
-            LIMIT 1
+            LIMIT $3
             """,
             int(user_id),
             day_key,
+            int(limit),
         )
-    return dict(row) if row else None
+    return [dict(r) for r in rows]
 
 
 async def get_active_photos_for_user(user_id: int, limit: int = 50) -> list[dict]:
