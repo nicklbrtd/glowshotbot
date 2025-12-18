@@ -31,7 +31,6 @@ from database import (
     update_daily_skip_info,
     get_awards_for_user,
     link_and_reward_referral_if_needed,
-    create_comment,
     log_bot_error,
 )
 from html import escape
@@ -651,7 +650,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
     if photo is not None:
         author_user_id = photo.get("user_id")
-        # Don't notify yourself
         if author_user_id and user_for_rate and author_user_id != user_for_rate.get("id"):
             try:
                 author = await get_user_by_id(int(author_user_id))
@@ -664,7 +662,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     await message.bot.send_message(
                         chat_id=int(author["tg_id"]),
                         text=(
-                            "🔔 <b>Новый {mode_label} комментарий к вашей фотографии</b>\n"
+                            f"🔔 <b>Новый {mode_label} комментарий к вашей фотографии</b>\n"
                             f"Текст: {text}"
                         ),
                         reply_markup=build_comment_notification_keyboard(),
@@ -673,6 +671,35 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 except Exception:
                     pass
 
+    # --- Success: return the user to the rating UI and exit the comment state ---
+    is_premium_rater = False
+    try:
+        is_premium_rater = await is_user_premium_active(int(message.from_user.id))
+    except Exception:
+        is_premium_rater = False
+
+    try:
+        photo_for_caption = photo
+        if photo_for_caption is None:
+            photo_for_caption = await get_photo_by_id(int(photo_id))
+
+        if photo_for_caption is not None:
+            base_caption = build_rate_caption(photo_for_caption)
+            success_caption = "✅ Комментарий отправлен!\n\n" + base_caption
+        else:
+            success_caption = "✅ Комментарий отправлен!\n\nМожешь поставить оценку этому кадру 👇"
+
+        await message.bot.edit_message_caption(
+            chat_id=rate_chat_id,
+            message_id=rate_msg_id,
+            caption=success_caption,
+            reply_markup=build_rate_keyboard(int(photo_id), is_premium=is_premium_rater),
+        )
+    except TelegramBadRequest:
+        pass
+
+    await state.clear()
+    return
 
 @router.message(RateStates.waiting_report_text)
 async def rate_report_text(message: Message, state: FSMContext) -> None:
