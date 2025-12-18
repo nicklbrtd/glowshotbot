@@ -1514,7 +1514,21 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         except Exception:
             page = 0
 
-    comments = await get_comments_for_photo(photo_id) or []
+    photo = await get_photo_by_id(int(photo_id))
+    if photo is None:
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    is_owner = int(user["id"]) == int(photo["user_id"])
+
+    # Try new signature (only_public). If DB helper doesn't support it yet, fall back.
+    try:
+        comments = await get_comments_for_photo(int(photo_id), only_public=not is_owner)
+    except TypeError:
+        comments = await get_comments_for_photo(int(photo_id))
+        if not is_owner:
+            comments = [c for c in comments if bool(c.get("is_public", 1))]
+
     per_page = 5
     total = len(comments)
     pages = max(1, (total + per_page - 1) // per_page)
@@ -1526,15 +1540,15 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     lines: list[str] = ["💬 <b>Комментарии</b>", ""]
 
     if total == 0:
-        lines.append("Пока нет ни одного комментария.\nБудь первым 😌")
+        lines.append("Пока нет ни одного комментария.")
     else:
         for c in chunk:
             text = (c.get("text") or "").strip()
             is_public = bool(c.get("is_public", 1))
 
             if is_public:
-                name = (c.get("user_name") or "").strip()
-                username = (c.get("user_username") or "").strip()
+                name = (c.get("user_name") or c.get("name") or "").strip()
+                username = (c.get("user_username") or c.get("username") or "").strip()
                 if username:
                     who = f"<a href=\"https://t.me/{username}\">{name or '@' + username}</a>"
                 else:

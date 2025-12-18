@@ -790,11 +790,6 @@ async def create_comment(user_id: int, photo_id: int, text: str, is_public: bool
             int(photo_id), int(user_id), str(text), 1 if is_public else 0, get_moscow_now_iso()
         )
 
-async def get_comments_for_photo(photo_id: int) -> list[dict]:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM comments WHERE photo_id=$1 ORDER BY created_at ASC", int(photo_id))
-    return [dict(r) for r in rows]
 async def get_user_admin_stats(user_id: int) -> dict:
     """Статистика пользователя для админки.
 
@@ -1134,15 +1129,17 @@ async def get_photo_stats(photo_id: int) -> dict:
     return {"ratings_count": cnt, "avg_rating": avg, "comments_count": int(comments_count or 0)}
 
 
-async def get_comments_for_photo(photo_id: int) -> list[dict]:
+async def get_comments_for_photo(photo_id: int, *, only_public: bool = False) -> list[dict]:
     p = _assert_pool()
+    where_public = "AND c.is_public=1" if only_public else ""
     async with p.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT c.*, u.username, u.name
+            f"""
+            SELECT c.id, c.photo_id, c.user_id, c.text, c.is_public, c.created_at,
+                   u.username, u.name
             FROM comments c
             LEFT JOIN users u ON u.id = c.user_id
-            WHERE c.photo_id = $1
+            WHERE c.photo_id = $1 {where_public}
             ORDER BY c.created_at ASC
             """,
             int(photo_id),
