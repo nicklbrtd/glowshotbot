@@ -26,8 +26,6 @@ from urllib.parse import urlencode
 
 router = Router(name="payments")
 
-# Базовые тарифы премиума.
-# Для каждого тарифа указываем цену и в рублях, и в Stars.
 TARIFFS = {
     "7d": {
         "days": 7,
