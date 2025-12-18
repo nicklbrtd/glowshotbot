@@ -61,7 +61,7 @@ async def profile_premium_menu(callback: CallbackQuery):
         kb.button(text="3 месяца 500 ⭐️ / 569 ₽", callback_data="premium:plan:90d")
 
     # Back button to profile (explicit callback)
-    kb.button(text="⬅️ Назад", callback_data="profile:menu")
+    kb.button(text="⬅️ Назад", callback_data="menu:profile")
     kb.adjust(1)
 
     text = f"{status_line}\n\n{PREMIUM_FEATURES_TEXT}"
