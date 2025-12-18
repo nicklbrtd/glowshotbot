@@ -9,7 +9,14 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 from keyboards.common import build_viewed_kb, build_back_kb
-from config import PAYMENT_PROVIDER_TOKEN
+from config import (
+    PAYMENT_PROVIDER_TOKEN,
+    MANUAL_RUB_ENABLED,
+    MANUAL_CARD_NUMBER,
+    MANUAL_RECIPIENT,
+    MANUAL_BANK_HINT,
+    MANUAL_CONTACT,
+)
 
 from database import (
     set_user_premium_status,
@@ -50,12 +57,6 @@ TARIFFS = {
 }
 
 
-# --- Manual RUB payments (temporary, no Robokassa) ---
-MANUAL_RUB_ENABLED = True
-MANUAL_CARD_NUMBER = "XXXX XXXX XXXX XXXX"  # TODO: укажи номер карты
-MANUAL_RECIPIENT = "ФИО получателя"        # TODO: укажи получателя
-MANUAL_BANK_HINT = "Любой банк"            # можно оставить
-MANUAL_CONTACT = "@your_username"          # TODO: твой юзернейм
 
 
 # --- Новый flow для премиум-панели и тарифов ---
@@ -150,6 +151,13 @@ async def premium_manual_rub(callback: CallbackQuery):
     tariff = TARIFFS.get(period_code)
     if not tariff:
         await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    if not MANUAL_CARD_NUMBER or not MANUAL_RECIPIENT:
+        await callback.answer(
+            "Оплата переводом временно недоступна: не настроены реквизиты.",
+            show_alert=True,
+        )
         return
 
     rub_price = tariff["price_rub"]
