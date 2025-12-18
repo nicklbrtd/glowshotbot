@@ -584,11 +584,11 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
 
     await callback.message.edit_text(
-        "📡 Отправь ссылку на свой Telegram-канал или страницу.\n\n"
+        "📡 Отправь ссылку на свой Telegram-канал или профиль.\n\n"
         "Принимаются только Telegram-ссылки:\n"
         "• <code>https://t.me/username</code>\n"
         "• <code>https://telegram.me/username</code>\n"
-        "• или просто <code>@username</code> — я сам превращу её в ссылку.\n\n"
+        "• или просто <code>@username</code>.\n\n"
         "Если хочешь убрать ссылку — отправь слово <code>удалить</code>.",
         reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
     )
@@ -606,7 +606,9 @@ async def profile_set_channel(message: Message, state: FSMContext):
 
     # Удаление ссылки
     if raw.lower() in ("удалить", "delete", "remove"):
-        await update_user_channel_link(message.from_user.id, None)
+        u = await get_user_by_tg_id(message.from_user.id)
+        if u and u.get("id"):
+            await update_user_channel_link(int(u["id"]), None)
         await state.clear()
         await message.delete()
 
@@ -680,8 +682,9 @@ async def profile_set_channel(message: Message, state: FSMContext):
                 raise
         return
 
-    # Всё ок — сохраняем
-    await update_user_channel_link(message.from_user.id, value)
+    u = await get_user_by_tg_id(message.from_user.id)
+    if u and u.get("id"):
+        await update_user_channel_link(int(u["id"]), value)
     await state.clear()
     await message.delete()
 
