@@ -781,72 +781,31 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
 
 # -------------------- comments --------------------
 
-async def create_comment(user_id: int, photo_id: int, text: str, is_public: bool = True) -> None:
-    """Create a comment.
-
-    IMPORTANT:
-    Some handlers may accidentally pass Telegram `tg_id` instead of internal `users.id`.
-    This function resolves it to the internal id to avoid silent FK failures.
-
-    Also logs any DB errors to bot_error_logs to make debugging possible.
+async def create_comment(user_id: int, photo_id: int, text: str, is_public: bool = True, **kwargs) -> None:
+    """Сохранить комментарий к фото.
+    is_public=True — публичный, False — анонимный.
+    **kwargs — чтобы любые будущие аргументы не ломали вызовы.
     """
-
     p = _assert_pool()
 
     pid = int(photo_id)
-    raw_uid = int(user_id)
+    uid = int(user_id)
     txt = (text or "").strip()
     if not txt:
         return
 
-    try:
-        async with p.acquire() as conn:
-            # Ensure photo exists
-            exists = await conn.fetchval("SELECT 1 FROM photos WHERE id=$1", pid)
-            if not exists:
-                raise ValueError(f"create_comment: photo {pid} not found")
-
-            # Resolve internal users.id
-            real_uid = await conn.fetchval("SELECT id FROM users WHERE id=$1 AND is_deleted=0", raw_uid)
-            if real_uid is None:
-                # maybe raw_uid is tg_id
-                real_uid = await conn.fetchval("SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0", raw_uid)
-
-            # If still missing and it looks like tg_id, ensure user row exists
-            if real_uid is None and raw_uid >= 10_000_000:
-                u = await _ensure_user_row(raw_uid)
-                if u is not None:
-                    real_uid = int(u["id"])
-
-            if real_uid is None:
-                raise ValueError(f"create_comment: user {raw_uid} not found")
-
-            await conn.execute(
-                """
-                INSERT INTO comments (photo_id, user_id, text, is_public, created_at)
-                VALUES ($1,$2,$3,$4,$5)
-                """,
-                pid,
-                int(real_uid),
-                txt,
-                1 if is_public else 0,
-                get_moscow_now_iso(),
-            )
-    except Exception as e:
-        # Log into bot_error_logs so you can see the exact failure reason
-        try:
-            await log_bot_error(
-                chat_id=None,
-                tg_user_id=raw_uid if raw_uid >= 10_000_000 else None,
-                handler="create_comment",
-                update_type="db",
-                error_type=type(e).__name__,
-                error_text=str(e),
-                traceback_text=traceback.format_exc(),
-            )
-        except Exception:
-            pass
-        raise
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO comments (photo_id, user_id, text, is_public, created_at)
+            VALUES ($1,$2,$3,$4,$5)
+            """,
+            pid,
+            uid,
+            txt,
+            1 if bool(is_public) else 0,
+            get_moscow_now_iso(),
+        )
 
 async def get_user_admin_stats(user_id: int) -> dict:
     """Статистика пользователя для админки.
@@ -1276,15 +1235,6 @@ async def set_super_rating(user_id: int, photo_id: int) -> bool:
         )
     return True
 
-
-async def create_comment(user_id: int, photo_id: int, text: str) -> None:
-    p = _assert_pool()
-    now = get_moscow_now_iso()
-    async with p.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO comments (photo_id, user_id, text, created_at) VALUES ($1,$2,$3,$4)",
-            int(photo_id), int(user_id), str(text), now
-        )
 
 async def get_daily_skip_info(user_id: int) -> dict:
     p = _assert_pool()
