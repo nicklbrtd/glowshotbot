@@ -26,56 +26,6 @@ def _format_premium_until(until: str | None) -> str | None:
         return until
     
 
-@router.callback_query(F.data == "premium:menu")
-async def premium_main_menu(callback: CallbackQuery):
-    """
-    Отдельная премиум-панель из главного меню.
-    Здесь собираются все премиум-функции, а экран profile:premium
-    остаётся экраном про подписку/статус.
-    """
-    tg_id = callback.from_user.id
-
-    is_active = False
-    try:
-        is_active = await is_user_premium_active(tg_id)
-    except Exception:
-        is_active = False
-
-    kb = InlineKeyboardBuilder()
-    if is_active:
-        # У пользователя уже есть премиум
-        kb.button(text="💳 Подписка", callback_data="profile:premium")
-        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
-    else:
-        # Пока нет премиума — ведём на экран подписки и даём почитать преимущества
-        kb.button(text="💳 Оформить премиум", callback_data="profile:premium")
-        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
-
-    kb.button(text="🏠 В меню", callback_data="menu:back")
-    kb.adjust(1)
-
-    if is_active:
-        text = (
-            "✨ <b>Премиум-панель GlowShot</b>\n\n"
-            "У тебя уже активен премиум-аккаунт.\n\n"
-            "Здесь будут собраны все дополнительные функции и настройки премиума: "
-            "управление подпиской, дополнительные инструменты, новые фичи.\n\n"
-            "Пока доступно управление подпиской и список преимуществ.\n"
-            "Новые возможности будут появляться постепенно 👀"
-        )
-    else:
-        text = (
-            "✨ <b>Премиум-панель GlowShot</b>\n\n"
-            "У тебя пока нет активной премиум-подписки.\n\n"
-            "Через эту панель ты сможешь управлять премиум-функциями и видеть новые фичи.\n\n"
-            "Нажми «💳 Оформить премиум», чтобы перейти к экрану подписки."
-        )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=kb.as_markup(),
-    )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "profile:premium")
@@ -84,59 +34,87 @@ async def profile_premium_menu(callback: CallbackQuery):
 
     is_active = False
     premium_until_human: str | None = None
-    raw_status: dict = {}
+    days_left: int | None = None
 
     try:
         raw_status = await get_user_premium_status(tg_id)
         is_active = await is_user_premium_active(tg_id)
-        premium_until_human = _format_premium_until(raw_status.get("premium_until"))
+        premium_until_raw = raw_status.get("premium_until")
+        premium_until_human = _format_premium_until(premium_until_raw)
+
+        if premium_until_raw:
+            try:
+                dt = datetime.fromisoformat(premium_until_raw)
+                delta_days = (dt.date() - datetime.now().date()).days
+                if delta_days >= 0:
+                    days_left = delta_days
+            except Exception:
+                days_left = None
     except Exception:
-        # В случае ошибок просто покажем базовый текст без статуса
-        pass
+        # если что-то сломалось — просто покажем базовый экран
+        is_active = False
+        premium_until_human = None
+        days_left = None
+
+    # Заготовка под список "что нового" — позже вынесем в админ-меню
+    new_features_week = [
+        "Можно это",
+        "можно это и то",
+    ]
+
+    # Заготовка под список преимуществ — ты потом дополнишь
+    premium_features = [
+        "Две активные фотографии вместо одной",
+        "Расширенная статистика по фото",
+        "Дополнительные инструменты продвижения",
+        "Приоритетная поддержка",
+        "И ещё фичи (добавишь позже)",
+    ]
 
     kb = InlineKeyboardBuilder()
 
-    # Отдельная премиум-панель, чтобы из профиля можно было зайти в общий премиум-центр
-    kb.button(text="✨ Премиум-панель", callback_data="premium:menu")
-
     if is_active:
+        # Кнопки: Продлить / Преимущества / Назад
+        kb.button(text="🔁 Продлить", callback_data="premium:plans")
         kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
-        kb.button(text="💳 Управление подпиской", callback_data="profile:premium_buy")
-    else:
-        kb.button(text="💳 Оплатить подписку", callback_data="profile:premium_buy")
-        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
+        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.adjust(1)
 
-    kb.button(text="⬅️ Назад", callback_data="menu:profile")
-    kb.adjust(1)
-
-    if is_active:
+        status_line = "Статус: <b>активен</b>"
         if premium_until_human:
-            status_line = f"Статус: <b>активен</b> до {premium_until_human}."
-        else:
-            # Бессрочный премиум
-            status_line = "Статус: <b>активен</b> (бессрочно)."
+            status_line += f" до {premium_until_human}"
+
+        if days_left is not None:
+            if days_left >= 365:
+                years = days_left // 365
+                years_text = "год" if years == 1 else ("года" if 2 <= years <= 4 else "лет")
+                status_line += f" (<b>{years} {years_text}</b>)"
+            else:
+                status_line += f" (<b>{days_left} дн.</b>)"
+
+        whats_new = "\n".join([f"{i+1}. {t}" for i, t in enumerate(new_features_week)])
 
         text = (
             "💎 <b>GlowShot Premium</b>\n\n"
-            "У тебя уже активен премиум-аккаунт.\n"
-            f"{status_line}\n\n"
-            "Ты можешь продлить подписку или изменить тариф через кнопку "
-            "<b>«Управление подпиской»</b> ниже.\n\n"
-            "Оплата премиума происходит через <b>Telegram Stars</b> (⭐)."
+            f"{status_line}\n"
+            "Ты можешь продлить подписку, нажав на кнопку <b>«Продлить»</b>.\n\n"
+            "<b>Новые функции за последнюю неделю:</b>\n"
+            f"{whats_new}"
         )
     else:
-        # Если флаг is_premium стоит, но срок истёк — покажем понятный статус
-        if raw_status.get("is_premium") and raw_status.get("premium_until"):
-            expired_line = "Статус: <b>срок действия истёк</b>.\n\n"
-        else:
-            expired_line = ""
+        # Кнопки тарифов + Назад
+        kb.button(text="Неделя 70 ⭐️ / 79 ₽", callback_data="premium:plan:7d")
+        kb.button(text="Месяц 230 ⭐️ / 239 ₽", callback_data="premium:plan:30d")
+        kb.button(text="3 месяца 500 ⭐️ / 569 ₽", callback_data="premium:plan:90d")
+        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.adjust(1)
 
+        feats = "\n".join([f"• {x}" for x in premium_features])
         text = (
-            "💎 <b>GlowShot Premium</b>\n\n"
-            f"{expired_line}"
-            "GlowShot Premium — это расширенные возможности для тех, кто серьёзно относится к своим кадрам.\n\n"
-            "Оформить подписку можно прямо в боте через <b>Telegram Stars</b> (⭐).\n"
-            "Нажми кнопку <b>«Оплатить подписку»</b> ниже, чтобы выбрать тариф."
+            "💳 <b>GlowShot Premium</b>\n\n"
+            "Вот что даёт премиум (список ты дополнишь позже):\n\n"
+            f"{feats}\n\n"
+            "Выбери тариф ниже 👇"
         )
 
     await callback.message.edit_text(
@@ -148,23 +126,18 @@ async def profile_premium_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:premium_benefits")
 async def profile_premium_benefits(callback: CallbackQuery):
-    """
-    Экран с преимуществами премиума (пока статичный текст-заглушка).
-    """
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="profile:premium")
     kb.adjust(1)
 
     text = (
         "✨ <b>Преимущества GlowShot Premium</b>\n\n"
-        "Планируемые возможности для премиум-пользователей:\n\n"
+        "• Две активные фотографии вместо одной\n"
         "• Расширенная статистика по фотографиям\n"
         "• Дополнительные инструменты продвижения\n"
-        "• Повтор участия в итогах для понравившихся работ\n"
-        "• Возможность указать свой телеграм-канал в профиле\n"
-        "• Приоритетная поддержка\n\n"
-        "Список возможностей будет пополняться. "
-        "Следи за обновлениями в боте 👀"
+        "• Приоритетная поддержка\n"
+        "• И другие фичи (ты добавишь позже)\n\n"
+        "Хочешь оформить/продлить — вернись назад и выбери тариф."
     )
 
     await callback.message.edit_text(

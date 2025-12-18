@@ -12,9 +12,6 @@ def build_main_menu(
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
-    # Если у пользователя есть премиум — выделяем отдельной строкой сверху
-    if is_premium:
-        kb.button(text="✨ Премиум-панель", callback_data="premium:menu")
 
     # Базовые пользовательские кнопки
     kb.button(text="📸 Моя фотография", callback_data="myphoto:open")
@@ -33,12 +30,7 @@ def build_main_menu(
     if is_admin:
         kb.button(text="⚙️ Админ-панель", callback_data="admin:menu")
 
-    # Если премиум есть — первая строка отдельная (1 кнопка), дальше по 2 в ряд.
-    # Если премиума нет — просто по 2 в ряд.
-    if is_premium:
-        kb.adjust(1, 2, 2, 2)
-    else:
-        kb.adjust(2, 2, 2)
+    kb.adjust(2, 2, 2)
 
     return kb.as_markup()
 
