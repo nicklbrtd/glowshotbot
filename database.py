@@ -313,7 +313,18 @@ async def ensure_schema() -> None:
             """
         )
 
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS premium_news (
+              id BIGSERIAL PRIMARY KEY,
+              text TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            """
+        )
+
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at ON bot_error_logs(created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_news_created_at ON premium_news(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_tg_user_id ON bot_error_logs(tg_user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_user_id ON photos(user_id);")
@@ -860,6 +871,48 @@ async def get_user_admin_stats(user_id: int) -> dict:
         "total_photos": int(total_photos or 0),
         "upload_bans_count": 0,
     }
+
+# -------------------- premium news --------------------
+
+async def add_premium_news(text: str) -> int:
+    """Add a premium news item (for admin tooling).
+
+    Returns inserted id.
+    """
+    p = _assert_pool()
+    t = (text or "").strip()
+    if not t:
+        return 0
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO premium_news (text, created_at)
+            VALUES ($1,$2)
+            RETURNING id
+            """,
+            t,
+            now,
+        )
+    return int(row["id"]) if row else 0
+
+
+async def get_premium_news_since(since_iso: str, limit: int = 10) -> list[str]:
+    """Get news items created since `since_iso` (ISO string), newest-first."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT text
+            FROM premium_news
+            WHERE created_at >= $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            """,
+            str(since_iso),
+            int(limit),
+        )
+    return [str(r["text"]) for r in rows]
 
 # -------------------- payments --------------------
 
