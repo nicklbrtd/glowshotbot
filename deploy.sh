@@ -20,8 +20,4 @@ echo "💬 Перезапуск бота поддержки (tmux: glowshot_supp
 tmux kill-session -t glowshot_support 2>/dev/null || true
 tmux new-session -d -s glowshot_support "cd ~/glowshotbot && source venv/bin/activate && python support_bot.py"
 
-echo "💸 Перезапуск Robokassa webhook (tmux: glowshot_pay)..."
-tmux kill-session -t glowshot_pay 2>/dev/null || true
-tmux new-session -d -s glowshot_pay "cd ~/glowshotbot && source venv/bin/activate && uvicorn robokassa_webhook:app --host 127.0.0.1 --port 8000"
-
 echo "✅ Deploy завершён."

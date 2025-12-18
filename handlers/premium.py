@@ -1,143 +1,240 @@
-from datetime import datetime
-from utils.time import get_moscow_now
-
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, LabeledPrice
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from config import PAYMENT_PROVIDER_TOKEN
 
-from database import get_user_premium_status, is_user_premium_active
+import time
+
+from database import (
+    create_invoice,
+    get_invoice,
+    get_user_premium_status,
+    is_user_premium_active,
+    mark_invoice_as_paid,
+    mark_premium_as_paid,
+)
 from keyboards.common import build_back_kb
 
-router = Router(name="premium")
+router = Router(name="payments")
+
+TARIFFS = {
+    "7d": {
+        "title": "Премиум на неделю",
+        "price_stars": 70,
+        "price_rub": 79,
+        "label": "premium_7d",
+    },
+    "30d": {
+        "title": "Премиум на месяц",
+        "price_stars": 230,
+        "price_rub": 239,
+        "label": "premium_30d",
+    },
+    "90d": {
+        "title": "Премиум на 3 месяца",
+        "price_stars": 500,
+        "price_rub": 569,
+        "label": "premium_90d",
+    },
+}
+
+# --- Manual RUB payments (temporary, no Robokassa) ---
+MANUAL_RUB_ENABLED = True
+MANUAL_CARD_NUMBER = "XXXX XXXX XXXX XXXX"  # TODO: укажи номер карты
+MANUAL_RECIPIENT = "ФИО получателя"        # TODO: укажи получателя
+MANUAL_BANK_HINT = "Любой банк"            # можно оставить
+MANUAL_CONTACT = "@your_username"          # TODO: твой юзернейм
 
 
-def _format_premium_until(until: str | None) -> str | None:
-    if not until:
-        return None
+@router.callback_query(F.data.startswith("premium:plan:"))
+async def premium_choose_method(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректный тариф.", show_alert=True)
+        return
 
-    try:
-        dt = datetime.fromisoformat(until)
-        return dt.strftime("%d.%m.%Y")
-    except Exception:
-        return until
+    period_code = parts[2]
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
 
-
-@router.callback_query(F.data == "profile:premium")
-async def profile_premium_menu(callback: CallbackQuery):
-    tg_id = callback.from_user.id
-
-    is_active = False
-    premium_until_human: str | None = None
-    days_left: int | None = None
-
-    try:
-        raw_status = await get_user_premium_status(tg_id)
-        is_active = await is_user_premium_active(tg_id)
-        premium_until_raw = raw_status.get("premium_until")
-        premium_until_human = _format_premium_until(premium_until_raw)
-
-        if premium_until_raw:
-            try:
-                dt = datetime.fromisoformat(premium_until_raw)
-                delta_days = (dt.date() - get_moscow_now().date()).days
-                if delta_days >= 0:
-                    days_left = delta_days
-            except Exception:
-                days_left = None
-    except Exception:
-        is_active = False
-        premium_until_human = None
-        days_left = None
-
-    new_features_week = [
-        "Можно это",
-        "можно это и то",
-    ]
-
-    premium_features = [
-        "➕ 2 > 1\n",
-        "Две активные фотографии вместо одной. Больше оценок - больше шансов победить в итогах.\n\n"
-        "🔗 Ссылка в профиле\n",
-        "Можно добавить ссылку на свой аккаунт или Telegram канал в профиль. Ссылку будут видеть другие люди при оценивании.\n\n"
-        "💎 Ты на виду!\n",
-        "При оценке твоих фото, другие пользователи будут видеть 💎 возле твоего имени.\n\n"
-        "👨‍💻 Приоритетная поддержка\n",
-        "В поддержке тебя замечают быстрее.\n\n"
-        "Список будет дополняться!\n",
-    ]
+    stars_price = tariff["price_stars"]
+    rub_price = tariff["price_rub"]
 
     kb = InlineKeyboardBuilder()
+    kb.button(
+        text=f"{stars_price} ⭐️ — Telegram Stars",
+        callback_data=f"premium:order:stars:{period_code}",
+    )
 
-    if is_active:
-        kb.button(text="🔁 Продлить", callback_data="premium:plans")
-        kb.button(text="✨ Преимущества", callback_data="profile:premium_benefits")
-        kb.button(text="⬅️ Назад", callback_data="menu:profile")
-        kb.adjust(1)
-
-        status_line = "Статус: <b>активен</b>"
-        if premium_until_human:
-            status_line += f" до {premium_until_human}"
-
-        if days_left is not None:
-            if days_left >= 365:
-                years = days_left // 365
-                years_text = "год" if years == 1 else ("года" if 2 <= years <= 4 else "лет")
-                status_line += f" (<b>{years} {years_text}</b>)"
-            else:
-                status_line += f" (<b>{days_left} дн.</b>)"
-
-        whats_new = "\n".join([f"{i+1}. {t}" for i, t in enumerate(new_features_week)])
-
-        text = (
-            "💎 <b>GlowShot Premium</b>\n\n"
-            f"{status_line}\n"
-            "Ты можешь продлить подписку, нажав на кнопку <b>«Продлить»</b>.\n\n"
-            "<b>Новые функции за последнюю неделю:</b>\n"
-            f"{whats_new}"
+    if MANUAL_RUB_ENABLED:
+        kb.button(
+            text=f"{rub_price} ₽ — Перевод на карту",
+            callback_data=f"premium:manual_rub:{period_code}",
         )
     else:
-        kb.button(text="Неделя 70 ⭐️ / 79 ₽", callback_data="premium:plan:7d")
-        kb.button(text="Месяц 230 ⭐️ / 239 ₽", callback_data="premium:plan:30d")
-        kb.button(text="3 месяца 500 ⭐️ / 569 ₽", callback_data="premium:plan:90d")
-        kb.button(text="⬅️ Назад", callback_data="menu:profile")
-        kb.adjust(1)
-
-        feats = "\n".join([f"• {x}" for x in premium_features])
-        text = (
-            "💳 <b>GlowShot Premium</b>\n\n"
-            "Вот что даёт премиум:\n\n"
-            f"{feats}\n\n"
-            "Выбери тариф ниже 👇"
+        kb.button(
+            text=f"{rub_price} ₽ — Перевод на карту (скоро)",
+            callback_data="premium:rub:disabled",
         )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=kb.as_markup(),
+    kb.button(text="❌ Отмена", callback_data="profile:premium")
+    kb.adjust(1)
+
+    text = (
+        f"Выбери способ оплаты для тарифа:\n<b>{tariff['title']}</b>\n\n"
+        f"{stars_price} ⭐️ — оплата через Telegram Stars\n"
+        f"{rub_price} ₽ — оплата переводом на карту\n"
     )
+
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()
 
 
-@router.callback_query(F.data == "profile:premium_benefits")
-async def profile_premium_benefits(callback: CallbackQuery):
+@router.callback_query(F.data == "premium:rub:disabled")
+async def premium_rub_disabled(callback: CallbackQuery):
+    await callback.answer(
+        "Оплата рублями сейчас отключена. Пока доступна оплата Telegram Stars ⭐️",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("premium:manual_rub:"))
+async def premium_manual_rub(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректный тариф.", show_alert=True)
+        return
+
+    _, _, period_code = parts
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    rub_price = tariff["price_rub"]
+    comment = f"GS-{callback.from_user.id}-{period_code}-{int(time.time())}"
+
+    text = (
+        "💳 <b>Оплата переводом на карту</b>\n\n"
+        f"Тариф: <b>{tariff['title']}</b>\n"
+        f"Сумма: <b>{rub_price} ₽</b>\n\n"
+        f"<b>Куда перевести:</b>\n"
+        f"Карта: <code>{MANUAL_CARD_NUMBER}</code>\n"
+        f"Получатель: <b>{MANUAL_RECIPIENT}</b>\n"
+        f"Банк: {MANUAL_BANK_HINT}\n\n"
+        "<b>Важно:</b> в комментарии к переводу (или в сообщении после оплаты) укажи код:\n"
+        f"<code>{comment}</code>\n\n"
+        "После перевода нажми кнопку «Я оплатил». Мы попросим прислать чек/скрин."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Я оплатил", callback_data=f"premium:manual_rub:paid:{period_code}:{comment}")
+    kb.button(text="⬅️ Назад", callback_data=f"premium:plan:{period_code}")
+    kb.adjust(1)
+
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("premium:manual_rub:paid:"))
+async def premium_manual_rub_paid(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) < 5:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    period_code = parts[3]
+    comment = ":".join(parts[4:])
+
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    text = (
+        "✅ <b>Окей!</b>\n\n"
+        "Пришли, пожалуйста, <b>скрин/чек</b> перевода одним сообщением в этот чат.\n\n"
+        f"Код: <code>{comment}</code>\n"
+        f"Тариф: <b>{tariff['title']}</b>\n\n"
+        f"Если нужно быстрее — напиши: {MANUAL_CONTACT}"
+    )
+
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="profile:premium")
     kb.adjust(1)
 
-    text = (
-        "✨ <b>Преимущества GlowShot Premium</b>\n\n"
-        "➕ 2 > 1\n",
-        "Две активные фотографии вместо одной. Больше оценок - больше шансов победить в итогах.\n\n"
-        "🔗 Ссылка в профиле\n",
-        "Можно добавить ссылку на свой аккаунт или Telegram канал в профиль. Ссылку будут видеть другие люди при оценивании.\n\n"
-        "💎 Ты на виду!\n",
-        "При оценке твоих фото, другие пользователи будут видеть '💎' возле твоего имени.\n\n"
-        "👨‍💻 Приоритетная поддержка\n",
-        "В поддержке тебя замечают быстрее.\n\n"
-        "Список будет дополняться!",
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("premium:order:"))
+async def premium_create_invoice(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректный запрос.", show_alert=True)
+        return
+
+    _, _, method, period_code = parts
+    if method not in ("stars",):
+        await callback.answer("Неверный метод оплаты.", show_alert=True)
+        return
+
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    amount = int(tariff["price_stars"])  # количество звёзд
+    currency = "XTR"
+    provider_token = ""  # Для Stars внешний провайдер не нужен
+    label = tariff["label"]
+
+    user_id = callback.from_user.id
+
+    invoice = await create_invoice(
+        user_id=user_id,
+        label=label,
+        amount=amount,
+        currency=currency,
+        pay_method=method,
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=kb.as_markup(),
+    prices = [LabeledPrice(label=tariff["title"], amount=amount * 100)]
+
+    await callback.message.answer_invoice(
+        title=tariff["title"],
+        description=f"Оплата {tariff['title']} через Telegram Stars",
+        payload=invoice.invoice_id,
+        provider_token=PAYMENT_PROVIDER_TOKEN,
+        currency=currency,
+        prices=prices,
+        start_parameter="premium",
+        need_name=True,
+        need_phone_number=False,
+        need_email=False,
+        need_shipping_address=False,
+        is_flexible=False,
     )
     await callback.answer()
+
+
+async def process_successful_payment(user_id: int, invoice_id: str):
+    invoice = await get_invoice(invoice_id)
+    if not invoice:
+        return
+
+    if invoice.is_paid:
+        return
+
+    await mark_invoice_as_paid(invoice_id)
+    await mark_premium_as_paid(user_id, invoice.label)
+
+    method = invoice.pay_method
+    pay_method_line = "Способ оплаты: ⭐ Telegram Stars."
+
+    # Here you can send a confirmation message or update user status
+
+
+# Note: Removed Robokassa-related handlers and code as per instructions.
