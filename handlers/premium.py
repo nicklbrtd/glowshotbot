@@ -6,7 +6,6 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database import get_user_premium_status, is_user_premium_active
-from keyboards.common import build_back_kb
 
 # Import shared tariffs from the single source of truth
 from handlers.payments import TARIFFS
@@ -61,8 +60,8 @@ async def profile_premium_menu(callback: CallbackQuery):
         kb.button(text="Месяц 230 ⭐️ / 239 ₽", callback_data="premium:plan:30d")
         kb.button(text="3 месяца 500 ⭐️ / 569 ₽", callback_data="premium:plan:90d")
 
-    # Back button to profile
-    kb.row(*build_back_kb("profile:menu").inline_keyboard[0])
+    # Back button to profile (explicit callback)
+    kb.button(text="⬅️ Назад", callback_data="profile:menu")
     kb.adjust(1)
 
     text = f"{status_line}\n\n{PREMIUM_FEATURES_TEXT}"
@@ -84,7 +83,7 @@ async def premium_plans_shortcut(callback: CallbackQuery):
     kb.button(text="Неделя 70 ⭐️ / 79 ₽", callback_data="premium:plan:7d")
     kb.button(text="Месяц 230 ⭐️ / 239 ₽", callback_data="premium:plan:30d")
     kb.button(text="3 месяца 500 ⭐️ / 569 ₽", callback_data="premium:plan:90d")
-    kb.row(*build_back_kb("profile:premium").inline_keyboard[0])
+    kb.button(text="⬅️ Назад", callback_data="profile:premium")
     kb.adjust(1)
 
     await callback.message.edit_text(

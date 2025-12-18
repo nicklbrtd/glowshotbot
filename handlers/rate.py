@@ -69,8 +69,6 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False) -> InlineKeyboa
     rows = [row1, row2, row3]
 
     if is_premium:
-        # Для премиум-пользователя добавляем строку:
-        # «Супер-оценка / Ачивка»
         rows.append(
             [
                 InlineKeyboardButton(
@@ -527,6 +525,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
     photo_id = data.get("photo_id")
     rate_msg_id = data.get("rate_msg_id")
     rate_chat_id = data.get("rate_chat_id")
+    is_public = bool(data.get("is_public", True))
 
     if photo_id is None or rate_msg_id is None or rate_chat_id is None:
         await state.clear()
@@ -569,12 +568,57 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 raise
         return
 
-    await state.update_data(comment_text=text)
+    # await state.update_data(comment_text=text)  # removed per instructions
     await message.delete()
+
+    # --- Save comment immediately (so it is visible in upload/my photo) ---
+    user_for_rate = await get_user_by_tg_id(message.from_user.id)
+    if user_for_rate and user_for_rate.get("id"):
+        try:
+            await create_comment(
+                user_id=int(user_for_rate["id"]),
+                photo_id=int(photo_id),
+                text=text,
+                is_public=bool(is_public),
+            )
+            # Mark saved so we don't duplicate-save on score click
+            await state.update_data(comment_saved=True)
+        except Exception:
+            pass
+
+    # Notify photo author about the new comment
+    try:
+        photo = await get_photo_by_id(int(photo_id))
+    except Exception:
+        photo = None
+
+    if photo is not None:
+        author_user_id = photo.get("user_id")
+        # Don't notify yourself
+        if author_user_id and user_for_rate and author_user_id != user_for_rate.get("id"):
+            try:
+                author = await get_user_by_id(int(author_user_id))
+            except Exception:
+                author = None
+
+            if author is not None and author.get("tg_id"):
+                mode_label = "публичный" if is_public else "анонимный"
+                try:
+                    await message.bot.send_message(
+                        chat_id=int(author["tg_id"]),
+                        text=(
+                            "🔔 <b>Новый комментарий к вашей фотографии</b>\n"
+                            f"Режим: {mode_label}\n\n"
+                            f"Текст: {text}"
+                        ),
+                        reply_markup=build_comment_notification_keyboard(),
+                        disable_notification=True,
+                    )
+                except Exception:
+                    pass
 
     is_premium = False
     try:
-        user_for_rate = await get_user_by_tg_id(message.from_user.id)
         if user_for_rate and user_for_rate.get("tg_id"):
             is_premium = await is_user_premium_active(user_for_rate["tg_id"])
     except Exception:
@@ -846,7 +890,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     comment_text = data.get("comment_text")
     is_public = data.get("is_public", True)
 
-    if comment_photo_id == photo_id and comment_text:
+    if comment_photo_id == photo_id and comment_text and not data.get("comment_saved"):
         # 1) Сохраняем комментарий
         await create_comment(
             user_id=user["id"],
@@ -984,7 +1028,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     is_public = data.get("is_public", True)
 
     # Если к этой же фотке только что писали комментарий — сохраняем его и шлём уведомление автору
-    if comment_photo_id == photo_id and comment_text:
+    if comment_photo_id == photo_id and comment_text and not data.get("comment_saved"):
         await create_comment(
             user_id=user["id"],
             photo_id=photo_id,

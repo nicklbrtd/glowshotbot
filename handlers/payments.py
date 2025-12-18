@@ -200,10 +200,10 @@ async def premium_manual_rub_paid(callback: CallbackQuery):
 
     text = (
         "✅ <b>Окей!</b>\n\n"
-        "Пришли, пожалуйста, <b>скрин/чек</b> перевода одним сообщением в этот чат.\n\n"
+        "Пришли, пожалуйста, <b>скрин/чек</b>.\n\n"
         f"Код: <code>{comment}</code>\n"
         f"Тариф: <b>{tariff['title']}</b>\n\n"
-        f"Если нужно быстрее — напиши: {MANUAL_CONTACT}"
+        f"НАПИСАТЬ: {MANUAL_CONTACT}"
     )
 
     kb = InlineKeyboardBuilder()

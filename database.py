@@ -1112,22 +1112,35 @@ async def get_photo_stats(photo_id: int) -> dict:
     return {"ratings_count": cnt, "avg_rating": avg, "comments_count": int(comments_count or 0)}
 
 
-async def get_comments_for_photo(photo_id: int, limit: int = 5, offset: int = 0) -> list[dict]:
+async def get_comments_for_photo(photo_id: int) -> list[dict]:
     p = _assert_pool()
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT c.*, u.username, u.name
             FROM comments c
-            JOIN users u ON u.id=c.user_id
-            WHERE c.photo_id=$1
-            ORDER BY c.created_at DESC, c.id DESC
-            OFFSET $2 LIMIT $3
+            LEFT JOIN users u ON u.id = c.user_id
+            WHERE c.photo_id = $1
+            ORDER BY c.created_at ASC
             """,
-            int(photo_id), int(offset), int(limit)
+            int(photo_id),
         )
     return [dict(r) for r in rows]
 
+
+async def get_photo_author_tg_id(photo_id: int) -> int | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT u.tg_id
+            FROM photos p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.id = $1
+            """,
+            int(photo_id),
+        )
+    return int(v) if v is not None else None
 
 # -------------------- rating flow --------------------
 
