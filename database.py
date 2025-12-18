@@ -146,10 +146,13 @@ async def ensure_schema() -> None:
               photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
               user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               text TEXT NOT NULL,
+              is_public INTEGER NOT NULL DEFAULT 1,
               created_at TEXT NOT NULL
             );
             """
         )
+        # migration: comments.is_public (needed for anonymous/public comments)
+        await conn.execute("ALTER TABLE comments ADD COLUMN IF NOT EXISTS is_public INTEGER NOT NULL DEFAULT 1;")
 
         await conn.execute(
             """
@@ -773,6 +776,25 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
     )
 
 # -------------------- user admin stats --------------------
+
+# -------------------- comments --------------------
+
+async def create_comment(user_id: int, photo_id: int, text: str, is_public: bool = True) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO comments (photo_id, user_id, text, is_public, created_at)
+            VALUES ($1,$2,$3,$4,$5)
+            """,
+            int(photo_id), int(user_id), str(text), 1 if is_public else 0, get_moscow_now_iso()
+        )
+
+async def get_comments_for_photo(photo_id: int) -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM comments WHERE photo_id=$1 ORDER BY created_at ASC", int(photo_id))
+    return [dict(r) for r in rows]
 async def get_user_admin_stats(user_id: int) -> dict:
     """Статистика пользователя для админки.
 
