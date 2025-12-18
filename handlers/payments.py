@@ -6,11 +6,9 @@ from aiogram.types import (
     LabeledPrice,
     PreCheckoutQuery,
     Message,
-    InlineKeyboardMarkup,
 )
 from keyboards.common import build_viewed_kb, build_back_kb
 from config import (
-    PAYMENT_PROVIDER_TOKEN,
     MANUAL_RUB_ENABLED,
     MANUAL_CARD_NUMBER,
     MANUAL_RECIPIENT,
