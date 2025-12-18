@@ -269,15 +269,23 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
         # Если что-то пошло не так при загрузке наград — просто не показываем ачивку
         photo["has_beta_award"] = False
 
-    # --- подтягиваем ссылку автора для оценивания (если её нет в photo) ---
+        # --- подтягиваем данные автора для оценивания (ссылка + активный премиум) ---
     try:
-        if not photo.get("user_tg_channel_link"):
-            author_user = await get_user_by_id(int(photo["user_id"]))
-            if author_user:
+        author_user = await get_user_by_id(int(photo["user_id"]))
+        if author_user:
+            # Link for caption
+            if not photo.get("user_tg_channel_link"):
                 photo["user_tg_channel_link"] = author_user.get("tg_channel_link")
-                # на всякий — чтобы премиум-флаг тоже был корректный
-                if photo.get("user_is_premium") is None:
-                    photo["user_is_premium"] = author_user.get("is_premium")
+
+            # IMPORTANT: caption shows link only if author has ACTIVE premium
+            try:
+                tg_id = author_user.get("tg_id")
+                if tg_id:
+                    photo["user_is_premium"] = await is_user_premium_active(int(tg_id))
+                else:
+                    photo["user_is_premium"] = bool(author_user.get("is_premium"))
+            except Exception:
+                photo["user_is_premium"] = bool(author_user.get("is_premium"))
     except Exception:
         pass
 
