@@ -1,4 +1,5 @@
 from datetime import datetime
+from utils.time import get_moscow_now
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
@@ -45,7 +46,7 @@ async def profile_premium_menu(callback: CallbackQuery):
         if premium_until_raw:
             try:
                 dt = datetime.fromisoformat(premium_until_raw)
-                delta_days = (dt.date() - datetime.now().date()).days
+                delta_days = (dt.date() - get_moscow_now().date()).days
                 if delta_days >= 0:
                     days_left = delta_days
             except Exception:
@@ -112,7 +113,7 @@ async def profile_premium_menu(callback: CallbackQuery):
         feats = "\n".join([f"• {x}" for x in premium_features])
         text = (
             "💳 <b>GlowShot Premium</b>\n\n"
-            "Вот что даёт премиум (список ты дополнишь позже):\n\n"
+            "Вот что даёт премиум:\n\n"
             f"{feats}\n\n"
             "Выбери тариф ниже 👇"
         )

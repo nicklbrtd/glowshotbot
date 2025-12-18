@@ -228,210 +228,13 @@ async def premium_prepare_robokassa(callback: CallbackQuery):
     await callback.answer()
 
 
-def _build_tariffs_kb_rub() -> InlineKeyboardMarkup:
-    """
-    Клавиатура с выбором тарифа премиума для оплаты в рублях.
-    """
-    kb = InlineKeyboardBuilder()
-    kb.button(
-        text=f"💳 7 дней — {TARIFFS['7d']['price_rub']} ₽",
-        callback_data="premium:order:rub:7d",
-    )
-    kb.button(
-        text=f"💳 30 дней — {TARIFFS['30d']['price_rub']} ₽",
-        callback_data="premium:order:rub:30d",
-    )
-    kb.button(
-        text=f"💳 90 дней — {TARIFFS['90d']['price_rub']} ₽",
-        callback_data="premium:order:rub:90d",
-    )
-    kb.button(
-        text="⬅️ Назад",
-        callback_data="profile:premium",
-    )
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-def _build_tariffs_kb_stars() -> InlineKeyboardMarkup:
-    """
-    Клавиатура с выбором тарифа премиума для оплаты Telegram Stars.
-    """
-    kb = InlineKeyboardBuilder()
-    kb.button(
-        text=f"⭐ 7 дней — {TARIFFS['7d']['price_stars']} ⭐",
-        callback_data="premium:order:stars:7d",
-    )
-    kb.button(
-        text=f"⭐ 30 дней — {TARIFFS['30d']['price_stars']} ⭐",
-        callback_data="premium:order:stars:30d",
-    )
-    kb.button(
-        text=f"⭐ 90 дней — {TARIFFS['90d']['price_stars']} ⭐",
-        callback_data="premium:order:stars:90d",
-    )
-    kb.button(
-        text="⬅️ Назад",
-        callback_data="profile:premium",
-    )
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-@router.callback_query(F.data == "profile:premium_buy")
-async def premium_buy_menu(callback: CallbackQuery):
-    """
-    Экран выбора способа оплаты (рубли / Stars) и дальнейшего выбора тарифа.
-
-    Логика:
-    - Если есть PAYMENT_PROVIDER_TOKEN → доступны и рубли, и Stars.
-    - Если токена нет → показываем сразу Stars-тарифы.
-    """
-    has_rub_payments = bool(PAYMENT_PROVIDER_TOKEN)
-    has_robokassa = bool(ROBOKASSA_ENABLED)
-
-    if has_rub_payments or has_robokassa:
-        kb = InlineKeyboardBuilder()
-
-        if has_robokassa:
-            kb.button(
-                text="💳 Оплата картой (Robokassa)",
-                callback_data="premium:buy:rk",
-            )
-
-        if has_rub_payments:
-            kb.button(
-                text="💳 Оплата картой (RUB)",
-                callback_data="premium:buy:rub",
-            )
-
-        kb.button(
-            text="⭐ Оплата Stars",
-            callback_data="premium:buy:stars",
-        )
-        kb.button(
-            text="⬅️ Назад",
-            callback_data="profile:premium",
-        )
-        kb.adjust(1)
-
-        test_line = "\n\n🧪 <b>Robokassa: тестовый режим включен</b>" if ROBOKASSA_IS_TEST else ""
-
-        text = (
-            "💳 <b>Оплата GlowShot Premium</b>\n\n"
-            "Выбери, как тебе удобнее оплатить подписку:\n\n"
-            "• 💳 картой (Robokassa / Telegram);\n"
-            "• ⭐ Telegram Stars.\n\n"
-            "После выбора способа оплаты появятся доступные тарифы."
-            f"{test_line}"
-        )
-
-        await callback.message.edit_text(
-            text,
-            reply_markup=kb.as_markup(),
-        )
-        await callback.answer()
-        return
-
-    # Если провайдера для рублей нет — сразу ведём в Stars.
-    text = (
-        "💳 <b>Оплата GlowShot Premium</b>\n\n"
-        "Онлайн-оплата картой пока недоступна.\n\n"
-        "Зато можно оплатить подписку через Telegram Stars (⭐).\n"
-        "Выбери тариф из списка ниже."
-    )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=_build_tariffs_kb_stars(),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "premium:buy:rub")
-async def premium_buy_rub(callback: CallbackQuery):
-    """
-    Экран выбора тарифа при оплате в рублях.
-    """
-    if not PAYMENT_PROVIDER_TOKEN:
-        await callback.answer(
-            "Оплата картой временно недоступна 😔", show_alert=True
-        )
-        return
-
-    text = (
-        "💳 <b>Оплата картой (RUB)</b>\n\n"
-        "Выбери тариф GlowShot Premium.\n\n"
-        "Оплата пройдёт через встроенные платежи Telegram."
-    )
-    await callback.message.edit_text(
-        text,
-        reply_markup=_build_tariffs_kb_rub(),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "premium:buy:rk")
-async def premium_buy_robokassa(callback: CallbackQuery):
-    """Экран выбора тарифа при оплате через Robokassa."""
-    if not ROBOKASSA_ENABLED:
-        await callback.answer("Robokassa не настроена 😔", show_alert=True)
-        return
-
-    kb = InlineKeyboardBuilder()
-    kb.button(
-        text=f"💳 7 дней — {TARIFFS['7d']['price_rub']} ₽",
-        callback_data="premium:order:rk:7d",
-    )
-    kb.button(
-        text=f"💳 30 дней — {TARIFFS['30d']['price_rub']} ₽",
-        callback_data="premium:order:rk:30d",
-    )
-    kb.button(
-        text=f"💳 90 дней — {TARIFFS['90d']['price_rub']} ₽",
-        callback_data="premium:order:rk:90d",
-    )
-    kb.button(
-        text="⬅️ Назад",
-        callback_data="profile:premium_buy",
-    )
-    kb.adjust(1)
-
-    test_line = "\n\n🧪 <b>Robokassa: тестовый режим включен</b>" if ROBOKASSA_IS_TEST else ""
-
-    text = (
-        "💳 <b>Оплата картой (Robokassa)</b>\n\n"
-        "Выбери тариф GlowShot Premium.\n\n"
-        "После оплаты тебя вернёт обратно в бот."
-        f"{test_line}"
-    )
-
-    await callback.message.edit_text(text, reply_markup=kb.as_markup())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "premium:buy:stars")
-async def premium_buy_stars(callback: CallbackQuery):
-    """
-    Экран выбора тарифа при оплате через Telegram Stars.
-    """
-    text = (
-        "⭐ <b>Оплата через Telegram Stars</b>\n\n"
-        "Выбери тариф GlowShot Premium.\n\n"
-        "Оплата будет списана с твоего баланса Stars."
-    )
-    await callback.message.edit_text(
-        text,
-        reply_markup=_build_tariffs_kb_stars(),
-    )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("premium:order:"))
 async def premium_create_invoice(callback: CallbackQuery):
     """
     Создание инвойса на оплату премиума.
-    Поддерживаются оба способа:
+    Поддерживаются способы:
     - RUB (через провайдера и PAYMENT_PROVIDER_TOKEN)
     - XTR (Telegram Stars)
     """
@@ -442,43 +245,13 @@ async def premium_create_invoice(callback: CallbackQuery):
         return
 
     _, _, method, period_code = parts
-    if method not in ("rub", "stars", "rk"):
+    if method not in ("rub", "stars"):
         await callback.answer("Некорректный способ оплаты.", show_alert=True)
         return
 
     tariff = TARIFFS.get(period_code)
     if not tariff:
         await callback.answer("Тариф не найден.", show_alert=True)
-        return
-    
-    if method == "rk":
-        if not ROBOKASSA_ENABLED:
-            await callback.answer("Robokassa не настроена 😔", show_alert=True)
-            return
-
-        try:
-            pay_url = build_robokassa_pay_url(callback.from_user.id, period_code)
-        except Exception as e:
-            await callback.answer(f"Не удалось собрать ссылку: {e}", show_alert=True)
-            return
-
-        kb = InlineKeyboardBuilder()
-        kb.button(text="Перейти к оплате 💳", url=pay_url)
-        kb.button(text="⬅️ Назад", callback_data="profile:premium_buy")
-        kb.adjust(1)
-
-        text = (
-            "💳 <b>Счёт готов</b>\n\n"
-            "Жми кнопку ниже — откроется страница Robokassa.\n"
-            "После оплаты тебя вернёт обратно в бот."
-        )
-
-        try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup())
-        except Exception:
-            await callback.message.answer(text, reply_markup=kb.as_markup())
-
-        await callback.answer()
         return
 
     if method == "rub":

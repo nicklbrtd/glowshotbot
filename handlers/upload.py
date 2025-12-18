@@ -867,7 +867,7 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     is_admin = is_admin_user(user)
     photo = await get_today_photo_for_user(user_id)
 
-    today_count = await count_today_photos_for_user(user_id)
+    today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
     daily_limit = 2 if is_premium_user else 1
 
     if (today_count >= daily_limit) and (not is_admin):
@@ -1424,54 +1424,34 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Это не твоя фотография.", show_alert=True)
         return
 
-    # Проверяем участие в итогах
+    # участвовало ли фото в итогах (топ-10 дня / недельный отбор)
     in_results, kind, place = await _photo_result_status(photo)
 
-    if in_results:
-        # Берём снапшот статистики (чтобы в «Мои итоги» было красиво)
-        try:
-            stats = await get_photo_stats(photo_id)
-            avg = stats.get("avg_rating")
-            cnt = int(stats.get("ratings_count") or 0)
-        except Exception:
-            avg = None
-            cnt = None
+    # Всегда сохраняем в «Мои итоги», чтобы рейтинг/оценки не терялись
+    archive_kind = (kind or "daily_top10") if in_results else "deleted"
 
-        # Архивируем
-        try:
-            await archive_photo_to_my_results(
-                user_id=user["id"],
-                photo=photo,
-                kind=kind or "daily_top10",
-                place=place,
-                avg_rating=float(avg) if avg is not None else None,
-                ratings_count=cnt,
-            )
-        except Exception:
-            await callback.answer(
-                "Не получилось перенести фото в «Мои итоги». Попробуй позже.",
-                show_alert=True,
-            )
-            return
-
-        # Убираем из активных (чтобы освободить слот)
-        try:
-            await mark_photo_deleted(photo_id)
-        except Exception:
-            pass
-
-        await callback.answer("Фото перенесено в «Мои итоги» и убрано из «Моя фотография».", show_alert=True)
-        await my_photo_menu(callback, state)
-        return
-
-    # Фото нигде не участвовало → удаляем полностью
     try:
-        await hard_delete_photo(photo_id)
+        await archive_photo_to_my_results(
+            user_id=int(user["id"]),
+            photo_id=int(photo_id),
+            kind=archive_kind,
+            day_key=photo.get("day_key"),
+            place=place,
+        )
     except Exception:
-        await callback.answer("Не удалось удалить фото. Попробуй позже.", show_alert=True)
+        await callback.answer(
+            "Не получилось сохранить фото в «Мои итоги». Попробуй позже.",
+            show_alert=True,
+        )
         return
 
-    await callback.answer("Фото удалено.", show_alert=True)
+    try:
+        await mark_photo_deleted(photo_id)
+    except Exception:
+        await callback.answer("Не удалось убрать фото из активных. Попробуй позже.", show_alert=True)
+        return
+
+    await callback.answer("✅ Фото удалено из активных и сохранено в «Мои итоги».", show_alert=True)
     await my_photo_menu(callback, state)
 
 
