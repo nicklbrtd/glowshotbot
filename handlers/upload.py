@@ -32,7 +32,6 @@ from database import (
     is_photo_repeat_used,
     mark_photo_repeat_used,
     archive_photo_to_my_results,
-    hard_delete_photo,
     count_today_photos_for_user,
 )
 from utils.time import get_moscow_now
@@ -1335,9 +1334,20 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
                 pass
         return
 
+    # Определим, админ ли пользователь (на всякий случай)
+    user_row = None
+    try:
+        user_row = await get_user_by_id(int(user_id))
+    except Exception:
+        user_row = None
+    is_admin = bool(user_row and is_admin_user(user_row))
+
+    # ВАЖНО:
+    # НЕ удаляем существующие активные фото здесь.
+    # Лимиты (1/2 активных, 1/2 в день) уже проверяются раньше в myphoto_add.
     try:
         photo_id = await create_today_photo(
-            user_id=user_id,
+            user_id=int(user_id),
             file_id=file_id,
             title=title,
             category=category,
@@ -1345,37 +1355,31 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
             device_info=None,
             description=description,
         )
-    except UniqueViolationError:
-        existing_photo = await get_today_photo_for_user(user_id)
-        if existing_photo is not None:
-            photo = existing_photo
-        else:
-            await state.clear()
-            remaining = _format_time_until_next_upload()
+    except Exception:
+        await state.clear()
+        try:
+            await message_or_service.bot.edit_message_caption(
+                chat_id=upload_chat_id,
+                message_id=upload_msg_id,
+                caption="Не получилось сохранить фотографию. Попробуй ещё раз.",
+            )
+        except Exception:
             try:
-                await message_or_service.bot.edit_message_caption(
+                await message_or_service.bot.send_message(
                     chat_id=upload_chat_id,
-                    message_id=upload_msg_id,
-                    caption=(
-                        "Похоже, на сегодня у тебя уже есть фотография.\n\n"
-                        f"Новый кадр можно будет выложить {remaining}."
-                    ),
+                    text="Не получилось сохранить фотографию. Попробуй ещё раз.",
+                    disable_notification=True,
                 )
             except Exception:
-                try:
-                    await message_or_service.bot.send_message(
-                        chat_id=upload_chat_id,
-                        text=(
-                            "Похоже, на сегодня у тебя уже есть фотография.\n\n"
-                            f"Новый кадр можно будет выложить {remaining}."
-                        ),
-                        disable_notification=True,
-                    )
-                except Exception:
-                    pass
-            return
-    else:
-        photo = await get_photo_by_id(photo_id)
+                pass
+        return
+
+    photo = await get_photo_by_id(int(photo_id))
+
+    # Если зачем-то включён админский overwrite на уровне финализации —
+    # оставим заглушку, но по умолчанию ничего не трогаем.
+    # (Сейчас overwrite делается в myphoto_add.)
+    _ = is_admin
 
     if photo is None:
         await state.clear()
@@ -1400,11 +1404,18 @@ async def _finalize_photo_creation(message_or_service: Message, state: FSMContex
 
     # Используем текущий message как service_message, чтобы перейти к полноценному разделу «Моя фотография»
     try:
-        service_message = await message_or_service.bot.edit_message_caption(
-            chat_id=upload_chat_id,
-            message_id=upload_msg_id,
-            caption="Оформляем твою работу…",
-        )
+        if getattr(message_or_service, "photo", None):
+            service_message = await message_or_service.bot.edit_message_caption(
+                chat_id=upload_chat_id,
+                message_id=upload_msg_id,
+                caption="Оформляем твою работу…",
+            )
+        else:
+            service_message = await message_or_service.bot.edit_message_text(
+                chat_id=upload_chat_id,
+                message_id=upload_msg_id,
+                text="Оформляем твою работу…",
+            )
     except Exception:
         service_message = message_or_service
 
