@@ -1495,96 +1495,108 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     if user is None:
         return
 
-    parts = callback.data.split(":")
-    # myphoto:comments:<photo_id>:<page>
-    if len(parts) < 3:
+    parts = (callback.data or "").split(":")
+    # expected: myphoto:comments:<photo_id>:<page>
+    if len(parts) < 4:
         await callback.answer()
         return
 
     try:
         photo_id = int(parts[2])
-    except ValueError:
+    except Exception:
         await callback.answer()
         return
 
-    page = 0
-    if len(parts) >= 4:
-        try:
-            page = int(parts[3])
-        except Exception:
-            page = 0
+    try:
+        page = int(parts[3])
+    except Exception:
+        page = 0
 
-    photo = await get_photo_by_id(int(photo_id))
-    if photo is None:
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
 
-    is_owner = int(user["id"]) == int(photo["user_id"])
+    is_owner = int(photo.get("user_id") or 0) == int(user.get("id") or 0)
 
-    # Try new signature (only_public). If DB helper doesn't support it yet, fall back.
-    try:
-        comments = await get_comments_for_photo(int(photo_id), only_public=not is_owner)
-    except TypeError:
-        comments = await get_comments_for_photo(int(photo_id))
-        if not is_owner:
-            comments = [c for c in comments if bool(c.get("is_public", 1))]
+    # ВЛАДЕЛЕЦ видит ВСЕ комменты, остальные — только публичные
+    comments = await get_comments_for_photo(photo_id, only_public=not is_owner)
 
-    per_page = 5
+    per_page = 10
     total = len(comments)
-    pages = max(1, (total + per_page - 1) // per_page)
-    page = max(0, min(page, pages - 1))
-
+    page = max(page, 0)
     start = page * per_page
-    chunk = comments[start:start + per_page]
+    end = start + per_page
 
-    lines: list[str] = ["💬 <b>Комментарии</b>", ""]
+    if total > 0 and start >= total:
+        page = 0
+        start = 0
+        end = per_page
+
+    page_comments = comments[start:end]
+
+    title = (photo.get("title") or "Без названия").strip()
+
+    lines = [f"💬 <b>Комментарии</b> к \"{title}\"", ""]
 
     if total == 0:
-        lines.append("Пока нет ни одного комментария.")
+        if is_owner:
+            lines.append("Пока нет ни одного комментария.")
+        else:
+            lines.append("Пока нет ни одного комментария.\nБудь первым 😊")
     else:
-        for c in chunk:
+        for i, c in enumerate(page_comments, start=start + 1):
             text = (c.get("text") or "").strip()
+            if not text:
+                continue
+
             is_public = bool(c.get("is_public", 1))
-
             if is_public:
-                name = (c.get("user_name") or c.get("name") or "").strip()
-                username = (c.get("user_username") or c.get("username") or "").strip()
+                name = (c.get("name") or "").strip()
+                username = (c.get("username") or "").strip()
                 if username:
-                    who = f"<a href=\"https://t.me/{username}\">{name or '@' + username}</a>"
+                    author = f"@{username.lstrip('@')}"
+                elif name:
+                    author = name
                 else:
-                    who = name or "Пользователь"
+                    author = "Пользователь"
             else:
-                who = "🕵 Аноним"
+                author = "🕵️ Анонимно"
 
-            lines.append(f"• <b>{who}</b>: {text}")
+            lines.append(f"<b>{i}.</b> {author}: {text}")
 
-    kb = _build_comments_nav_kb(photo_id, page, pages)
+        if total > per_page:
+            last_page = (total - 1) // per_page
+            lines.append("")
+            lines.append(f"Страница {page + 1} из {last_page + 1} · всего {total}")
+
+    text_out = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+
+    if total > per_page:
+        if page > 0:
+            kb.button(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page - 1}")
+        if end < total:
+            kb.button(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page + 1}")
+
+    kb.button(text="⬅️ Назад", callback_data="myphoto:open")
+    kb.adjust(2, 1) if total > per_page else kb.adjust(1)
 
     try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption="\n".join(lines), reply_markup=kb)
+        if callback.message and callback.message.photo:
+            await callback.message.edit_caption(caption=text_out, reply_markup=kb.as_markup())
         else:
-            await callback.message.edit_text("\n".join(lines), reply_markup=kb)
-    except Exception:
-        pass
+            await callback.message.edit_text(text_out, reply_markup=kb.as_markup())
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text_out,
+            reply_markup=kb.as_markup(),
+            disable_notification=True,
+        )
 
     await callback.answer()
-
-
-def _build_comments_nav_kb(photo_id: int, page: int, pages: int) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-
-    if pages > 1:
-        nav: list[InlineKeyboardButton] = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}"))
-        nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="noop"))
-        if page < pages - 1:
-            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}"))
-        rows.append(nav)
-
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.callback_query(F.data == "noop")
