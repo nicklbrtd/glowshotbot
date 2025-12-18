@@ -137,7 +137,9 @@ async def premium_rub_disabled(callback: CallbackQuery):
     )
 
 
-@router.callback_query(F.data.startswith("premium:manual_rub:"))
+@router.callback_query(
+    F.data.startswith("premium:manual_rub:") & ~F.data.startswith("premium:manual_rub:paid:")
+)
 async def premium_manual_rub(callback: CallbackQuery):
     parts = (callback.data or "").split(":")
     if len(parts) != 3:
