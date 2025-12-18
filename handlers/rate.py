@@ -1,4 +1,5 @@
 from aiogram import Router, F
+import traceback
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import StatesGroup, State
@@ -30,6 +31,8 @@ from database import (
     update_daily_skip_info,
     get_awards_for_user,
     link_and_reward_referral_if_needed,
+    create_comment,
+    log_bot_error,
 )
 from html import escape
 
@@ -591,8 +594,11 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
     # await state.update_data(comment_text=text)  # removed per instructions
     await message.delete()
 
-    # --- Save comment immediately (so it is visible in upload/my photo) ---
+       # --- Save comment immediately (so it is visible in upload/my photo) ---
     user_for_rate = await get_user_by_tg_id(message.from_user.id)
+    saved = False
+    save_error: Exception | None = None
+
     if user_for_rate and user_for_rate.get("id"):
         try:
             await create_comment(
@@ -601,12 +607,43 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 text=text,
                 is_public=bool(is_public),
             )
+            saved = True
             # Mark saved so we don't duplicate-save on score click
             await state.update_data(comment_saved=True)
-        except Exception:
-            pass
+        except Exception as e:
+            save_error = e
+            # Log exact reason to DB error logs (so you can see permissions/FK issues)
+            try:
+                await log_bot_error(
+                    chat_id=message.chat.id,
+                    tg_user_id=message.from_user.id,
+                    handler="rate_comment_text:create_comment",
+                    update_type="comment",
+                    error_type=type(e).__name__,
+                    error_text=str(e),
+                    traceback_text=traceback.format_exc(),
+                )
+            except Exception:
+                pass
 
-    # Notify photo author about the new comment
+    if not saved:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:rate")]]
+        )
+        err_txt = "Не удалось сохранить комментарий. Попробуй ещё раз чуть позже."
+        if save_error is not None:
+            # show short error for debugging (without traceback)
+            err_txt += f"\n\nПричина: {type(save_error).__name__}: {save_error}"
+        await message.bot.edit_message_caption(
+            chat_id=rate_chat_id,
+            message_id=rate_msg_id,
+            caption=err_txt,
+            reply_markup=kb,
+        )
+        await state.clear()
+        return
+
+    # Notify photo author about the new comment ONLY if it was saved
     try:
         photo = await get_photo_by_id(int(photo_id))
     except Exception:
@@ -627,8 +664,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     await message.bot.send_message(
                         chat_id=int(author["tg_id"]),
                         text=(
-                            "🔔 <b>Новый комментарий к вашей фотографии</b>\n"
-                            f"Режим: {mode_label}\n\n"
+                            "🔔 <b>Новый {mode_label} комментарий к вашей фотографии</b>\n"
                             f"Текст: {text}"
                         ),
                         reply_markup=build_comment_notification_keyboard(),
@@ -636,23 +672,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     )
                 except Exception:
                     pass
-
-    is_premium = False
-    try:
-        if user_for_rate and user_for_rate.get("tg_id"):
-            is_premium = await is_user_premium_active(user_for_rate["tg_id"])
-    except Exception:
-        is_premium = False
-
-    kb = build_rate_keyboard(photo_id, is_premium=is_premium)
-    await message.bot.edit_message_caption(
-        chat_id=rate_chat_id,
-        message_id=rate_msg_id,
-        caption="Комментарий сохранён.\n\nТеперь выбери оценку для этой фотографии:",
-        reply_markup=kb,
-    )
-
-    await state.clear()
 
 
 @router.message(RateStates.waiting_report_text)
