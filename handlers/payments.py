@@ -7,7 +7,7 @@ from aiogram.types import (
     PreCheckoutQuery,
     Message,
 )
-from keyboards.common import build_viewed_kb, build_back_kb
+from keyboards.common import build_viewed_kb
 from config import (
     MANUAL_RUB_ENABLED,
     MANUAL_CARD_NUMBER,
@@ -53,9 +53,6 @@ TARIFFS = {
         "description": "Доступ ко всем премиум-функциям на 90 дней.",
     },
 }
-
-
-
 
 # --- Новый flow для премиум-панели и тарифов ---
 

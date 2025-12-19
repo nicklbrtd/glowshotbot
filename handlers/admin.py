@@ -37,7 +37,275 @@ from database import (
     update_award_icon,
     create_custom_award_for_user,
     get_bot_error_logs_page,
+    get_bot_error_logs_count,
     clear_bot_error_logs,
+# ================= LOGS / ERRORS (Admin) =================
+
+_LOGS_PAGE_LIMIT = 10
+_MAX_TG_TEXT = 3900  # safe margin for Telegram 4096
+
+
+def _cut_text(s: str | None, limit: int = _MAX_TG_TEXT) -> str:
+    if not s:
+        return "—"
+    s = str(s)
+    return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+def _fmt_dt_safe(dt_str: str | None) -> str:
+    if not dt_str:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        return dt.strftime("%d.%m.%Y %H:%M:%S")
+    except Exception:
+        return str(dt_str)
+
+
+async def _render_logs_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
+    page = max(1, int(page))
+
+    total = await get_bot_error_logs_count()
+    total_pages = max(1, (total + _LOGS_PAGE_LIMIT - 1) // _LOGS_PAGE_LIMIT)
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * _LOGS_PAGE_LIMIT
+    rows = await get_bot_error_logs_page(offset=offset, limit=_LOGS_PAGE_LIMIT)
+
+    lines: list[str] = [
+        "🧾 <b>Логи / ошибки</b>",
+        f"Всего записей: <b>{total}</b>",
+        f"Страница: <b>{page}</b> / <b>{total_pages}</b>",
+        "",
+    ]
+
+    if not rows:
+        lines.append("Пока нет ошибок. Красота ✨")
+    else:
+        for r in rows:
+            rid = r.get("id")
+            created_at = _fmt_dt_safe(r.get("created_at"))
+            error_type = r.get("error_type") or "Error"
+            handler = r.get("handler") or "—"
+            tg_user_id = r.get("tg_user_id")
+            update_type = r.get("update_type") or "—"
+
+            # короткая строка
+            lines.append(
+                f"<b>#{rid}</b> · {created_at}\n"
+                f"• <b>{error_type}</b> в <code>{handler}</code> · {update_type}\n"
+                f"• user: <code>{tg_user_id if tg_user_id is not None else '—'}</code>"
+            )
+            lines.append("")
+
+    text = "\n".join(lines).strip()
+
+    kb = InlineKeyboardBuilder()
+
+    # Кнопки "Подробнее" по каждой записи (до 5, чтобы не раздувать клаву)
+    if rows:
+        for r in rows[:5]:
+            rid = r.get("id")
+            if rid is not None:
+                kb.button(text=f"🔎 #{rid}", callback_data=f"admin:logs:view:{rid}:{page}")
+        kb.adjust(5)
+
+    # пагинация
+    prev_cb = f"admin:logs:page:{page-1}" if page > 1 else None
+    next_cb = f"admin:logs:page:{page+1}" if page < total_pages else None
+
+    if prev_cb or next_cb:
+        if prev_cb:
+            kb.button(text="⬅️", callback_data=prev_cb)
+        if next_cb:
+            kb.button(text="➡️", callback_data=next_cb)
+
+    # действия
+    kb.button(text="🧹 Очистить логи", callback_data=f"admin:logs:clear:confirm:{page}")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+
+    # раскладка: сначала 1 ряд подробностей (если есть), затем стрелки, затем действия
+    # InlineKeyboardBuilder сам соберёт; фиксируем адекватно:
+    # если были кнопки подробностей, они уже adjust(5), дальше будет ещё ряд.
+    kb.adjust(5, 2, 1, 1)
+
+    return text, kb.as_markup()
+
+
+@router.callback_query(F.data.startswith("admin:logs:page:"))
+async def admin_logs_page(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    page = 1
+    if len(parts) >= 4 and parts[3].isdigit():
+        page = int(parts[3])
+
+    text, markup = await _render_logs_page(page)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:logs:view:"))
+async def admin_logs_view(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    # формат: admin:logs:view:<log_id>:<back_page>
+    parts = (callback.data or "").split(":")
+    if len(parts) < 5:
+        await callback.answer("Не удалось открыть запись.", show_alert=True)
+        return
+
+    try:
+        log_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный id записи.", show_alert=True)
+        return
+
+    back_page = 1
+    try:
+        back_page = int(parts[4])
+    except Exception:
+        back_page = 1
+
+    # Берём одну запись через страницу (быстро и без новой функции):
+    # ищем в первых 200 самых свежих; если не нашли — скажем, что не найдено.
+    # (Это компромисс. Если захочешь — добавим get_bot_error_log_by_id.)
+    row = None
+    # пробуем дернуть прямым SQL через уже имеющийся пул нельзя отсюда,
+    # поэтому используем get_bot_error_logs_page c увеличенным лимитом.
+    # Админке этого хватит.
+    try:
+        recent = await get_bot_error_logs_page(offset=0, limit=200)
+        for r in recent:
+            if int(r.get("id", -1)) == log_id:
+                row = r
+                break
+    except Exception:
+        row = None
+
+    if not row:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data=f"admin:logs:page:{back_page}")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+        try:
+            await callback.message.edit_text("Запись не найдена (возможно, слишком старая).", reply_markup=kb.as_markup())
+        except Exception:
+            await callback.message.answer("Запись не найдена (возможно, слишком старая).", reply_markup=kb.as_markup())
+        await callback.answer()
+        return
+
+    created_at = _fmt_dt_safe(row.get("created_at"))
+    error_type = row.get("error_type") or "Error"
+    handler = row.get("handler") or "—"
+    update_type = row.get("update_type") or "—"
+    chat_id = row.get("chat_id")
+    tg_user_id = row.get("tg_user_id")
+
+    error_text = _cut_text(row.get("error_text"), 1200)
+    tb = _cut_text(row.get("traceback_text"), _MAX_TG_TEXT)
+
+    text = (
+        "🧾 <b>Детали ошибки</b>\n\n"
+        f"ID: <code>{row.get('id')}</code>\n"
+        f"Когда: <b>{created_at}</b>\n"
+        f"Тип: <b>{error_type}</b>\n"
+        f"Хендлер: <code>{handler}</code>\n"
+        f"Update: <code>{update_type}</code>\n"
+        f"chat_id: <code>{chat_id if chat_id is not None else '—'}</code>\n"
+        f"user_id: <code>{tg_user_id if tg_user_id is not None else '—'}</code>\n\n"
+        f"<b>Сообщение</b>\n<code>{error_text}</code>\n\n"
+        f"<b>Traceback</b>\n<code>{tb}</code>"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к списку", callback_data=f"admin:logs:page:{back_page}")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except TelegramBadRequest:
+        # Иногда Telegram ругается на слишком длинный текст даже после обрезки
+        safe_text = _cut_text(text, _MAX_TG_TEXT)
+        try:
+            await callback.message.edit_text(safe_text, reply_markup=kb.as_markup())
+        except Exception:
+            await callback.message.answer(safe_text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(_cut_text(text, _MAX_TG_TEXT), reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:logs:clear:confirm:"))
+async def admin_logs_clear_confirm(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    back_page = 1
+    try:
+        back_page = int(parts[4])
+    except Exception:
+        back_page = 1
+
+    text = (
+        "🧹 <b>Очистить логи?</b>\n\n"
+        "Это удалит <b>все</b> записи ошибок из базы.\n"
+        "Если хочешь сохранить историю — лучше сначала сфоткай/скопируй нужные записи."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, очистить", callback_data=f"admin:logs:clear:do:{back_page}")
+    kb.button(text="❌ Отмена", callback_data=f"admin:logs:page:{back_page}")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:logs:clear:do:"))
+async def admin_logs_clear_do(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    back_page = 1
+    try:
+        back_page = int(parts[4])
+    except Exception:
+        back_page = 1
+
+    await clear_bot_error_logs()
+
+    text, markup = await _render_logs_page(1)
+    # добавим небольшую плашку
+    text = "✅ Логи очищены.\n\n" + text
+
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup)
+
+    await callback.answer()
     # статистика и выборки пользователей
     get_users_sample,
     get_active_users_last_24h,

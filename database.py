@@ -980,6 +980,13 @@ async def get_bot_error_logs_page(offset: int, limit: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_bot_error_logs_count() -> int:
+    """Total number of rows in bot_error_logs (for pagination in admin UI)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM bot_error_logs")
+    return int(v or 0)
+
 async def clear_bot_error_logs() -> None:
     """Полностью очищает таблицу bot_error_logs (для админки)."""
     p = _assert_pool()
