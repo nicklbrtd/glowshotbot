@@ -4,21 +4,16 @@ from __future__ import annotations
 # ==== АДМИНКА: ПЛАТЕЖИ =======================================
 # =============================================================
 
-from typing import Optional, Union
 from datetime import datetime
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
 from handlers.payments import TARIFFS
-from utils.time import get_moscow_now
-from config import MASTER_ADMIN_ID
 
 from database import (
-    get_user_by_tg_id,
     get_payments_count,
     get_payments_page,
     get_revenue_summary,
@@ -26,91 +21,9 @@ from database import (
     get_subscriptions_page,
 )
 
-from .common import (
-    _ensure_admin,
-    _ensure_user,
-)
+from .common import _ensure_admin, edit_or_answer
 
 router = Router()
-
-UserEvent = Union[Message, CallbackQuery]
-
-
-# =============================================================
-# ==== ENSURE ADMIN ===========================================
-# =============================================================
-
-async def _get_from_user(event: UserEvent):
-    return event.from_user
-
-
-async def _ensure_user(event: UserEvent) -> Optional[dict]:
-    from_user = await _get_from_user(event)
-    user = await get_user_by_tg_id(from_user.id)
-    if not user:
-        if isinstance(event, CallbackQuery):
-            await event.answer("Сначала /start", show_alert=True)
-        return None
-    return user
-
-
-async def _ensure_admin(event: UserEvent) -> Optional[dict]:
-    user = await _ensure_user(event)
-    if not user:
-        return None
-
-    from_user = await _get_from_user(event)
-
-    if MASTER_ADMIN_ID and from_user.id == MASTER_ADMIN_ID:
-        return user
-
-    if not user.get("is_admin"):
-        if isinstance(event, CallbackQuery):
-            await event.answer("Нет прав администратора", show_alert=True)
-        return None
-
-    return user
-
-
-# =============================================================
-# ==== FSM ====================================================
-# =============================================================
-
-class PaymentsStates(StatesGroup):
-    idle = State()
-
-
-# =============================================================
-# ==== HELPER =================================================
-# =============================================================
-
-async def _edit_or_send(
-    message: Message,
-    state: FSMContext,
-    text: str,
-    reply_markup: InlineKeyboardMarkup,
-):
-    data = await state.get_data()
-    chat_id = data.get("payments_chat_id")
-    msg_id = data.get("payments_msg_id")
-
-    if chat_id and msg_id:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                reply_markup=reply_markup,
-            )
-            return
-        except Exception:
-            pass
-
-    sent = await message.answer(text, reply_markup=reply_markup)
-    await state.update_data(
-        payments_chat_id=sent.chat.id,
-        payments_msg_id=sent.message_id,
-    )
 
 
 # =============================================================
@@ -139,7 +52,7 @@ async def admin_payments_menu(callback: CallbackQuery, state: FSMContext):
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
-    await _edit_or_send(callback.message, state, text, kb.as_markup())
+    await edit_or_answer(callback.message, state, prefix="payments", text=text, reply_markup=kb.as_markup())
     await callback.answer()
 
 
@@ -199,7 +112,7 @@ async def admin_payments_list(callback: CallbackQuery, state: FSMContext):
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(2, 1, 1)
 
-    await _edit_or_send(callback.message, state, "\n".join(lines), kb.as_markup())
+    await edit_or_answer(callback.message, state, prefix="payments", text="\n".join(lines), reply_markup=kb.as_markup())
     await callback.answer()
 
 
@@ -235,7 +148,7 @@ async def admin_payments_revenue(callback: CallbackQuery, state: FSMContext):
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
-    await _edit_or_send(callback.message, state, text, kb.as_markup())
+    await edit_or_answer(callback.message, state, prefix="payments", text=text, reply_markup=kb.as_markup())
     await callback.answer()
 
 
@@ -262,7 +175,7 @@ async def admin_payments_tariffs(callback: CallbackQuery, state: FSMContext):
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
-    await _edit_or_send(callback.message, state, "\n".join(lines), kb.as_markup())
+    await edit_or_answer(callback.message, state, prefix="payments", text="\n".join(lines), reply_markup=kb.as_markup())
     await callback.answer()
 
 
@@ -309,5 +222,5 @@ async def admin_payments_subs(callback: CallbackQuery, state: FSMContext):
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(2, 1, 1)
 
-    await _edit_or_send(callback.message, state, "\n".join(lines), kb.as_markup())
+    await edit_or_answer(callback.message, state, prefix="payments", text="\n".join(lines), reply_markup=kb.as_markup())
     await callback.answer()

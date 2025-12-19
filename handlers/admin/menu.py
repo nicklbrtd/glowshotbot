@@ -1,313 +1,178 @@
 from __future__ import annotations
 
 # =============================================================
-# ==== АДМИНКА: ПЛАТЕЖИ =======================================
+# ==== АДМИНКА: ГЛАВНОЕ МЕНЮ ==================================
 # =============================================================
 
-from typing import Optional, Union
-from datetime import datetime
-
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.state import StatesGroup, State
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
-from handlers.payments import TARIFFS
 from utils.time import get_moscow_now
-from config import MASTER_ADMIN_ID
 
-from database import (
-    get_user_by_tg_id,
-    get_payments_count,
-    get_payments_page,
-    get_revenue_summary,
-    get_subscriptions_total,
-    get_subscriptions_page,
-)
+from keyboards.common import build_admin_menu, build_back_kb
 
 from .common import (
-    _ensure_admin,
     _ensure_user,
+    _ensure_admin,
+    AdminStates,
+    edit_or_answer,
+    ADMIN_PASSWORD,
 )
+
+# опционально: если есть функция в БД — сделаем админку постоянной
+try:
+    from database import set_user_admin  # type: ignore
+except Exception:  # pragma: no cover
+    set_user_admin = None  # type: ignore
+
 
 router = Router()
 
-UserEvent = Union[Message, CallbackQuery]
+
+# =============================================================
+# ==== UI TEXT =================================================
+# =============================================================
+
+def _build_admin_panel_text(tg_id: int) -> str:
+    now = get_moscow_now()
+    today = now.strftime("%d.%m.%Y")
+    return (
+        "<b>Админ-панель GlowShot</b>\n"
+        f"ID: <code>{tg_id}</code>\n"
+        f"сегодня: {today}"
+    )
 
 
 # =============================================================
-# ==== ENSURE ADMIN ===========================================
+# ==== ENTRY: /admin ==========================================
 # =============================================================
 
-async def _get_from_user(event: UserEvent):
-    return event.from_user
+@router.message(Command("admin"))
+async def admin_entry(message: Message, state: FSMContext):
+    # всегда сбрасываем, чтобы ничего не залипало
+    await state.clear()
 
+    user = await _ensure_user(message)
+    if user is None:
+        return
 
-async def _ensure_user(event: UserEvent) -> Optional[dict]:
-    from_user = await _get_from_user(event)
-    user = await get_user_by_tg_id(from_user.id)
-    if not user:
-        if isinstance(event, CallbackQuery):
-            await event.answer("Сначала /start", show_alert=True)
-        return None
-    return user
+    # уже админ → открываем меню
+    if await _ensure_admin(message):
+        await edit_or_answer(
+            message,
+            state,
+            prefix="admin",
+            text=_build_admin_panel_text(message.from_user.id),
+            reply_markup=build_admin_menu(),
+        )
+        return
 
-
-async def _ensure_admin(event: UserEvent) -> Optional[dict]:
-    user = await _ensure_user(event)
-    if not user:
-        return None
-
-    from_user = await _get_from_user(event)
-
-    if MASTER_ADMIN_ID and from_user.id == MASTER_ADMIN_ID:
-        return user
-
-    if not user.get("is_admin"):
-        if isinstance(event, CallbackQuery):
-            await event.answer("Нет прав администратора", show_alert=True)
-        return None
-
-    return user
-
-
-# =============================================================
-# ==== FSM ====================================================
-# =============================================================
-
-class PaymentsStates(StatesGroup):
-    idle = State()
+    # не админ → просим пароль
+    await state.set_state(AdminStates.waiting_password)
+    await edit_or_answer(
+        message,
+        state,
+        prefix="admin",
+        text=(
+            "🔒 <b>Доступ в админку</b>\n\n"
+            "Введи пароль администратора.\n\n"
+            "Если передумал — нажми «Отмена»."
+        ),
+        reply_markup=build_back_kb(callback_data="admin:cancel", text="❌ Отмена"),
+    )
 
 
 # =============================================================
-# ==== HELPER =================================================
+# ==== MAIN MENU: callback ====================================
 # =============================================================
 
-async def _edit_or_send(
-    message: Message,
-    state: FSMContext,
-    text: str,
-    reply_markup: InlineKeyboardMarkup,
-):
-    data = await state.get_data()
-    chat_id = data.get("payments_chat_id")
-    msg_id = data.get("payments_msg_id")
+@router.callback_query(F.data == "admin:menu")
+async def admin_menu(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
 
-    if chat_id and msg_id:
+    # ВАЖНО: при входе в главное админ-меню всегда сбрасываем состояния
+    await state.clear()
+
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin",
+        text=_build_admin_panel_text(callback.from_user.id),
+        reply_markup=build_admin_menu(),
+    )
+
+    await callback.answer()
+
+
+# =============================================================
+# ==== CANCEL PASSWORD ========================================
+# =============================================================
+
+@router.callback_query(F.data == "admin:cancel")
+async def admin_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    # возвращаем в обычное меню бота (или просто закрываем админку)
+    try:
+        await callback.message.delete()
+    except Exception:
         try:
-            await message.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                reply_markup=reply_markup,
-            )
-            return
+            await callback.message.edit_text("Окей, отменил вход в админку.")
         except Exception:
             pass
 
-    sent = await message.answer(text, reply_markup=reply_markup)
-    await state.update_data(
-        payments_chat_id=sent.chat.id,
-        payments_msg_id=sent.message_id,
+    await callback.answer("Отменено")
+
+
+# =============================================================
+# ==== CHECK PASSWORD =========================================
+# =============================================================
+
+@router.message(AdminStates.waiting_password)
+async def admin_check_password(message: Message, state: FSMContext):
+    user = await _ensure_user(message)
+    if user is None:
+        await state.clear()
+        return
+
+    pwd = (message.text or "").strip()
+
+    # удаляем пароль из чата
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not pwd or pwd != (ADMIN_PASSWORD or ""):
+        await edit_or_answer(
+            message,
+            state,
+            prefix="admin",
+            text=(
+                "❌ Неверный пароль.\n\n"
+                "Попробуй ещё раз или нажми «Отмена»."
+            ),
+            reply_markup=build_back_kb(callback_data="admin:cancel", text="❌ Отмена"),
+        )
+        return
+
+    # пароль верный → делаем админом (если есть функция в БД)
+    if set_user_admin is not None:
+        try:
+            await set_user_admin(message.from_user.id, True)
+        except Exception:
+            # если в проекте другая схема ролей — просто продолжим (доступ будет в рамках текущей сессии)
+            pass
+
+    await state.clear()
+
+    await edit_or_answer(
+        message,
+        state,
+        prefix="admin",
+        text=_build_admin_panel_text(message.from_user.id),
+        reply_markup=build_admin_menu(),
     )
-
-
-# =============================================================
-# ==== МЕНЮ ПЛАТЕЖЕЙ ==========================================
-# =============================================================
-
-@router.callback_query(F.data == "admin:payments")
-async def admin_payments_menu(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_admin(callback):
-        return
-
-    text = (
-        "<b>💳 Платежи и подписки</b>\n\n"
-        "Здесь можно посмотреть:\n"
-        "• успешные платежи\n"
-        "• доходы\n"
-        "• тарифы\n"
-        "• подписки пользователей"
-    )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📜 Платежи", callback_data="admin:payments:list:1")
-    kb.button(text="💰 Доходы", callback_data="admin:payments:revenue")
-    kb.button(text="🏷 Тарифы", callback_data="admin:payments:tariffs")
-    kb.button(text="👥 Подписки", callback_data="admin:payments:subs:1")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1)
-
-    await _edit_or_send(callback.message, state, text, kb.as_markup())
-    await callback.answer()
-
-
-# =============================================================
-# ==== СПИСОК ПЛАТЕЖЕЙ ========================================
-# =============================================================
-
-@router.callback_query(F.data.startswith("admin:payments:list:"))
-async def admin_payments_list(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_admin(callback):
-        return
-
-    page = int(callback.data.split(":")[-1])
-    page_size = 20
-
-    total = await get_payments_count()
-    max_page = max(1, (total + page_size - 1) // page_size)
-    page = max(1, min(page, max_page))
-
-    rows = await get_payments_page(page, page_size)
-
-    lines = [
-        "<b>📜 Успешные платежи</b>",
-        f"Всего: <b>{total}</b>",
-        "",
-    ]
-
-    if not rows:
-        lines.append("Платежей пока нет.")
-    else:
-        for p in rows:
-            created = p.get("created_at")
-            try:
-                dt = datetime.fromisoformat(created)
-                created = dt.strftime("%d.%m.%Y %H:%M")
-            except Exception:
-                pass
-
-            username = p.get("user_username")
-            label = f"@{username}" if username else f"ID {p.get('user_tg_id')}"
-
-            amount = p.get("amount", 0)
-            currency = p.get("currency")
-            amount_text = f"{amount / 100:.2f} ₽" if currency == "RUB" else f"{amount} ⭐"
-
-            lines.append(
-                f"{created} — {label}\n"
-                f"   {p.get('period_code')} / {p.get('days')} дн. / {amount_text}"
-            )
-
-    kb = InlineKeyboardBuilder()
-    if page > 1:
-        kb.button(text="◀️", callback_data=f"admin:payments:list:{page-1}")
-    if page < max_page:
-        kb.button(text="▶️", callback_data=f"admin:payments:list:{page+1}")
-    kb.button(text="⬅️ Назад", callback_data="admin:payments")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 1, 1)
-
-    await _edit_or_send(callback.message, state, "\n".join(lines), kb.as_markup())
-    await callback.answer()
-
-
-# =============================================================
-# ==== ДОХОДЫ =================================================
-# =============================================================
-
-@router.callback_query(F.data == "admin:payments:revenue")
-async def admin_payments_revenue(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_admin(callback):
-        return
-
-    day = await get_revenue_summary("day")
-    week = await get_revenue_summary("week")
-    month = await get_revenue_summary("month")
-
-    def block(title, d):
-        return (
-            f"<b>{title}</b>\n"
-            f"• RUB: {d.get('rub_total', 0):.2f} ₽ ({d.get('rub_count', 0)})\n"
-            f"• ⭐ Stars: {d.get('stars_total', 0)} ({d.get('stars_count', 0)})"
-        )
-
-    text = "\n\n".join([
-        "<b>💰 Доходы</b>",
-        block("Сегодня", day),
-        block("7 дней", week),
-        block("30 дней", month),
-    ])
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="admin:payments")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1)
-
-    await _edit_or_send(callback.message, state, text, kb.as_markup())
-    await callback.answer()
-
-
-# =============================================================
-# ==== ТАРИФЫ ================================================
-# =============================================================
-
-@router.callback_query(F.data == "admin:payments:tariffs")
-async def admin_payments_tariffs(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_admin(callback):
-        return
-
-    lines = ["<b>🏷 Тарифы</b>", ""]
-
-    for code, t in TARIFFS.items():
-        lines.append(
-            f"<b>{t['title']}</b>\n"
-            f"Код: <code>{code}</code>\n"
-            f"{t['days']} дн. — {t['price_rub']} ₽ / {t['price_stars']} ⭐\n"
-        )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="admin:payments")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1)
-
-    await _edit_or_send(callback.message, state, "\n".join(lines), kb.as_markup())
-    await callback.answer()
-
-
-# =============================================================
-# ==== ПОДПИСКИ ===============================================
-# =============================================================
-
-@router.callback_query(F.data.startswith("admin:payments:subs:"))
-async def admin_payments_subs(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_admin(callback):
-        return
-
-    page = int(callback.data.split(":")[-1])
-    page_size = 20
-
-    total = await get_subscriptions_total()
-    max_page = max(1, (total + page_size - 1) // page_size)
-    page = max(1, min(page, max_page))
-
-    rows = await get_subscriptions_page(page, page_size)
-
-    lines = [
-        "<b>👥 Подписки</b>",
-        f"Всего платящих: <b>{total}</b>",
-        "",
-    ]
-
-    for r in rows:
-        username = r.get("user_username")
-        label = f"@{username}" if username else f"ID {r.get('user_tg_id')}"
-        lines.append(
-            f"{label}\n"
-            f"Платежей: {r.get('payments_count')} | "
-            f"Дней: {r.get('total_days')} | "
-            f"{r.get('total_rub', 0):.2f} ₽ / {r.get('total_stars', 0)} ⭐"
-        )
-
-    kb = InlineKeyboardBuilder()
-    if page > 1:
-        kb.button(text="◀️", callback_data=f"admin:payments:subs:{page-1}")
-    if page < max_page:
-        kb.button(text="▶️", callback_data=f"admin:payments:subs:{page+1}")
-    kb.button(text="⬅️ Назад", callback_data="admin:payments")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 1, 1)
-
-    await _edit_or_send(callback.message, state, "\n".join(lines), kb.as_markup())
-    await callback.answer()
