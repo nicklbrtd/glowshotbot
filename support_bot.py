@@ -338,6 +338,7 @@ async def main():
                 )
         except Exception:
             pass
+        await message.answer(f"Тикет #{ticket_id} закрыт ✅")
 
     # --- Обработка сообщений из чата поддержки (SUPPORT_CHAT_ID) ---
 
@@ -400,40 +401,6 @@ async def main():
         await message.answer(f"Ответ на тикет #{ticket_id} отправлен ✅")
 
 
-    # --- Диалог оператора с пользователем в личке бота ---
-
-    @dp.message(F.chat.id != SUPPORT_CHAT_ID)
-    async def handle_operator_private_chat(message: Message):
-        """
-        Если оператор взял тикет (/h <id>) — любые его сообщения в личке бота
-        пересылаем пользователю по активному тикету.
-        """
-        op_id = message.from_user.id
-
-        # если оператор не ведёт тикет — ничего не делаем, пускай обработает handle_support ниже
-        if op_id not in active_ticket_by_operator:
-            return
-
-        tid = active_ticket_by_operator[op_id]
-        uid = ticket_user.get(tid)
-        if not uid:
-            await message.answer("Тикет не найден или уже закрыт.")
-            active_ticket_by_operator.pop(op_id, None)
-            return
-
-        try:
-            header = "💬 <b>Сообщение от оператора</b>\n" f"Тикет #{tid}\n\n"
-            if message.text:
-                await message.bot.send_message(uid, header + message.text)
-            else:
-                await message.bot.send_message(uid, header + "📎 Вложение")
-                await message.forward(uid)
-        except Exception:
-            pass
-
-        await message.answer(f"Отправлено пользователю по тикету #{tid} ✅")
-
-
     @dp.message()
     async def handle_support(message: Message):
         """ 
@@ -446,6 +413,28 @@ async def main():
             return
 
         user = message.from_user
+
+        # Если это оператор в личке бота и он ведёт тикет — пересылаем пользователю
+        if user.id in active_ticket_by_operator:
+            tid = active_ticket_by_operator[user.id]
+            uid = ticket_user.get(tid)
+            if not uid:
+                await message.answer("Тикет не найден или уже закрыт.")
+                active_ticket_by_operator.pop(user.id, None)
+                return
+
+            try:
+                header = "💬 <b>Сообщение от оператора</b>\n" f"Тикет #{tid}\n\n"
+                if message.text:
+                    await message.bot.send_message(uid, header + message.text)
+                else:
+                    await message.bot.send_message(uid, header + "📎 Вложение")
+                    await message.forward(uid)
+            except Exception:
+                pass
+
+            await message.answer(f"Отправлено пользователю по тикету #{tid} ✅")
+            return
         # Если по пользователю уже идёт диалог по активному тикету — пересылаем оператору
         if user.id in active_ticket_by_user:
             tid = active_ticket_by_user[user.id]
