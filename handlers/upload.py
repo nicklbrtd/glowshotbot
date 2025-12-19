@@ -36,7 +36,8 @@ from database import (
 	count_photo_reports_for_photo,
 	get_photo_rank_in_day,
 	get_link_ratings_count_for_photo,
-	get_photo_skip_count_for_photo
+	get_photo_skip_count_for_photo,
+    get_comments_for_photo_sorted,
 )
 from utils.time import get_moscow_now
 
@@ -880,7 +881,11 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         lines.append(f"⚠️ Плохие (1–5): <b>{bad_cnt}</b>")
         lines.append(f"⏭ Скип: <b>{skip_cnt}</b>")
         lines.append(f"🚨 Жалобы: <b>{reports_cnt}</b>")
-        lines.append(f"📅 Активность: <b>{activity_days}</b>")
+        if str(activity_days).isdigit():
+            d_int = int(activity_days)
+            lines.append(f"📅 Активность: <b>{d_int}</b> {_plural_ru(d_int, 'день', 'дня', 'дней')}")
+        else:
+            lines.append(f"📅 Активность: <b>{activity_days}</b>")
     else:
         lines.append("🏆 Место в топ (сейчас): 💎 <b>Премиум</b>")
         lines.append("🙈 Не оценившие: 💎 <b>Премиум</b>")
@@ -1470,138 +1475,125 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- Comments handler ---
 @router.callback_query(F.data.startswith("myphoto:comments:"))
 async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
 
-    parts = callback.data.split(":")
-    # old: myphoto:comments:<pid>:<page>
-    # new: myphoto:comments:<pid>:<page>:<sort_key>:<sort_dir>:<show_sort>
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка.")
+        return
+
     try:
         photo_id = int(parts[2])
-        page = int(parts[3])
     except Exception:
         await callback.answer("Ошибка.")
         return
 
-    sort_key = "date"
-    sort_dir = "desc"
-    show_sort = False
-
-    if len(parts) >= 6:
-        if parts[4] in {"date", "score"}:
-            sort_key = parts[4]
-        if parts[5] in {"asc", "desc"}:
-            sort_dir = parts[5]
-    if len(parts) >= 7:
-        show_sort = parts[6] == "1"
+    # page optional
+    try:
+        page = int(parts[3]) if len(parts) >= 4 else 0
+    except Exception:
+        page = 0
 
     photo = await get_photo_by_id(photo_id)
-    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
+    if photo is None or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+    if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
+        await callback.answer("Нет доступа.", show_alert=True)
         return
 
     per_page = 15
-    page = max(0, page)
+    if page < 0:
+        page = 0
     offset = page * per_page
 
     # counts
-    anon_count = 0
-    public_count = 0
     try:
         counts = await get_comment_counts_for_photo(photo_id)
-        anon_count = int(counts.get("anonymous") or 0)
-        public_count = int(counts.get("public") or 0)
     except Exception:
-        pass
+        counts = {"public": 0, "anonymous": 0}
 
-    # comments (+1 for next page)
+    public_cnt = int(counts.get("public") or 0)
+    anon_cnt = int(counts.get("anonymous") or 0)
+
+    # list
     try:
-        comments = await get_comments_for_photo(photo_id, limit=per_page + 1, offset=offset)
+        rows = await get_comments_for_photo_sorted(
+            photo_id,
+            limit=per_page + 1,
+            offset=offset,
+            sort_key="date",
+            sort_dir="desc",
+        )
     except Exception:
-        # fallback to old function if something goes wrong
-        try:
-            comments = await get_comments_for_photo(photo_id, limit=per_page + 1, offset=offset)
-        except Exception:
-            comments = []
+        rows = []
 
-    has_next = len(comments) > per_page
-    comments = comments[:per_page]
+    has_next = len(rows) > per_page
+    comments = rows[:per_page]
     has_prev = page > 0
 
-    header = (
-        "💬 <b>Комментарии к твоей фотографии:</b>\n"
-        f"💎 Анонимные: <b>{anon_count}</b>\n"
-        f"Публичные: <b>{public_count}</b>\n"
-    )
+    lines = []
+    lines.append("💬 <b>Комментарии к твоей фотографии:</b>")
+    lines.append(f"💎 Анонимные: <b>{anon_cnt}</b>")
+    lines.append(f"Публичные: <b>{public_cnt}</b>")
+    lines.append("")
 
     if not comments:
-        text = header + "\nПока комментариев нет."
-        kb = _myphoto_comments_kb(
-            photo_id, page, has_prev, has_next,
-            sort_key=sort_key, sort_dir=sort_dir, show_sort=show_sort
-        )
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb)
-            else:
-                await callback.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb,
-                disable_notification=True,
-            )
-        await callback.answer()
-        return
-
-    lines: list[str] = [header, ""]
-    start_num = offset + 1
-
-    for idx, c in enumerate(comments, start=start_num):
-        is_public = bool(int(c.get("is_public", 1)))
-        username = (c.get("username") or "").strip()
-        name = (c.get("author_name") or c.get("name") or "").strip()
-
-        if is_public:
-            who = f"@{username}" if username else "Пользователь"
-            if name:
-                who = f"{who} ({name})"
+        if (public_cnt + anon_cnt) > 0:
+            lines.append("Комментарии есть, но список не загрузился 😵‍💫")
+            lines.append("Нажми ещё раз или попробуй позже.")
         else:
-            who = "💎 Пользователь"
+            lines.append("Пока комментариев нет.")
+    else:
+        for i, c in enumerate(comments, start=1 + offset):
+            is_public = bool(c.get("is_public", 1))
+            username = (c.get("username") or "").strip()
+            author_name = (c.get("author_name") or "").strip()
+            score = c.get("score")
+            text = (c.get("text") or "").strip()
 
-        score_val = c.get("score")
-        if score_val is None:
-            score_val = "—"
+            if is_public and username:
+                who = f"@{username}" + (f" ({author_name})" if author_name else "")
+            elif is_public and author_name:
+                who = author_name
+            elif is_public:
+                who = "Пользователь"
+            else:
+                who = "💎 Пользователь"
 
-        body = (c.get("text") or "").strip()
-        if len(body) > 350:
-            body = body[:347] + "…"
+            score_str = "—"
+            try:
+                if score is not None:
+                    score_str = str(int(score))
+            except Exception:
+                score_str = "—"
 
-        lines.append(f"<b>{idx}.</b> {who} — <i>({score_val})</i>")
-        lines.append(f"Пишет: {body}")
-        lines.append("")
+            lines.append(f"{i}. {who} — <b>{score_str}</b>")
+            lines.append(f"Пишет: {text if text else '—'}")
 
-    text = "\n".join(lines).rstrip()
+    text_out = "\n".join(lines)
 
-    kb = _myphoto_comments_kb(
-        photo_id, page, has_prev, has_next,
-        sort_key=sort_key, sort_dir=sort_dir, show_sort=show_sort
-    )
+    kb = InlineKeyboardBuilder()
+    nav = []
+    if has_prev:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}"))
+    if nav:
+        kb.row(*nav)
+
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
 
     try:
         if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
+            await callback.message.edit_caption(caption=text_out, reply_markup=kb.as_markup())
         else:
-            await callback.message.edit_text(text, reply_markup=kb)
+            await callback.message.edit_text(text_out, reply_markup=kb.as_markup())
     except Exception:
         try:
             await callback.message.delete()
@@ -1609,8 +1601,8 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
             pass
         await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
+            text=text_out,
+            reply_markup=kb.as_markup(),
             disable_notification=True,
         )
 
