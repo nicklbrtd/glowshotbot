@@ -788,7 +788,22 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
         get_moscow_now_iso(),
     )
 
-
+async def get_premium_users_page(limit: int = 20, offset: int = 0) -> list[dict]:
+    """Страница премиум-пользователей (для админских списков)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM users
+            WHERE is_premium=1 AND is_deleted=0
+            ORDER BY premium_until DESC NULLS LAST, id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
+            int(limit),
+        )
+    return [dict(r) for r in rows]
 
 async def get_top_users_by_activity_events(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
     """(total, rows) — топ пользователей по количеству событий активности."""
