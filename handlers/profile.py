@@ -108,99 +108,13 @@ def _build_my_results_kb(idx: int, total: int) -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data.startswith("myresults:"))
 async def profile_my_results(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    if user is None:
-        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
-        return
-
-    parts = callback.data.split(":")
-    if len(parts) != 2:
-        await callback.answer()
-        return
-
-    try:
-        idx = int(parts[1])
-    except Exception:
-        idx = 0
-
-    items = await get_my_results_for_user(user["id"])
-
-    if not items:
-        await callback.message.edit_text(
-            "🏅 <b>Мои итоги</b>\n\nПока нет фотографий, которые попадали в итоги.",
-            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
-        )
-        await callback.answer()
-        return
-
-    total = len(items)
-    idx = max(0, min(idx, total - 1))
-    it = items[idx]
-
-    kind = (it.get("kind") or "").strip()
-    place = it.get("place")
-    day_key = it.get("day_key")
-
-    if kind == "weekly_candidate":
-        kind_line = "🗓 Продвинуто в недельный отбор"
-    else:
-        kind_line = f"📅 Итоги дня • место #{place}" if place else "📅 Итоги дня"
-
-    date_str = "—"
-    if day_key:
-        try:
-            date_str = datetime.fromisoformat(day_key).strftime("%d.%m.%Y")
-        except Exception:
-            date_str = str(day_key)
-
-    avg = it.get("avg_rating")
-    cnt = it.get("ratings_count")
-
-    if avg is None:
-        rating_line = "⭐ Рейтинг: —"
-    else:
-        try:
-            avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-            rating_line = f"⭐ Рейтинг: <b>{avg_str}</b>"
-        except Exception:
-            rating_line = "⭐ Рейтинг: —"
-
-    if cnt is not None:
-        rating_line += f" ({cnt} оценок)"
-
-    title = it.get("title") or "Без названия"
-
-    caption = "\n".join([
-        "🏅 <b>Мои итоги</b>",
-        "",
-        f"<b>\"{title}\"</b>",
-        f"📅 Дата: {date_str}",
-        kind_line,
-        rating_line,
-    ])
-
-    kb = _build_my_results_kb(idx, total)
-
-    try:
-        await callback.message.edit_media(
-            media=InputMediaPhoto(media=it["file_id"], caption=caption),
-            reply_markup=kb,
-        )
-    except Exception:
-        try:
-            await callback.message.edit_text(caption, reply_markup=kb)
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=caption,
-                reply_markup=kb,
-                disable_notification=True,
-            )
+    """Temporary stub: user said they will change the logic for "Мои итоги" later."""
+    await callback.message.edit_text(
+        "🏅 <b>Мои итоги</b>\n\n"
+        "Пока тут заглушка — скоро будет новая логика итогов 💅",
+        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ В профиль"),
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -271,7 +185,8 @@ async def build_profile_view(user: dict):
             avg = summary.get("avg_rating")
             cnt = summary.get("ratings_count") or 0
             if avg is not None and cnt > 0:
-                avg_rating_text = f"{avg:.1f} ({cnt} оценок)"
+                avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
+                avg_rating_text = f"{avg_str} ({cnt} оценок)"
             elif cnt > 0:
                 avg_rating_text = f"{cnt} оценок"
             else:
@@ -287,7 +202,8 @@ async def build_profile_view(user: dict):
                 ratings_count = popular.get("ratings_count") or 0
                 avg_pop = popular.get("avg_rating")
                 if avg_pop is not None:
-                    popular_photo_metric = f"{avg_pop:.1f}★, {ratings_count} оценок"
+                    avg_str = f"{float(avg_pop):.2f}".rstrip("0").rstrip(".")
+                    popular_photo_metric = f"{avg_str}★, {ratings_count} оценок"
                 else:
                     popular_photo_metric = f"{ratings_count} оценок"
         except Exception:
@@ -376,7 +292,7 @@ async def build_profile_view(user: dict):
         loc_parts.append(city)
 
     if loc_parts:
-        text_lines.append(f"📍 Локация: {', '.join(loc_parts)}")
+        text_lines.append(f"📍Локация: {', '.join(loc_parts)}")
 
     # Ссылка (для премиум-пользователей, если указана)
     tg_link = user.get("tg_channel_link")
@@ -461,38 +377,19 @@ async def profile_menu(callback: CallbackQuery):
         return
 
     text, markup = await build_profile_view(user)
-    chat_id = callback.message.chat.id
 
-    if callback.message.photo:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+    # Профиль — всегда текстовый. Меню-сообщение НЕ удаляем.
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        # Если это меню-картинка или нельзя редактировать — просто отправляем профиль отдельным сообщением.
         await callback.message.bot.send_message(
-            chat_id=chat_id,
+            chat_id=callback.message.chat.id,
             text=text,
             reply_markup=markup,
+            parse_mode="HTML",
             disable_notification=True,
         )
-    else:
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=markup,
-            )
-        except Exception:
-            # Если не получилось отредактировать — удаляем и отправляем новое
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-
-            await callback.message.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=markup,
-                disable_notification=True,
-            )
 
     await callback.answer()
 
@@ -514,6 +411,7 @@ async def profile_back_to_profile(callback: CallbackQuery):
         await callback.message.edit_text(
             text,
             reply_markup=markup,
+            parse_mode="HTML",
         )
     except Exception:
         try:
@@ -525,6 +423,7 @@ async def profile_back_to_profile(callback: CallbackQuery):
             chat_id=callback.message.chat.id,
             text=text,
             reply_markup=markup,
+            parse_mode="HTML",
             disable_notification=True,
         )
 
@@ -541,7 +440,6 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="🖼 Фото профиля", callback_data="profile:edit_avatar")
     kb.button(text="🪪 Имя", callback_data="profile:edit_name")
     kb.button(text="🎂 Возраст", callback_data="profile:edit_age")
     kb.button(text="📝 Описание", callback_data="profile:edit_bio")
@@ -551,11 +449,12 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     kb.button(text="🌍 Страна", callback_data="profile:edit_country")
     kb.button(text="🗑 Удалить аккаунт", callback_data="profile:delete")
     kb.button(text="⬅️ Назад", callback_data="menu:profile")
-    kb.adjust(2, 2, 2, 2, 1, 1)
+    kb.adjust(2, 2, 2, 2, 1)
 
     await callback.message.edit_text(
         "✏️ Что хочешь изменить в профиле?",
         reply_markup=kb.as_markup(),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -571,17 +470,6 @@ async def profile_edit_name(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data == "profile:edit_avatar")
-async def profile_edit_avatar(callback: CallbackQuery):
-    """
-    Заглушка для изменения/добавления аватара профиля.
-    """
-    await callback.message.edit_text(
-        "Добавление фотографии профиля пока в разработке.\n\n"
-        "Скоро здесь можно будет загрузить или поменять свой аватар.",
-        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
-    )
-    await callback.answer()
 
 
 
