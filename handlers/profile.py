@@ -220,11 +220,11 @@ async def build_profile_view(user: dict):
     # Пол смайликом
     gender_raw = user.get("gender")
     if gender_raw == "Парень":
-        gender_icon = "🚹"
+        gender_icon = "🙋‍♂️"
     elif gender_raw == "Девушка":
-        gender_icon = "🚺"
+        gender_icon = "🙋‍♀️"
     elif gender_raw in ("Другое", "Other"):
-        gender_icon = "⚧️"
+        gender_icon = "🙋"
     elif gender_raw in ("Не важно", None, ""):
         gender_icon = "❔"
     else:
@@ -356,15 +356,29 @@ async def build_profile_view(user: dict):
             # В случае ошибки не ломаем профиль
             pass
 
-
     text_lines = [
         f"👤 <b>Твой профиль</b>{premium_badge}",
-        "",
-        f"<b>Имя:</b> {name}{age_part}",
-        f"<b>Пол:</b> {gender_icon}",
+        f"Имя: {name}{age_part} лет" if age else f"Имя: {name}",
+        f"Пол: {gender_icon}",
     ]
 
-    # Ссылка (для премиум-пользователей, если указана) — сразу под именем и полом
+    # Локация (опционально + можно скрыть)
+    city = (user.get("city") or "").strip()
+    country = (user.get("country") or "").strip()
+    show_city = bool(user.get("show_city", 1))
+    show_country = bool(user.get("show_country", 1))
+
+    loc_parts: list[str] = []
+    # по запросу: сначала страна, потом город
+    if country and show_country:
+        loc_parts.append(country)
+    if city and show_city:
+        loc_parts.append(city)
+
+    if loc_parts:
+        text_lines.append(f"📍 Локация: {', '.join(loc_parts)}")
+
+    # Ссылка (для премиум-пользователей, если указана)
     tg_link = user.get("tg_channel_link")
     if tg_link:
         display_link = tg_link.strip()
@@ -390,42 +404,36 @@ async def build_profile_view(user: dict):
         if username:
             display_link = f"@{username}"
 
-        text_lines.append(f"📡 <b>Ссылка:</b> {display_link}")
+        text_lines.append(f"🔗 Ссылка: {display_link}")
 
+    # Описание
+    text_lines.extend([
+        "",
+        "📝 <b>Описание:</b>",
+        user.get("bio") or "—",
+        "",
+    ])
 
-    city = (user.get("city") or "").strip()
-    country = (user.get("country") or "").strip()
-    show_city = bool(user.get("show_city", 1))
-    show_country = bool(user.get("show_country", 1))
+    # --- "Свернутая" статистика через spoiler ---
+    stats_lines = [
+        f"Всего загрузил: {total_photos}",
+        f"Дней в боте: {days_in_bot}",
+        f"Средняя оценка: {avg_rating_text}",
+        f"Самое популярное фото: {popular_photo_title} ({popular_photo_metric})",
+    ]
 
-    loc_parts: list[str] = []
-    if city and show_city:
-        loc_parts.append(city)
-    if country and show_country:
-        loc_parts.append(country)
-
-    if loc_parts:
-        text_lines.append(f"📍 <b>Локация:</b> {' • '.join(loc_parts)}")
-
-    # Описание профиля — тоже наверху, сразу после ссылки (если есть)
-    text_lines.extend(
-        [
-            "",
-            "📝 <b>Описание:</b>",
-            user.get("bio") or "—",
-            "",
-            f"<b>Всего загрузил:</b> {total_photos} 📷",
-            f"<b>Дней в боте:</b> {days_in_bot} 📆",
-            "",
-            "📊 <b>Твоя статистика:</b>",
-            f"• ⭐ Средняя оценка по фото: {avg_rating_text}",
-            f"• 🔝 Самое популярное фото: {popular_photo_title} ({popular_photo_metric})",
-            f"• 📈 Позиция в топ недели: #{weekly_top_position}",
-            "",
-            "💎 <b>GlowShot Premium</b>",
-            f"Статус: {premium_status_line}",
-        ]
+    stats_block = (
+        "📊 <b>Моя статистика</b>\n"
+        f"<blockquote><span class=\"tg-spoiler\">{'\n'.join(stats_lines)}</span></blockquote>"
     )
+    text_lines.append(stats_block)
+
+    # Premium
+    text_lines.extend([
+        "",
+        "💎 <b>GlowShot Premium</b>",
+        f"Статус: {premium_status_line}",
+    ])
 
     if premium_extra_line:
         text_lines.append(premium_extra_line)
