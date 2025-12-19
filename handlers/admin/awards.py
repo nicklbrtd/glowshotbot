@@ -22,7 +22,14 @@ from database import (
     get_user_by_id,
 )
 
-from .common import _ensure_admin
+from .common import (
+    _ensure_admin,
+    _ensure_user,
+    UserAdminStates,
+    UserAwardsStates,
+    RoleStates,
+    PaymentsStates,
+)
 from .users import UserAdminStates  # чтобы вернуть FSM назад после создания награды
 
 

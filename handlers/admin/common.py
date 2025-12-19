@@ -1,29 +1,46 @@
 
 
+
 from __future__ import annotations
 
 # =============================================================
-# ==== ОБЩЕЕ ДЛЯ АДМИНКИ (helpers / types) ====================
+# ==== ОБЩЕЕ ДЛЯ АДМИНКИ (helpers / types / states) ===========
 # =============================================================
 
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
-from config import MASTER_ADMIN_ID
+from config import MASTER_ADMIN_ID, ADMIN_PASSWORD
 from database import get_user_by_tg_id
+from keyboards.common import build_admin_menu, build_back_kb
 
+
+# =============================================================
+# ==== TYPES ===================================================
+# =============================================================
 
 UserEvent = Union[Message, CallbackQuery]
 
 
-def _safe_int(v) -> int:
+# =============================================================
+# ==== SAFE UTILS =============================================
+# =============================================================
+
+def _safe_int(v: Any) -> int:
     """Безопасно привести значение к int."""
     try:
         return int(v or 0)
     except Exception:
         return 0
 
+
+# =============================================================
+# ==== ACCESS CHECKS ==========================================
+# =============================================================
 
 async def _get_from_user(event: UserEvent):
     """Вернуть Telegram user из Message/CallbackQuery."""
@@ -87,10 +104,133 @@ async def _ensure_admin(event: UserEvent) -> Optional[dict]:
     return user
 
 
+# =============================================================
+# ==== FSM STATES =============================================
+# =============================================================
+
+class AdminStates(StatesGroup):
+    """Вход в админку по паролю."""
+    waiting_password = State()
+
+
+class RoleStates(StatesGroup):
+    """Управление ролями (добавить/удалить/премиум длительность)."""
+    waiting_user_for_add = State()
+    waiting_user_for_remove = State()
+    waiting_premium_duration = State()
+
+
+class BroadcastStates(StatesGroup):
+    """Рассылка: ждём текст, затем подтверждение."""
+    waiting_text = State()
+
+
+class PaymentsStates(StatesGroup):
+    """Раздел «Платежи»: сервисные состояния (если нужно)."""
+    idle = State()
+
+
+class UserAdminStates(StatesGroup):
+    """Раздел «Пользователи»: ожидаем идентификатор."""
+    waiting_identifier_for_profile = State()
+
+
+class UserAwardsStates(StatesGroup):
+    """Выдача кастомной награды в разделе пользователей."""
+    waiting_custom_award_text = State()
+
+
+class AchievementStates(StatesGroup):
+    """Состояния для работы с ачивками/наградами (если используешь отдельный awards.py)."""
+    waiting_user_for_beta = State()
+    waiting_custom_user = State()
+    waiting_custom_title = State()
+    waiting_custom_description = State()
+    waiting_custom_icon = State()
+    waiting_custom_level = State()
+    waiting_manage_user = State()
+    waiting_edit_award_text = State()
+    waiting_edit_award_icon = State()
+
+
+# =============================================================
+# ==== UI HELPERS =============================================
+# =============================================================
+
+async def _get_ctx_ids(state: FSMContext, prefix: str) -> tuple[int | None, int | None]:
+    data = await state.get_data()
+    return data.get(f"{prefix}_chat_id"), data.get(f"{prefix}_msg_id")
+
+
+async def _set_ctx_ids(state: FSMContext, prefix: str, chat_id: int, msg_id: int) -> None:
+    await state.update_data(**{f"{prefix}_chat_id": chat_id, f"{prefix}_msg_id": msg_id})
+
+
+async def edit_or_answer(
+    message: Message,
+    state: FSMContext,
+    prefix: str,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Держим одно «служебное» сообщение для раздела (по prefix).
+
+    Хранит в FSM:
+      {prefix}_chat_id
+      {prefix}_msg_id
+
+    Пытается edit -> если не вышло, шлёт новое и обновляет ids.
+    """
+    chat_id, msg_id = await _get_ctx_ids(state, prefix)
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            # если сообщение старое/не то — попробуем просто продолжить
+            pass
+
+    sent = await message.answer(text, reply_markup=reply_markup)
+    await _set_ctx_ids(state, prefix, sent.chat.id, sent.message_id)
+
+
+def kb_one_back(text: str, callback_data: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=text, callback_data=callback_data)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 __all__ = [
+    # constants
+    "ADMIN_PASSWORD",
+    "MASTER_ADMIN_ID",
+    "build_admin_menu",
+    "build_back_kb",
+
+    # types & checks
     "UserEvent",
     "_safe_int",
     "_get_from_user",
     "_ensure_user",
     "_ensure_admin",
+
+    # states
+    "AdminStates",
+    "RoleStates",
+    "BroadcastStates",
+    "PaymentsStates",
+    "UserAdminStates",
+    "UserAwardsStates",
+    "AchievementStates",
+
+    # helpers
+    "edit_or_answer",
+    "kb_one_back",
 ]
