@@ -11,6 +11,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from handlers.payments import TARIFFS
+from keyboards.common import build_admin_menu
 
 from database import (
     get_user_by_tg_id,
@@ -59,6 +60,102 @@ from database import (
 )
 
 router = Router()
+
+
+# ================= ADMIN MENU / STATS =================
+
+@router.callback_query(F.data == "admin:menu")
+async def admin_menu(callback: CallbackQuery, state: FSMContext):
+    """Главный экран админ-панели."""
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    text = (
+        "⚙️ <b>Админ-панель GlowShot</b>\n\n"
+        "Выбирай раздел ниже 👇"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=build_admin_menu())
+    except Exception:
+        await callback.message.answer(text, reply_markup=build_admin_menu())
+
+    await callback.answer()
+
+
+def _safe_int(v) -> int:
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+@router.callback_query(F.data == "admin:stats")
+async def admin_stats(callback: CallbackQuery, state: FSMContext):
+    """Сводная статистика (быстро, без сложных фильтров)."""
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    total_users = active_24h = online_recent = total_events = new_7d = premium_total = 0
+
+    try:
+        total_users = _safe_int(await get_total_users())
+    except Exception:
+        pass
+
+    try:
+        active_24h = _safe_int(await get_active_users_last_24h())
+    except Exception:
+        pass
+
+    try:
+        online_recent = _safe_int(await get_online_users_recent())
+    except Exception:
+        pass
+
+    try:
+        total_events = _safe_int(await get_total_activity_events())
+    except Exception:
+        pass
+
+    try:
+        new_7d = _safe_int(await get_new_users_last_days(7))
+    except Exception:
+        pass
+
+    try:
+        prem = await get_premium_stats()
+        if isinstance(prem, dict):
+            premium_total = _safe_int(prem.get("total") or prem.get("premium_total") or prem.get("count"))
+        else:
+            premium_total = _safe_int(prem)
+    except Exception:
+        pass
+
+    text = (
+        "📊 <b>Статистика</b>\n\n"
+        f"👥 Всего пользователей: <b>{total_users}</b>\n"
+        f"⚡ Активных за 24ч: <b>{active_24h}</b>\n"
+        f"🟢 Онлайн (recent): <b>{online_recent}</b>\n"
+        f"🧠 Всего событий активности: <b>{total_events}</b>\n"
+        f"🆕 Новых за 7 дней: <b>{new_7d}</b>\n"
+        f"🌟 Премиум (всего): <b>{premium_total}</b>\n"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🧾 Логи / ошибки", callback_data="admin:logs:page:1")
+    kb.button(text="🙍‍♂️ Пользователи", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()
 
 # ================= LOGS / ERRORS (Admin) =================
 
@@ -2119,39 +2216,6 @@ async def admin_check_password(message: Message, state: FSMContext):
 @router.message(AdminStates.waiting_password)
 async def admin_waiting_password_non_text(message: Message):
     await message.delete()
-
-
-# ================= МЕНЮ АДМИНА =================
-
-@router.callback_query(F.data == "admin:menu")
-async def admin_menu_callback(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_admin(callback)
-    if user is None:
-        return
-
-    await state.clear()
-
-    text = ADMIN_PANEL_TEXT
-    try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=build_admin_menu(),
-        )
-    except Exception:
-        await callback.message.answer(
-            text,
-            reply_markup=build_admin_menu(),
-        )
-
-    try:
-        await callback.answer()
-    except TelegramBadRequest as e:
-        # старый/протухший callback – можно тихо игнорировать
-        if "query is too old" in str(e) or "query ID is invalid" in str(e):
-            pass
-        else:
-            raise
-
 
 # ====== Конфиг ролей для управления ======
 ROLE_CONFIG = {
