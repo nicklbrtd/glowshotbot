@@ -50,18 +50,17 @@ async def get_photo_ratings_stats(photo_id: int) -> dict:
       ratings_count: int
       avg_rating: float|None
       last_rating: int|None
-      good_count: int  (value <= 5)
-      bad_count: int   (value >= 6)
+      good_count: int  (value >= 6)
+      bad_count: int   (value <= 5)
       rated_users: int (distinct user_id)
     """
     p = _assert_pool()
-
     query = """
         SELECT
             COUNT(*)::int AS ratings_count,
             AVG(value)::float AS avg_rating,
-            SUM(CASE WHEN value >= 6 THEN 1 ELSE 0 END) AS good_count,
-            SUM(CASE WHEN value <= 5 THEN 1 ELSE 0 END) AS bad_count
+            SUM(CASE WHEN value >= 6 THEN 1 ELSE 0 END)::int AS good_count,
+            SUM(CASE WHEN value <= 5 THEN 1 ELSE 0 END)::int AS bad_count,
             COUNT(DISTINCT user_id)::int AS rated_users
         FROM ratings
         WHERE photo_id = $1

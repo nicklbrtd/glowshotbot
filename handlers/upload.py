@@ -791,7 +791,11 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         is_premium_user = False
 
     # Base stats
-    r = await get_photo_ratings_stats(photo_id)
+    try:
+        r = await get_photo_ratings_stats(photo_id)
+    except Exception:
+        await callback.answer("⚠️ Не удалось загрузить статистику. Попробуй ещё раз через пару секунд.", show_alert=True)
+        return
     ratings_count = int(r.get("ratings_count") or 0)
     last_rating = r.get("last_rating")
     avg_rating = r.get("avg_rating")
