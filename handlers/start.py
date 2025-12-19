@@ -120,7 +120,7 @@ def build_menu_text(is_premium: bool) -> str:
 
     lines.append("")
     lines.append(
-        "Выкладывай, Оценивай и Пибеждай.\n"
+        "Выкладывай, Оценивай и Побеждай.\n"
         "<b>Группа:</b> @groupofglowshot"
     )
 
