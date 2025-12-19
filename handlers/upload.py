@@ -44,11 +44,10 @@ class MyPhotoStates(StatesGroup):
     """Состояния мастера загрузки фотографии.
 
     Новый порядок:
-    1) выбор категории работы;
-    2) загрузка фото;
-    3) название;
-    4) выбор типа устройства;
-    5) описание (необязательно).
+    1) загрузка фото;
+    2) название.
+
+    (Устройство/описание будут добавляться позже через редактирование.)
     """
 
     waiting_category = State()
@@ -152,6 +151,13 @@ def is_admin_user(user: dict) -> bool:
     return bool(user.get("is_admin"))
 
 
+def _ready_wording(user: dict) -> str:
+    g = (user.get("gender") or "").strip().lower()
+    if g in {"м", "муж", "мужской", "male", "man", "парень"}:
+        return "готов"
+    if g in {"ж", "жен", "женский", "female", "woman", "девушка"}:
+        return "готова"
+    return "готов(а)"
 
 
 def build_my_photo_caption(photo: dict) -> str:
@@ -198,19 +204,7 @@ def build_my_photo_caption(photo: dict) -> str:
     return "\n".join(caption_lines)
 
 
-def build_my_photo_keyboard(
-    photo_id: int,
-    has_prev: bool = False,
-    has_next: bool = False,
-) -> InlineKeyboardMarkup:
-    """
-    Новая клавиатура «Моя фотография».
-
-    • Кнопки по 2 на строку.
-    • Все кнопки всегда показываются (ограничения — внутри обработчиков).
-    • Если фото одно — «В меню» одной строкой.
-    • Если фото два — снизу строка: (Назад?) + В меню + (Вперёд?)
-    """
+def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     rows.append([
@@ -224,20 +218,11 @@ def build_my_photo_keyboard(
     ])
 
     rows.append([
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
-        InlineKeyboardButton(text="📤 Добавить фотографию", callback_data="myphoto:add"),
     ])
 
-    if has_prev or has_next:
-        nav_row: list[InlineKeyboardButton] = []
-        if has_prev:
-            nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:nav:{photo_id}:prev"))
-        nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
-        if has_next:
-            nav_row.append(InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"myphoto:nav:{photo_id}:next"))
-        rows.append(nav_row)
-    else:
-        rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")])
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -499,8 +484,6 @@ async def _show_my_photo_section(
     service_message: Message,
     state: FSMContext,
     photo: dict,
-    has_prev: bool = False,
-    has_next: bool = False,
 ) -> None:
     """Показ раздела «Моя фотография» одним сообщением с фото, подписью и кнопками.
 
@@ -511,11 +494,7 @@ async def _show_my_photo_section(
     """
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(
-        photo["id"],
-        has_prev=has_prev,
-        has_next=has_next,
-    )
+    kb = build_my_photo_keyboard(photo["id"])
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
     try:
@@ -541,8 +520,6 @@ async def _edit_or_replace_my_photo_message(
     callback: CallbackQuery,
     state: FSMContext,
     photo: dict,
-    has_prev: bool,
-    has_next: bool,
 ) -> None:
     """
     UX:
@@ -553,11 +530,7 @@ async def _edit_or_replace_my_photo_message(
     chat_id = msg.chat.id
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(
-        photo["id"],
-        has_prev=has_prev,
-        has_next=has_next,
-    )
+    kb = build_my_photo_keyboard(photo["id"])
 
     # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
     try:
@@ -612,8 +585,8 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    # применяем лимиты
-    photos = photos[: (2 if is_premium_user else 1)]
+    # теперь у всех только 1 активная фотография
+    photos = photos[:1]
 
     photo: dict | None = None
     if photos:
@@ -647,20 +620,22 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
 
     if photo is None:
         kb = InlineKeyboardBuilder()
-        kb.button(text="📤 Добавить фото", callback_data="myphoto:add")
+        kb.button(text="📤 Загрузить", callback_data="myphoto:add")
         kb.button(text="⬅️ В меню", callback_data="menu:back")
-        kb.button(text="❓ Помощь", callback_data="myphoto:help")
-        kb.adjust(1, 2)
+        kb.adjust(1)
 
+        ready = _ready_wording(user)
         text = (
             "📸 <b>Загрузить фотографию!</b>\n\n"
             "Здесь оценивают кадры, а не твою внешность.\n\n"
             "<b>Правила загрузки:</b>\n"
-            "• Один кадр в день на пользователя;\n"
-            "• Без ссылок, @username и рекламы в названии и описании;\n"
+            "• Можно загрузить только один кадр в день;\n"
+            "• Селфи / фотографии, где изображён(а) ты сам(а) — нельзя;\n"
+            "• Без рекламы: названия, ссылки и прочее;\n"
             "• Только свои фотографии;\n"
             "• Без откровенного контента и насилия.\n\n"
-            "Когда будешь готов — жми «Добавить фото» ниже."
+            "Администрация вправе удалить контент и ограничить доступ к боту при нарушении правил.\n\n"
+            f"Когда будешь {ready} — жми «Загрузить»."
         )
 
         try:
@@ -694,11 +669,19 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                 "Как админ ты можешь выложить новый кадр поверх старого."
             )
         else:
-            remaining = _format_time_until_next_upload()
-            text = (
-                "Ты уже выкладывал(а) фото сегодня и удалил(а) его.\n\n"
-                f"Новый кадр можно будет выложить {remaining}."
-            )
+            # Premium может удалять/перезаливать без дневного ограничения
+            if is_premium_user:
+                kb.button(text="➕ Добавить фото", callback_data="myphoto:add")
+                text = (
+                    "Ты удалил(а) свою фотографию.\n\n"
+                    "Как Premium пользователь ты можешь загрузить новую сразу."
+                )
+            else:
+                remaining = _format_time_until_next_upload()
+                text = (
+                    "Ты уже выкладывал(а) фото сегодня и удалил(а) его.\n\n"
+                    f"Новый кадр можно будет выложить {remaining}."
+                )
 
         kb.button(text="⬅️ В меню", callback_data="menu:back")
         kb.adjust(1)
@@ -724,25 +707,11 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Считаем, есть ли соседние работы для навигации
-    has_prev = False
-    has_next = False
-    if len(photos) > 1:
-        idx = 0
-        for i, p in enumerate(photos):
-            if p["id"] == photo["id"]:
-                idx = i
-                break
-        has_prev = idx > 0
-        has_next = idx < len(photos) - 1
-
     await _show_my_photo_section(
         chat_id=callback.message.chat.id,
         service_message=callback.message,
         state=state,
         photo=photo,
-        has_prev=has_prev,
-        has_next=has_next,
     )
 
     await callback.answer()
@@ -754,76 +723,22 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     Навигация по своим фотографиям: вперёд / назад.
     Работает на основе списка активных работ пользователя.
     """
-    user = await _ensure_user(callback)
-    if user is None:
-        return
+    await callback.answer("Сейчас доступна только одна активная фотография.")
+    return
+# ========= ДОБАВЛЕНИЕ ФОТО =========
 
-    parts = callback.data.split(":")
-    # ['myphoto', 'nav', '<photo_id>', '<prev|next>']
-    if len(parts) != 4:
-        await callback.answer()
-        return
 
-    _, _, pid, direction = parts
+# ---- helper for upload limit after delete ----
+async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool) -> tuple[bool, str | None]:
+    if is_admin or is_premium_user:
+        return True, None
     try:
-        current_photo_id = int(pid)
-    except ValueError:
-        await callback.answer()
-        return
-
-    user_id = user["id"]
-
-    # Применяем те же правила, что и в my_photo_menu:
-    # сортировка + лимит активных фото (1 без Premium, 2 с Premium)
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
+        today_count = await count_today_photos_for_user(int(user["id"]), include_deleted=True)
     except Exception:
-        is_premium_user = False
-
-    photos = await get_latest_photos_for_user(user_id, limit=10)
-    if not photos:
-        await callback.answer("У тебя пока нет активных фотографий.", show_alert=True)
-        return
-
-    try:
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
-    except Exception:
-        pass
-
-    photos = photos[: (2 if is_premium_user else 1)]
-    if not photos:
-        await callback.answer("У тебя пока нет активных фотографий.", show_alert=True)
-        return
-
-    # Ищем индекс текущего кадра
-    idx = 0
-    for i, p in enumerate(photos):
-        if p["id"] == current_photo_id:
-            idx = i
-            break
-
-    if direction == "prev" and idx > 0:
-        new_idx = idx - 1
-    elif direction == "next" and idx < len(photos) - 1:
-        new_idx = idx + 1
-    else:
-        new_idx = idx
-
-    photo = photos[new_idx]
-
-    has_prev = new_idx > 0
-    has_next = new_idx < len(photos) - 1
-
-    await _edit_or_replace_my_photo_message(
-        callback=callback,
-        state=state,
-        photo=photo,
-        has_prev=has_prev,
-        has_next=has_next,
-    )
-    await callback.answer()
+        today_count = 0
+    if today_count >= 1:
+        return False, _format_time_until_next_upload()
+    return True, None
 
 
 # ========= ДОБАВЛЕНИЕ ФОТО =========
@@ -833,7 +748,7 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
 async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     """Старт мастера загрузки новой работы.
 
-    Шаг 1 — выбор категории (постер / обычная фотография).
+    Шаг 1 — загрузка фотографии.
     """
 
     user = await _ensure_user(callback)
@@ -850,151 +765,72 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     except Exception:
         is_premium_user = False
 
-    max_allowed = 2 if is_premium_user else 1
-    if len(active_photos) >= max_allowed:
-        if not is_premium_user:
-            await callback.answer(
-                "У тебя уже есть активная фотография. Удали её или купи GlowShot Premium 💎, чтобы добавить вторую.",
-                show_alert=True,
-            )
-        else:
-            await callback.answer(
-                "У тебя уже загружено 2 активные фотографии — это максимум даже для Premium.",
-                show_alert=True,
-            )
-        return
     is_admin = is_admin_user(user)
-    photo = await get_today_photo_for_user(user_id)
 
-    today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
-    daily_limit = 2 if is_premium_user else 1
-
-    if (today_count >= daily_limit) and (not is_admin):
-        remaining = _format_time_until_next_upload()
+    # Теперь загрузка новой фотографии возможна только после ручного удаления текущей активной.
+    # (Исключение: админ может перезаливать.)
+    if (not is_admin) and active_photos:
         await callback.answer(
-            f"Ты уже выложил(а) {today_count} фото сегодня.\n\n"
-            f"Новый кадр можно будет выложить {remaining}.",
+            "Сначала удали текущую фотографию (🗑 Удалить) в разделе «Моя фотография»,\nа потом загружай новую.",
             show_alert=True,
         )
         return
-    
+
+    photo = await get_today_photo_for_user(user_id)
+
+    # Ограничение: обычные — 1 раз в день, premium — без лимита
+    if (not is_premium_user) and (not is_admin):
+        today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
+        if today_count >= 1:
+            remaining = _format_time_until_next_upload()
+            await callback.answer(
+                f"Ты уже выложил(а) фото сегодня.\n\n"
+                f"Новый кадр можно будет выложить {remaining}.",
+                show_alert=True,
+            )
+            return
 
     # Админу позволяем перезаливать: если сегодня уже есть активный кадр — мягко удаляем его
     if is_admin and photo is not None and not photo.get("is_deleted"):
         await mark_photo_deleted(photo["id"])
 
-    await state.set_state(MyPhotoStates.waiting_category)
+    await state.set_state(MyPhotoStates.waiting_photo)
     await state.update_data(
         upload_msg_id=callback.message.message_id,
         upload_chat_id=callback.message.chat.id,
         upload_is_photo=bool(getattr(callback.message, "photo", None)),
         upload_user_id=user_id,
-        category=None,
         file_id=None,
         title=None,
-        device_type=None,
-        description=None,
     )
 
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎨 Постер", callback_data="myphoto:category:poster")
-    kb.button(text="📷 Обычная фотография", callback_data="myphoto:category:photo")
-    kb.adjust(1, 1)
-
-    text = (
-        "Выбери категорию работы:\n\n"
-        "Это можно будет использовать для отдельных рейтингов постеров и обычных фотографий."
-    )
+    text = "Теперь отправь фотографию (1 шт.), которую хочешь выложить."
 
     try:
         if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+            await callback.message.edit_caption(caption=text, reply_markup=None)
         else:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup())
+            await callback.message.edit_text(text, reply_markup=None)
     except TelegramBadRequest:
         try:
             await callback.message.delete()
         except Exception:
             pass
-        await callback.message.bot.send_message(
+        sent = await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
             text=text,
-            reply_markup=kb.as_markup(),
             disable_notification=True,
         )
+        # важно: обновим upload_msg_id, иначе дальнейшие шаги будут ссылаться на удалённое сообщение
+        await state.update_data(upload_msg_id=sent.message_id, upload_chat_id=sent.chat.id, upload_is_photo=False)
+
     await callback.answer()
 
 
 @router.callback_query(MyPhotoStates.waiting_category, F.data.startswith("myphoto:category:"))
 async def myphoto_choose_category(callback: CallbackQuery, state: FSMContext):
-    """Пользователь выбрал категорию работы."""
-
-    try:
-        _, _, code = callback.data.split(":", 2)
-    except ValueError:
-        code = "photo"
-
-    if code not in {"poster", "photo"}:
-        code = "photo"
-
-    data = await state.get_data()
-    data["category"] = code
-    await state.set_data(data)
-
-    upload_msg_id = data.get("upload_msg_id")
-    upload_chat_id = data.get("upload_chat_id")
-
-    if not upload_msg_id or not upload_chat_id:
-        await state.clear()
-        await callback.message.answer(
-            "Сессия загрузки фотографии сбилась. Зайди в раздел «Моя фотография» и попробуй ещё раз.",
-            disable_notification=True,
-        )
-        await callback.answer()
-        return
-
-    # Показываем пользователю выбранную категорию и просим отправить фото
-    draft_text = _build_draft_caption(
-        category=code,
-        title=None,
-        device_type=None,
-        description=None,
-    )
-
-    # Replacement block for safe edit of text/caption
-    await state.set_state(MyPhotoStates.waiting_photo)
-
-    new_text = (
-        f"{draft_text}\n\n"
-        "Теперь отправь фотографию (1 шт.), которую хочешь выложить на сегодня."
-    )
-
-    try:
-        if data.get("upload_is_photo"):
-            await callback.message.bot.edit_message_caption(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                caption=new_text,
-            )
-        else:
-            await callback.message.bot.edit_message_text(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                text=new_text,
-            )
-    except TelegramBadRequest:
-        # Фоллбек: если сообщение нельзя отредактировать — отправим новое и переедем на него
-        sent = await callback.message.bot.send_message(
-            chat_id=upload_chat_id,
-            text=new_text,
-            disable_notification=True,
-        )
-        await state.update_data(
-            upload_msg_id=sent.message_id,
-            upload_chat_id=upload_chat_id,
-            upload_is_photo=False,
-        )
-    await callback.answer()
+    # Категории временно отключены — мастер загрузки теперь сразу ждёт фото.
+    await callback.answer("Категории сейчас не используются. Просто отправь фотографию.")
 
 
 @router.message(MyPhotoStates.waiting_photo, F.photo)
@@ -1008,9 +844,8 @@ async def myphoto_got_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     upload_msg_id = data.get("upload_msg_id")
     upload_chat_id = data.get("upload_chat_id")
-    category = data.get("category")
 
-    if not upload_msg_id or not upload_chat_id or not category:
+    if not upload_msg_id or not upload_chat_id:
         await state.clear()
         await message.answer(
             "Сессия загрузки фотографии сбилась.\n\n"
@@ -1025,12 +860,7 @@ async def myphoto_got_photo(message: Message, state: FSMContext):
     await message.delete()
 
     # Формируем первичный черновик подписи
-    draft_text = _build_draft_caption(
-        category=category,
-        title=None,
-        device_type=None,
-        description=None,
-    )
+    draft_text = "Фотография получена ✅"
 
     # Заменяем старое служебное сообщение на новое с фотографией
     try:
@@ -1070,9 +900,6 @@ async def myphoto_got_title(message: Message, state: FSMContext):
     data = await state.get_data()
     upload_msg_id = data.get("upload_msg_id")
     upload_chat_id = data.get("upload_chat_id")
-    category = data.get("category")
-    device_type = data.get("device_type")
-    description = data.get("description")
 
     title = (message.text or "").strip()
     if not upload_msg_id or not upload_chat_id:
@@ -1091,13 +918,9 @@ async def myphoto_got_title(message: Message, state: FSMContext):
                 chat_id=upload_chat_id,
                 message_id=upload_msg_id,
                 caption=(
-                    _build_draft_caption(
-                        category=category,
-                        title=None,
-                        device_type=device_type,
-                        description=description,
-                    )
-                    + "\n\nНазвание не может быть пустым.\n\nКак назовём эту работу?"
+                    "Фотография получена ✅\n\n"
+                    "Название не может быть пустым.\n\n"
+                    "Как назовём эту работу?"
                 ),
             )
         except TelegramBadRequest as e:
@@ -1112,14 +935,9 @@ async def myphoto_got_title(message: Message, state: FSMContext):
                 chat_id=upload_chat_id,
                 message_id=upload_msg_id,
                 caption=(
-                    _build_draft_caption(
-                        category=category,
-                        title=None,
-                        device_type=device_type,
-                        description=description,
-                    )
-                    + "\n\nВ названии работы нельзя оставлять @username, ссылки или сайты.\n\n"
-                      "Придумай название без контактов — только про саму фотографию."
+                    "Фотография получена ✅\n\n"
+                    "В названии нельзя оставлять @username, ссылки или сайты.\n\n"
+                    "Придумай название без контактов — только про саму фотографию."
                 ),
             )
         except TelegramBadRequest as e:
@@ -1128,34 +946,11 @@ async def myphoto_got_title(message: Message, state: FSMContext):
         return
 
     await state.update_data(title=title)
-    await state.set_state(MyPhotoStates.waiting_device_type)
     await message.delete()
 
-    draft_text = _build_draft_caption(
-        category=category,
-        title=title,
-        device_type=device_type,
-        description=description,
-    )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📱 смартфон", callback_data="myphoto:device:phone")
-    kb.button(text="📷 фотокамера", callback_data="myphoto:device:camera")
-    kb.adjust(2)
-
-    try:
-        await message.bot.edit_message_caption(
-            chat_id=upload_chat_id,
-            message_id=upload_msg_id,
-            caption=(
-                f"{draft_text}\n\n"
-                "На какое устройство снята работа? Выбери тип устройства:"
-            ),
-            reply_markup=kb.as_markup(),
-        )
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
+    # Раньше здесь был выбор устройства/описания. Сейчас — сразу публикуем.
+    await _finalize_photo_creation(message, state)
+    return
 
 
 @router.message(MyPhotoStates.waiting_title)
@@ -1169,464 +964,56 @@ async def myphoto_waiting_title_wrong(message: Message):
 
 @router.callback_query(MyPhotoStates.waiting_device_type, F.data.startswith("myphoto:device:"))
 async def myphoto_device_type(callback: CallbackQuery, state: FSMContext):
-
-    try:
-        _, _, code = callback.data.split(":", 2)
-    except ValueError:
-        code = "phone"
-
-    mapping = {
-        "phone": "смартфон",
-        "camera": "фотокамера",
-    }
-    device_type = mapping.get(code, "смартфон")
-
-    data = await state.get_data()
-    data["device_type"] = device_type
-    await state.set_data(data)
-
-    upload_msg_id = data.get("upload_msg_id")
-    upload_chat_id = data.get("upload_chat_id")
-    category = data.get("category")
-    title = data.get("title")
-    description = data.get("description")
-
-    if not upload_msg_id or not upload_chat_id:
-        await state.clear()
-        await callback.message.answer(
-            "Сессия загрузки фотографии сбилась. Зайди в раздел «Моя фотография» и попробуй ещё раз.",
-            disable_notification=True,
-        )
-        await callback.answer()
-        return
-
-    draft_text = _build_draft_caption(
-        category=category,
-        title=title,
-        device_type=device_type,
-        description=description,
-    )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⏭ Пропустить", callback_data="myphoto:skip_description")
-    kb.adjust(1)
-
-    await state.set_state(MyPhotoStates.waiting_description)
-
-    try:
-        await callback.message.bot.edit_message_caption(
-            chat_id=upload_chat_id,
-            message_id=upload_msg_id,
-            caption=(
-                f"{draft_text}\n\n"
-                "Хочешь добавить описание для этой фотографии?\n"
-                "Напиши его текстом или нажми «Пропустить»."
-            ),
-            reply_markup=kb.as_markup(),
-        )
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
-
-    await callback.answer()
+    await callback.answer("Этот шаг больше не используется.")
 
 
 @router.callback_query(MyPhotoStates.waiting_description, F.data == "myphoto:skip_description")
 async def myphoto_skip_description(callback: CallbackQuery, state: FSMContext):
-    """Пользователь решил не добавлять описание."""
-
-    data = await state.get_data()
-    data["description"] = ""
-    await state.set_data(data)
-
-    await _finalize_photo_creation(callback.message, state)
-    await callback.answer()
+    await callback.answer("Этот шаг больше не используется.")
 
 
 @router.message(MyPhotoStates.waiting_description, F.text)
 async def myphoto_got_description(message: Message, state: FSMContext):
-
-    data = await state.get_data()
-    upload_msg_id = data.get("upload_msg_id")
-    upload_chat_id = data.get("upload_chat_id")
-
-    if not upload_msg_id or not upload_chat_id:
-        await state.clear()
-        await message.answer(
-            "Сессия загрузки фотографии сбилась.\n\n"
-            "Зайди в раздел «Моя фотография» и попробуй ещё раз.",
-            disable_notification=True,
-        )
-        return
-
-    description_raw = (message.text or "").strip()
-    # Пользователь может написать «пропустить» текстом вместо нажатия кнопки.
-    # В этом случае обрабатываем это как явный отказ от описания.
-    if description_raw.lower() == "пропустить":
-        await message.delete()
-        data["description"] = ""
-        await state.set_data(data)
-        await _finalize_photo_creation(message, state)
-        return
-
-    if has_links_or_usernames(description_raw) or has_promo_channel_invite(description_raw):
-        await message.delete()
-        try:
-            await message.bot.edit_message_caption(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                caption=(
-                    _build_draft_caption(
-                        category=data.get("category"),
-                        title=data.get("title"),
-                        device_type=data.get("device_type"),
-                        description="",
-                    )
-                    + "\n\nВ описании нельзя оставлять @username, ссылки или сайты.\n\n"
-                      "Напиши просто описание работы без контактов или нажми «Пропустить»."
-                ),
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-        return
-
     await message.delete()
-
-    data["description"] = description_raw
-    await state.set_data(data)
-
-    await _finalize_photo_creation(message, state)
+    await message.answer("Описание сейчас добавляется позже — через карточку фотографии.")
+# === ОБРАБОТКА ВЫБОРА ТИПА УСТРОЙСТВА ===
 
 
-async def _finalize_photo_creation(message_or_service: Message, state: FSMContext) -> None:
-    """Финализация мастера: создаём запись в БД и открываем раздел «Моя фотография».
+# ====== DELETE PHOTO HANDLER PATCH ======
 
-    `message_or_service` — либо сообщение пользователя (для текстового описания),
-    либо текущее служебное сообщение с фото (для skip)."""
-
-    data = await state.get_data()
-    upload_msg_id = data.get("upload_msg_id")
-    upload_chat_id = data.get("upload_chat_id")
-    file_id = data.get("file_id")
-    title = data.get("title")
-    category = data.get("category") or "photo"
-    device_type = data.get("device_type") or "не указано"
-    description = data.get("description")
-    user_id = data.get("upload_user_id")
-
-    if not all([upload_msg_id, upload_chat_id, file_id, title, user_id]):
-        await state.clear()
-        try:
-            await message_or_service.bot.edit_message_caption(
-                chat_id=upload_chat_id or message_or_service.chat.id,
-                message_id=upload_msg_id or message_or_service.message_id,
-                caption="Что-то пошло не так при сохранении фотографии. Попробуй ещё раз через раздел «Моя фотография».",
-            )
-        except Exception:
-            try:
-                await message_or_service.bot.send_message(
-                    chat_id=upload_chat_id or message_or_service.chat.id,
-                    text="Что-то пошло не так при сохранении фотографии. Попробуй ещё раз через раздел «Моя фотография».",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-        return
-
-    # Определим, админ ли пользователь (на всякий случай)
-    user_row = None
-    try:
-        user_row = await get_user_by_id(int(user_id))
-    except Exception:
-        user_row = None
-    is_admin = bool(user_row and is_admin_user(user_row))
-
-    # ВАЖНО:
-    # НЕ удаляем существующие активные фото здесь.
-    # Лимиты (1/2 активных, 1/2 в день) уже проверяются раньше в myphoto_add.
-    try:
-        photo_id = await create_today_photo(
-            user_id=int(user_id),
-            file_id=file_id,
-            title=title,
-            category=category,
-            device_type=device_type,
-            device_info=None,
-            description=description,
-        )
-    except Exception:
-        await state.clear()
-        try:
-            await message_or_service.bot.edit_message_caption(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                caption="Не получилось сохранить фотографию. Попробуй ещё раз.",
-            )
-        except Exception:
-            try:
-                await message_or_service.bot.send_message(
-                    chat_id=upload_chat_id,
-                    text="Не получилось сохранить фотографию. Попробуй ещё раз.",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-        return
-
-    photo = await get_photo_by_id(int(photo_id))
-
-    # Если зачем-то включён админский overwrite на уровне финализации —
-    # оставим заглушку, но по умолчанию ничего не трогаем.
-    # (Сейчас overwrite делается в myphoto_add.)
-    _ = is_admin
-
-    if photo is None:
-        await state.clear()
-        try:
-            await message_or_service.bot.edit_message_caption(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                caption="Что-то пошло не так при сохранении фотографии. Попробуй ещё раз.",
-            )
-        except Exception:
-            try:
-                await message_or_service.bot.send_message(
-                    chat_id=upload_chat_id,
-                    text="Что-то пошло не так при сохранении фотографии. Попробуй ещё раз.",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-        return
-
-    await state.set_state(None)
-
-    # Используем текущий message как service_message, чтобы перейти к полноценному разделу «Моя фотография»
-    try:
-        if getattr(message_or_service, "photo", None):
-            service_message = await message_or_service.bot.edit_message_caption(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                caption="Оформляем твою работу…",
-            )
-        else:
-            service_message = await message_or_service.bot.edit_message_text(
-                chat_id=upload_chat_id,
-                message_id=upload_msg_id,
-                text="Оформляем твою работу…",
-            )
-    except Exception:
-        service_message = message_or_service
-
-    await _show_my_photo_section(
-        chat_id=upload_chat_id,
-        service_message=service_message,
-        state=state,
-        photo=photo,
-    )
+# Patch the delete handler to show correct post-delete UI
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-
-
-# ========= КНОПКИ ПОД ФОТО =========
-
-
-@router.callback_query(F.data.startswith("myphoto:delete:"))
+@router.callback_query(F.data.regexp(r"^myphoto:delete:(\d+)$"))
 async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
+    """
+    Показывает подтверждение удаления своей фотографии (с премиум-предупреждением).
+    """
     user = await _ensure_user(callback)
     if user is None:
         return
 
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer()
-        return
-
+    photo_id_str = callback.data.split(":")[2]
     try:
-        photo_id = int(parts[2])
-    except ValueError:
-        await callback.answer()
+        photo_id = int(photo_id_str)
+    except Exception:
+        await callback.answer("Ошибка удаления.", show_alert=True)
         return
 
+    # Проверяем, что фото принадлежит пользователю
     photo = await get_photo_by_id(photo_id)
-    if photo is None:
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
 
-    if int(photo.get("user_id") or 0) != int(user.get("id") or 0):
-        await callback.answer("Это не твоя фотография.", show_alert=True)
+    # Already deleted?
+    if photo.get("is_deleted"):
+        await callback.answer("Фотография уже удалена.", show_alert=True)
         return
 
-    # участвовало ли фото в итогах (топ-10 дня / недельный отбор)
-    in_results, kind, place = await _photo_result_status(photo)
-
-    # Всегда сохраняем в «Мои итоги», чтобы рейтинг/оценки не терялись
-    archive_kind = (kind or "daily_top10") if in_results else "deleted"
-
-    try:
-        await archive_photo_to_my_results(
-            user_id=int(user["id"]),
-            photo_id=int(photo_id),
-            kind=archive_kind,
-            day_key=photo.get("day_key"),
-            place=place,
-        )
-    except Exception:
-        await callback.answer(
-            "Не получилось сохранить фото в «Мои итоги». Попробуй позже.",
-            show_alert=True,
-        )
-        return
-
-    try:
-        await mark_photo_deleted(photo_id)
-    except Exception:
-        await callback.answer("Не удалось убрать фото из активных. Попробуй позже.", show_alert=True)
-        return
-
-    await callback.answer("✅ Фото удалено из активных и сохранено в «Мои итоги».", show_alert=True)
-    await my_photo_menu(callback, state)
-
-
-@router.callback_query(F.data.startswith("myphoto:comments:"))
-async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    parts = (callback.data or "").split(":")
-    # expected: myphoto:comments:<photo_id>:<page>
-    if len(parts) < 4:
-        await callback.answer()
-        return
-
-    try:
-        photo_id = int(parts[2])
-    except Exception:
-        await callback.answer()
-        return
-
-    try:
-        page = int(parts[3])
-    except Exception:
-        page = 0
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None or photo.get("is_deleted"):
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    is_owner = int(photo.get("user_id") or 0) == int(user.get("id") or 0)
-
-    # ВЛАДЕЛЕЦ видит ВСЕ комменты, остальные — только публичные
-    comments = await get_comments_for_photo(photo_id, only_public=not is_owner)
-
-    per_page = 10
-    total = len(comments)
-    page = max(page, 0)
-    start = page * per_page
-    end = start + per_page
-
-    if total > 0 and start >= total:
-        page = 0
-        start = 0
-        end = per_page
-
-    page_comments = comments[start:end]
-
-    title = (photo.get("title") or "Без названия").strip()
-
-    lines = [f"💬 <b>Комментарии</b> к \"{title}\"", ""]
-
-    if total == 0:
-        if is_owner:
-            lines.append("Пока нет ни одного комментария.")
-        else:
-            lines.append("Пока нет ни одного комментария.\nБудь первым 😊")
-    else:
-        for i, c in enumerate(page_comments, start=start + 1):
-            text = (c.get("text") or "").strip()
-            if not text:
-                continue
-
-            is_public = bool(c.get("is_public", 1))
-            if is_public:
-                name = (c.get("name") or "").strip()
-                username = (c.get("username") or "").strip()
-                if username:
-                    author = f"@{username.lstrip('@')}"
-                elif name:
-                    author = name
-                else:
-                    author = "Пользователь"
-            else:
-                author = "🕵️ Анонимно"
-
-            lines.append(f"<b>{i}.</b> {author}: {text}")
-
-        if total > per_page:
-            last_page = (total - 1) // per_page
-            lines.append("")
-            lines.append(f"Страница {page + 1} из {last_page + 1} · всего {total}")
-
-    text_out = "\n".join(lines)
-
-    kb = InlineKeyboardBuilder()
-
-    if total > per_page:
-        if page > 0:
-            kb.button(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page - 1}")
-        if end < total:
-            kb.button(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page + 1}")
-
-    kb.button(text="⬅️ Назад", callback_data="myphoto:open")
-    kb.adjust(2, 1) if total > per_page else kb.adjust(1)
-
-    try:
-        if callback.message and callback.message.photo:
-            await callback.message.edit_caption(caption=text_out, reply_markup=kb.as_markup())
-        else:
-            await callback.message.edit_text(text_out, reply_markup=kb.as_markup())
-    except TelegramBadRequest:
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text_out,
-            reply_markup=kb.as_markup(),
-            disable_notification=True,
-        )
-
-    await callback.answer()
-
-
-@router.callback_query(F.data == "noop")
-async def noop_handler(callback: CallbackQuery):
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("myphoto:back:"))
-async def myphoto_back(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer()
-        return
-
-    try:
-        photo_id = int(parts[2])
-    except ValueError:
-        await callback.answer()
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None or photo.get("is_deleted"):
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    # лимит 1/2 в навигации
+    # Compute is_premium_user
+    is_admin = is_admin_user(user)
     is_premium_user = False
     try:
         if user.get("tg_id"):
@@ -1634,441 +1021,279 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
     except Exception:
         is_premium_user = False
 
-    photos = await get_active_photos_for_user(user["id"])
+    warning = ""
+    if not is_admin and not is_premium_user:
+        today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
+        if today_count >= 1:
+            remaining = _format_time_until_next_upload()
+            warning = (
+                f"\n\n⚠️ После удаления ты <b>не сможешь</b> загрузить новую фотографию {remaining}.\n"
+                "Хочешь продолжить?"
+            )
+        else:
+            warning = "\n\nХочешь продолжить?"
+    else:
+        warning = "\n\nХочешь продолжить?"
+
+    confirm_text = (
+        "🗑 <b>Удалить фотографию?</b>\n\n"
+        "Фотография будет удалена из профиля и больше не будет участвовать в оценках."
+        f"{warning}"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Да, удалить", callback_data=f"myphoto:delete_confirm:{photo_id}")
+    kb.button(text="❌ Нет", callback_data=f"myphoto:delete_cancel:{photo_id}")
+    kb.adjust(1)
+
     try:
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=confirm_text, reply_markup=kb.as_markup())
+        else:
+            await callback.message.edit_text(confirm_text, reply_markup=kb.as_markup())
     except Exception:
-        pass
-    photos = photos[: (2 if is_premium_user else 1)]
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=confirm_text,
+            reply_markup=kb.as_markup(),
+            disable_notification=True,
+        )
+    await callback.answer()
 
-    has_prev = False
-    has_next = False
-    if len(photos) > 1:
-        idx = 0
-        for i, p in enumerate(photos):
-            if p["id"] == photo_id:
-                idx = i
-                break
-        has_prev = idx > 0
-        has_next = idx < len(photos) - 1
 
+# --- Confirm delete handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:delete_confirm:(\d+)$"))
+async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
+    """
+    Подтверждение удаления своей фотографии.
+    """
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    photo_id_str = callback.data.split(":")[2]
+    try:
+        photo_id = int(photo_id_str)
+    except Exception:
+        await callback.answer("Ошибка удаления.", show_alert=True)
+        return
+
+    # Проверяем, что фото принадлежит пользователю
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+    if photo.get("is_deleted"):
+        await callback.answer("Фотография уже удалена.", show_alert=True)
+        return
+
+    await mark_photo_deleted(photo_id)
+    await _clear_photo_message_id(state)
+
+    is_admin = is_admin_user(user)
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    can_upload, remaining = await _can_user_upload_now(user, is_premium_user, is_admin)
+    if can_upload:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📤 Загрузить", callback_data="myphoto:add")
+        kb.button(text="⬅️ В меню", callback_data="menu:back")
+        kb.adjust(1, 1)
+        ready = _ready_wording(user)
+        text = (
+            "📸 <b>Загрузить фотографию!</b>\n\n"
+            "Здесь оценивают кадры, а не твою внешность.\n\n"
+            "<b>Правила загрузки:</b>\n"
+            "• Можно загрузить только один кадр в день;\n"
+            "• Селфи / фотографии, где изображён(а) ты сам(а) — нельзя;\n"
+            "• Без рекламы: названия, ссылки и прочее;\n"
+            "• Только свои фотографии;\n"
+            "• Без откровенного контента и насилия.\n\n"
+            "Администрация вправе удалить контент и ограничить доступ к боту при нарушении правил.\n\n"
+            f"Когда будешь {ready} — жми «Загрузить»."
+        )
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+            else:
+                await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+            )
+        await callback.answer("Фотография удалена.")
+        return
+    else:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="💎 Premium", callback_data="premium:open")
+        kb.button(text="⬅️ В меню", callback_data="menu:back")
+        kb.adjust(1, 1)
+        text = (
+            f"Загрузить новую фотографию можно {remaining}.\n\n"
+            "Подождите, либо купите подписку GlowShot Premium и забудьте про лимиты."
+        )
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+            else:
+                await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+            )
+        await callback.answer("Фотография удалена.")
+        return
+
+# --- Cancel delete handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:delete_cancel:(\d+)$"))
+async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
+    """
+    Отмена удаления — восстановить карточку фото.
+    """
+    user = await _ensure_user(callback)
+    if user is None:
+        await callback.answer("Ок")
+        return
+    photo_id_str = callback.data.split(":")[2]
+    try:
+        photo_id = int(photo_id_str)
+    except Exception:
+        await callback.answer("Ок")
+        return
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
+        await callback.answer("Ок")
+        return
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, has_prev=has_prev, has_next=has_next)
-
+    kb = build_my_photo_keyboard(photo["id"])
     try:
         if callback.message.photo:
             await callback.message.edit_caption(caption=caption, reply_markup=kb)
         else:
             await callback.message.edit_text(caption, reply_markup=kb)
     except Exception:
-        pass
-
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("myphoto:stats:"))
-async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer()
-        return
-
-    try:
-        photo_id = int(parts[2])
-    except ValueError:
-        await callback.answer()
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None or photo.get("is_deleted"):
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    stats = await get_photo_stats(photo_id)
-    ratings_count = int(stats.get("ratings_count") or 0)
-    avg = stats.get("avg_rating")
-    avg_str = "—" if avg is None else f"{float(avg):.2f}".rstrip("0").rstrip(".")
-
-    super_count = int(stats.get("super_ratings_count") or 0)
-    comments_count = int(stats.get("comments_count") or 0)
-
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    lines: list[str] = ["📊 <b>Статистика фотографии</b>", ""]
-    lines.append(f"💖 Оценок: <b>{ratings_count}</b>")
-    lines.append(f"📈 Средняя оценка: <b>{avg_str}</b>")
-    lines.append(f"💬 Комментариев: <b>{comments_count}</b>")
-    lines.append(f"💥 Супер-оценок: <b>{super_count}</b>")
-
-    lines.append("")
-    if is_premium_user:
-        lines.append("💎 <b>Premium</b>: расширенная статистика будет доступна тут (в разработке).")
-    else:
-        lines.append("💎 Хочешь больше статистики? Это будет доступно в GlowShot Premium.")
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")]]
-    )
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption="\n".join(lines), reply_markup=kb)
-        else:
-            await callback.message.edit_text("\n".join(lines), reply_markup=kb)
-    except Exception:
-        pass
-
-    await callback.answer()
-
-
-# ====== HANDLERS FOR MYPHOTO RESULTS, NEW, REPEAT, EXTRA ======
-
-@router.callback_query(F.data.startswith("myphoto:myresults:"))
-async def myphoto_myresults(callback: CallbackQuery, state: FSMContext):
-
-    try:
-        _, _, pid = callback.data.split(":", 2)
-        photo_id = int(pid)
-    except Exception:
-        await callback.answer("Странная фотография, не могу показать итоги.", show_alert=True)
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None:
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    if photo["user_id"] != user["id"]:
-        await callback.answer("Это не твоя фотография.", show_alert=True)
-        return
-
-    day_key = photo.get("day_key")
-
-    lines: list[str] = ["<b>Итоги для этой работы:</b>"]
-
-    # Итоги дня по этой дате
-    if day_key:
-        top = await get_daily_top_photos(day_key, limit=50)
-        place = None
-        top_entry = None
-        for idx, p in enumerate(top, start=1):
-            if p["id"] == photo_id:
-                place = idx
-                top_entry = p
-                break
-
-        if place is not None:
-            avg = top_entry.get("avg_rating")
-            best_count = top_entry.get("best_count") or 0
-            avg_str = f"{avg:.1f}" if avg is not None else "—"
-            lines.append(
-                f"• Итоги дня ({day_key}): место <b>{place}</b>, "
-                f"лучшие оценки (≥9): <b>{best_count}</b>, средняя: <b>{avg_str}</b>"
-            )
-        else:
-            lines.append(f"• В итогах дня за {day_key} эта работа не была в топе.")
-    else:
-        lines.append("• Для этой работы ещё нет привязки к дню съёмки.")
-
-    # Итоги недели — участвует ли работа в недельном отборе
-    weekly_photos = await get_weekly_photos_for_user(user["id"])
-    in_weekly = any(p["id"] == photo_id for p in weekly_photos)
-    if in_weekly:
-        lines.append("• Работа участвует в отборе на итоги недели ✅")
-    else:
-        lines.append("• В отборе недели эта работа пока не участвует.")
-
-    if len(lines) == 1:
-        lines.append("Пока у этой работы нет побед — всё ещё впереди ✨")
-
-    text = "\n".join(lines)
-
-    # Пересобираем клавиатуру для фотографии (с учётом возможности продвижения)
-    can_promote = await _compute_can_promote(photo)
-    kb = build_my_photo_keyboard(photo_id, can_promote=can_promote)
-
-    if callback.message.photo:
         try:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=caption,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+    await callback.answer("Отменено")
+# ====== FINALIZE PHOTO CREATION ======
+
+# Patch: _finalize_photo_creation supports both Message and CallbackQuery and does not rely on callback.message
+async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMContext) -> None:
+    """
+    Завершить процесс создания фото: сохранить в БД и показать карточку пользователю.
+    event: Message или CallbackQuery
+    """
+    # поддерживаем вызов как из callback, так и из message
+    if isinstance(event, CallbackQuery):
+        bot = event.message.bot
+        fallback_chat_id = event.message.chat.id
     else:
-        await callback.message.edit_text(text, reply_markup=kb)
+        bot = event.bot
+        fallback_chat_id = event.chat.id
 
-    await callback.answer()
+    data = await state.get_data()
+    user_id = data.get("upload_user_id")
+    file_id = data.get("file_id")
+    title = data.get("title")
+    upload_msg_id = data.get("upload_msg_id")
+    upload_chat_id = data.get("upload_chat_id")
 
-
-@router.callback_query(F.data.startswith("myphoto:new:"))
-async def myphoto_new_stub(callback: CallbackQuery):
-    """
-    Заглушка под будущую механику «Новой фотографии» после итогов дня.
-
-    Сейчас просто информируем пользователя, чтобы кнопка не была мёртвой.
-    Реальная логика будет завязана на переносе участия кадра на следующий день.
-    """
-
-    await callback.answer(
-        "Загрузка новой фотографии после итогов дня пока в разработке.\n\n"
-        "Скоро здесь можно будет выложить новый кадр, не ломая старые итоги.",
-        show_alert=True,
-    )
-
-
-@router.callback_query(F.data.startswith("myphoto:repeat:"))
-async def myphoto_repeat(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer()
-        return
-
+    # Save photo in DB, handle unique violation
     try:
-        photo_id = int(parts[2])
-    except ValueError:
-        await callback.answer()
+        photo_id = await create_today_photo(
+            user_id=user_id,
+            file_id=file_id,
+            title=title,
+        )
+    except UniqueViolationError:
+        await bot.send_message(
+            chat_id=upload_chat_id or fallback_chat_id,
+            text=(
+                "Ты уже загружал(а) фотографию сегодня.\n\n"
+                "Если хочешь заменить — удали текущую в разделе «Моя фотография» и попробуй снова."
+            ),
+            disable_notification=True,
+        )
+        await state.clear()
         return
 
+    # Get photo object from DB
     photo = await get_photo_by_id(photo_id)
-    if photo is None or photo.get("is_deleted"):
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    if int(photo.get("user_id") or 0) != int(user["id"]):
-        await callback.answer("Это не твоя фотография.", show_alert=True)
-        return
-
-    # можно повторить только если у пользователя одна активная фотка (по твоему правилу)
-    active_photos = await get_active_photos_for_user(user["id"])
-    try:
-        active_photos = sorted(active_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
-    except Exception:
-        pass
-
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    active_photos = active_photos[: (2 if is_premium_user else 1)]
-    if len(active_photos) != 1:
-        await callback.answer("🔁 Повторить можно только когда у тебя одна активная фотография.", show_alert=True)
-        return
-
-    if await is_photo_repeat_used(photo_id):
-        await callback.answer("Ты уже использовал(а) «Повторить» для этой работы — третьего шанса нет 🙃", show_alert=True)
-        return
-
-    # фото НЕ должно попадать в топ-10 дня
-    day_key = photo.get("day_key")
-    if day_key:
-        top10 = await get_daily_top_photos(day_key, limit=10)
-        if any(int(p["id"]) == int(photo_id) for p in top10):
-            await callback.answer("Эта работа уже попадала в топ дня — повторить можно только если она не была в топе.", show_alert=True)
-            return
-
-    # дневной лимит
-    today_photo = await get_today_photo_for_user(user["id"])
-    if today_photo is not None and not today_photo.get("is_deleted"):
-        await callback.answer("Сегодня у тебя уже есть опубликованная работа. Повтори позже — на следующий день.", show_alert=True)
-        return
-
-    # не повторяем в тот же день
-    now = get_moscow_now().date()
-    try:
-        photo_day = datetime.fromisoformat(day_key).date() if day_key else None
-    except Exception:
-        photo_day = None
-    if photo_day is not None and photo_day == now:
-        await callback.answer("Эту работу нельзя повторить в тот же день. Попробуй завтра.", show_alert=True)
-        return
-
-    # создаём новую запись на сегодня
-    try:
-        new_photo = await create_today_photo(
-            user_id=user["id"],
-            file_id=photo["file_id"],
-            title=photo.get("title") or "Без названия",
-            device_type=photo.get("device_type") or "",
-            device_info=photo.get("device_info"),
-            category=photo.get("category") or "photo",
-            description=photo.get("description"),
+    if not photo:
+        # fallback error
+        await bot.send_message(
+            chat_id=upload_chat_id or fallback_chat_id,
+            text="Ошибка при сохранении фотографии. Попробуйте ещё раз.",
+            disable_notification=True,
         )
-    except Exception:
-        await callback.answer("Не получилось повторить работу. Попробуй позже.", show_alert=True)
+        await state.clear()
         return
 
-    try:
-        await mark_photo_repeat_used(photo_id)
-    except Exception:
-        pass
+    chat_id = upload_chat_id or fallback_chat_id
 
-    try:
-        # если create_today_photo возвращает dict с id
-        if isinstance(new_photo, dict) and new_photo.get("id"):
-            await state.update_data(myphoto_last_id=new_photo["id"])
-    except Exception:
-        pass
-
-    await callback.answer("Готово! Работа опубликована ещё раз ✨")
-    await my_photo_menu(callback, state)
-
-
-@router.callback_query(F.data.startswith("myphoto:extra:"))
-async def myphoto_extra(callback: CallbackQuery):
-    """
-    Заглушка под премиум‑функцию «Загрузить ещё одну».
-    """
-
-    await callback.answer(
-        "Возможность выкладывать несколько работ в день будет доступна "
-        "с премиум‑подпиской.\n\nПока эта функция в разработке 💎",
-        show_alert=True,
-    )
-
-
-# ====== WEEKLY PROMOTE & WEEKLY SECTION ======
-
-
-@router.callback_query(F.data.startswith("myphoto:promote:"))
-async def myphoto_promote(callback: CallbackQuery, state: FSMContext):
-    try:
-        _, _, pid = callback.data.split(":", 2)
-        photo_id = int(pid)
-    except Exception:
-        await callback.answer("Не могу понять, какую фотографию продвигать.", show_alert=True)
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None:
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    if photo["user_id"] != user["id"]:
-        await callback.answer("Это не твоя фотография.", show_alert=True)
-        return
-
-    now = get_moscow_now()
-    try:
-        day = datetime.fromisoformat(photo["day_key"]).date()
-    except Exception:
-        day = now.date()
-
-    # Продвигать можно только после окончания календарного дня по Москве
-    if now.date() <= day:
-        await callback.answer("Продвигать можно только после окончания дня.", show_alert=True)
-        return
-
-    top10 = await get_daily_top_photos(photo["day_key"], limit=10)
-    place = None
-    top_entry = None
-    for idx, p in enumerate(top10, start=1):
-        if p["id"] == photo_id:
-            place = idx
-            top_entry = p
-            break
-
-    if place is None or place > 5:
-        await callback.answer(
-            "Эта фотография не вошла в топ‑5 дня, её нельзя продвинуть.",
-            show_alert=True,
-        )
-        return
-
-    if await is_photo_in_weekly(photo_id):
-        await callback.answer("Эта фотография уже участвует в итогах недели.", show_alert=True)
-        return
-
-    can_promote = await _compute_can_promote(photo)
-    if not can_promote:
-        await callback.answer(
-            "🚀 Продвигать можно только если работа была в топ-4 дня и день уже завершён.\n"
-            "Также можно продвинуть только одну фотографию в неделю.",
-            show_alert=True,
-        )
-        return
-    await add_weekly_candidate(photo_id)
-
-    avg = top_entry.get("avg_rating")
-    best_count = top_entry.get("best_count") or 0
-    avg_str = f"{avg:.1f}" if avg is not None else "—"
-
-    await callback.answer(
-        f"Твоя фотография заняла {place} место в дне.\n"
-        f"Лучшие оценки (≥9): {best_count}\n"
-        f"Средняя оценка: {avg_str}\n\n"
-        f"Она добавлена в кандидаты на итоги недели 🎉",
-        show_alert=True,
-    )
-
+    # Финальная карточка: стараемся НЕ плодить сообщения.
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, can_promote=False)
+    kb = build_my_photo_keyboard(photo["id"])
 
-    if callback.message.photo:
-        await callback.message.edit_caption(caption=caption, reply_markup=kb)
-    else:
-        await callback.message.edit_text(caption, reply_markup=kb)
+    # 1) Если у нас есть сообщение мастера (это фото-сообщение от бота) — просто редактируем caption+кнопки.
+    if upload_msg_id and chat_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=upload_msg_id,
+                caption=caption,
+                reply_markup=kb,
+            )
+            await _store_photo_message_id(state, upload_msg_id, photo_id=photo["id"])
+            await state.clear()
+            return
+        except Exception:
+            pass
 
+    # 2) Фоллбек: удаляем старое сообщение (если есть) и отправляем новое.
+    if upload_msg_id and chat_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=upload_msg_id)
+        except Exception:
+            pass
 
-@router.callback_query(F.data == "myphoto:weekly")
-async def myphoto_weekly(callback: CallbackQuery):
-
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    photos = await get_weekly_photos_for_user(user["id"])
-
-    lines: list[str] = ["<b>Твои фотографии для итогов недели:</b>"]
-    if not photos:
-        lines.append("Пока ни одной фотографии 😶")
-    else:
-        for p in photos:
-            day_key = p.get("day_key") or ""
-            title = p.get("title") or "Без названия"
-            lines.append(f"• {day_key} — <b>{title}</b>")
-
-    text = "\n".join(lines)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📸 Моя фотография", callback_data="menu:my_photo")
-    kb.button(text="⬅️ В меню", callback_data="menu:back")
-    kb.adjust(1, 1)
-
-    if callback.message.photo:
-        await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
-    else:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
-
-@router.callback_query(F.data == "myphoto:help")
-async def myphoto_help(callback: CallbackQuery):
-    """
-    Заглушка для раздела «Помощь» в блоке загрузки фотографии.
-    """
-    await callback.answer(
-        "Здесь скоро появится подробная помощь по загрузке фотографий.\n\n"
-        "Главное: загружай свои кадры, без ссылок и рекламы, и соблюдай правила платформы.",
-        show_alert=True,
+    sent_photo = await bot.send_photo(
+        chat_id=chat_id,
+        photo=photo["file_id"],
+        caption=caption,
+        reply_markup=kb,
+        disable_notification=True,
     )
+    await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
+    await state.clear()
+    return
