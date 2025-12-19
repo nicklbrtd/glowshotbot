@@ -817,12 +817,12 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
     lines: list[str] = []
     lines.append("📊 <b>Статистика твоей фотографии:</b>")
     lines.append("")
-    lines.append(f"Оценок: <b>{ratings_count}</b>")
-    lines.append(f"Последняя: <b>{last_rating if last_rating is not None else '—'}</b>")
-    lines.append(f"Средняя оценка: <b>{_fmt_avg(avg_rating)}</b>")
-    lines.append(f"Супер-оценок: <b>{super_count}</b>")
-    lines.append(f"Комментариев: <b>{comments_count}</b>")
-    lines.append(f"Оценки по ссылке: <b>{link_ratings}</b>")
+    lines.append(f"⭐️ Оценок всего: <b>{ratings_count}</b>")
+    lines.append(f"🕒 Последняя оценка: <b>{last_rating if last_rating is not None else '—'}</b>")
+    lines.append(f"📈 Средняя оценка: <b>{_fmt_avg(avg_rating)}</b>")
+    lines.append(f"🔥 Супер-оценок: <b>{super_count}</b>")
+    lines.append(f"💬 Комментариев: <b>{comments_count}</b>")
+    lines.append(f"🔗⭐️ Оценки по ссылке: <b>{link_ratings}</b>")
 
     lines.append("")
 
@@ -842,8 +842,8 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         rated_users = int(r.get("rated_users") or 0)
         not_rated = max(total_users - rated_users - 1, 0)
 
-        good_cnt = int(r.get("good_count") or 0)  # <= 5
-        bad_cnt = int(r.get("bad_count") or 0)    # >= 6
+        good_cnt = int(r.get("good_count") or 0)  # >= 6
+        bad_cnt = int(r.get("bad_count") or 0)    # <= 5
 
         skip_cnt = 0
         try:
@@ -870,21 +870,21 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         except Exception:
             activity_days = "—"
 
-        lines.append(f"Место в топ (сейчас): <b>{place_now if place_now is not None else '—'}</b>")
-        lines.append(f"Не оценившие: <b>{not_rated}</b>")
-        lines.append(f"Хорошие: <b>{good_cnt}</b>")
-        lines.append(f"Плохие: <b>{bad_cnt}</b>")
-        lines.append(f"Скип: <b>{skip_cnt}</b>")
-        lines.append(f"Жалобы: <b>{reports_cnt}</b>")
-        lines.append(f"Активность фотографии: <b>{activity_days}</b>")
+        lines.append(f"🏆 Место в топ (сейчас): <b>{place_now if place_now is not None else '—'}</b>")
+        lines.append(f"🙈 Не оценившие: <b>{not_rated}</b>")
+        lines.append(f"✅ Хорошие (6–10): <b>{good_cnt}</b>")
+        lines.append(f"⚠️ Плохие (1–5): <b>{bad_cnt}</b>")
+        lines.append(f"⏭ Скип: <b>{skip_cnt}</b>")
+        lines.append(f"🚨 Жалобы: <b>{reports_cnt}</b>")
+        lines.append(f"📅 Активность: <b>{activity_days}</b>")
     else:
-        lines.append("Место в топ (сейчас): 💎 <b>Премиум</b>")
-        lines.append("Не оценившие: 💎 <b>Премиум</b>")
-        lines.append("Хорошие: 💎 <b>Премиум</b>")
-        lines.append("Плохие: 💎 <b>Премиум</b>")
-        lines.append("Скип: 💎 <b>Премиум</b>")
-        lines.append("Жалобы: 💎 <b>Премиум</b>")
-        lines.append("Активность фотографии: 💎 <b>Премиум</b>")
+        lines.append("🏆 Место в топ (сейчас): 💎 <b>Премиум</b>")
+        lines.append("🙈 Не оценившие: 💎 <b>Премиум</b>")
+        lines.append("✅ Хорошие (6–10): 💎 <b>Премиум</b>")
+        lines.append("⚠️ Плохие (1–5): 💎 <b>Премиум</b>")
+        lines.append("⏭ Скип: 💎 <b>Премиум</b>")
+        lines.append("🚨 Жалобы: 💎 <b>Премиум</b>")
+        lines.append("📅 Активность: 💎 <b>Премиум</b>")
 
     text = "\n".join(lines)
     kb = build_my_photo_stats_keyboard(photo_id)
@@ -1592,71 +1592,6 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         photo_id, page, has_prev, has_next,
         sort_key=sort_key, sort_dir=sort_dir, show_sort=show_sort
     )
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
-            disable_notification=True,
-        )
-
-    await callback.answer()
-
-
-# --- Stats handler ---
-@router.callback_query(F.data.regexp(r"^myphoto:stats:(\d+)$"))
-async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    photo_id_str = callback.data.split(":")[2]
-    try:
-        photo_id = int(photo_id_str)
-    except Exception:
-        await callback.answer("Ошибка.")
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    stats = await get_photo_stats(photo_id)
-    ratings_count = int(stats.get("ratings_count") or 0)
-    avg = stats.get("avg_rating")
-    if avg is None:
-        avg_str = "—"
-    else:
-        try:
-            avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-        except Exception:
-            avg_str = "—"
-
-    views = int(stats.get("views") or 0) if isinstance(stats, dict) else 0
-    promotes = int(stats.get("promotes") or 0) if isinstance(stats, dict) else 0
-
-    text = (
-        "📊 <b>Статистика</b>\n\n"
-        f"💖 Оценок: <b>{ratings_count}</b>\n"
-        f"⭐️ Средняя: <b>{avg_str}</b>\n"
-    )
-    if views:
-        text += f"👀 Просмотров: <b>{views}</b>\n"
-    if promotes:
-        text += f"🚀 Продвижений: <b>{promotes}</b>\n"
-
-    kb = _myphoto_back_kb(photo_id)
 
     try:
         if callback.message.photo:
