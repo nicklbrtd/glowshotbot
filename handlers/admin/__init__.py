@@ -15,7 +15,7 @@ from .users import router as users_router
 from .roles import router as roles_router
 from .payments import router as payments_router
 from .logs import router as logs_router
-from . import broadcast  as broadcast_router
+from .broadcast import router as broadcast_router
 
 # settings.py может быть пустым/в процессе — подключаем мягко
 try:

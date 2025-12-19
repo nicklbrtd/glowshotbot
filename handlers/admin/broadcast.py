@@ -23,7 +23,6 @@ from database import(
     get_premium_users
 )
 
-
 router = Router()
 
 # Сколько задержки между отправками (чтобы не словить flood)
