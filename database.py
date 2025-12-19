@@ -218,6 +218,10 @@ async def ensure_schema() -> None:
               age INTEGER,
               bio TEXT,
               tg_channel_link TEXT,
+              city TEXT,
+              country TEXT,
+              show_city INTEGER NOT NULL DEFAULT 1,
+              show_country INTEGER NOT NULL DEFAULT 1,
 
               is_admin INTEGER NOT NULL DEFAULT 0,
               is_moderator INTEGER NOT NULL DEFAULT 0,
@@ -467,17 +471,26 @@ async def ensure_schema() -> None:
             """
         )
 
+
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
+
+        # migration: users.city/country + flags (до индексов!)
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_city INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_country INTEGER NOT NULL DEFAULT 1;")
+
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_city ON users(city);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at ON bot_error_logs(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_news_created_at ON premium_news(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_tg_user_id ON bot_error_logs(tg_user_id);")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_user_id ON photos(user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_day_key ON photos(day_key);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(moderation_status);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_id ON ratings(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_photo_id ON comments(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_photo_id ON photo_reports(photo_id);")
-
 
 # -------------------- helpers --------------------
 
@@ -596,6 +609,41 @@ async def update_user_channel_link(user_id: int, link: str | None) -> None:
     async with p.acquire() as conn:
         await conn.execute("UPDATE users SET tg_channel_link=$1, updated_at=$2 WHERE id=$3",
                            link, get_moscow_now_iso(), int(user_id))
+        
+
+async def update_user_city(user_id: int, city: str | None) -> None:
+    p = _assert_pool()
+    value = (city or "").strip() or None
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET city=$1, updated_at=$2 WHERE id=$3",
+            value, get_moscow_now_iso(), int(user_id)
+        )
+
+async def update_user_country(user_id: int, country: str | None) -> None:
+    p = _assert_pool()
+    value = (country or "").strip() or None
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET country=$1, updated_at=$2 WHERE id=$3",
+            value, get_moscow_now_iso(), int(user_id)
+        )
+
+async def set_user_city_visibility(user_id: int, show: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET show_city=$1, updated_at=$2 WHERE id=$3",
+            1 if show else 0, get_moscow_now_iso(), int(user_id)
+        )
+
+async def set_user_country_visibility(user_id: int, show: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET show_country=$1, updated_at=$2 WHERE id=$3",
+            1 if show else 0, get_moscow_now_iso(), int(user_id)
+        )
 
 
 async def soft_delete_user(user_id: int) -> None:
@@ -1692,6 +1740,81 @@ async def get_daily_top_photos(day_key: str | None = None, limit: int = 4) -> li
             """,
             str(day_key), int(limit)
         )
+    return [dict(r) for r in rows]
+
+
+async def count_users_with_city(city: str) -> int:
+    c = (city or "").strip()
+    if not c:
+        return 0
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted=0 AND city=$1", c)
+    return int(v or 0)
+
+async def count_users_with_country(country: str) -> int:
+    c = (country or "").strip()
+    if not c:
+        return 0
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted=0 AND country=$1", c)
+    return int(v or 0)
+
+async def get_daily_top_photos_by_city(day_key: str, city: str, limit: int = 10) -> list[dict]:
+    c = (city or "").strip()
+    if not day_key or not c:
+        return []
+    p = _assert_pool()
+    query = """
+        SELECT
+          ph.*,
+          u.name     AS user_name,
+          u.username AS user_username,
+          COUNT(r.id)::int AS ratings_count,
+          AVG(r.value)::double precision AS avg_rating
+        FROM photos ph
+        JOIN users u ON u.id = ph.user_id
+        JOIN ratings r ON r.photo_id = ph.id
+        WHERE ph.is_deleted=0
+          AND ph.moderation_status='active'
+          AND u.is_deleted=0
+          AND ph.day_key=$1
+          AND u.city=$2
+        GROUP BY ph.id, u.id
+        ORDER BY AVG(r.value) DESC, COUNT(r.id) DESC, ph.id DESC
+        LIMIT $3
+    """
+    async with p.acquire() as conn:
+        rows = await conn.fetch(query, str(day_key), c, int(limit))
+    return [dict(r) for r in rows]
+
+async def get_daily_top_photos_by_country(day_key: str, country: str, limit: int = 10) -> list[dict]:
+    c = (country or "").strip()
+    if not day_key or not c:
+        return []
+    p = _assert_pool()
+    query = """
+        SELECT
+          ph.*,
+          u.name     AS user_name,
+          u.username AS user_username,
+          COUNT(r.id)::int AS ratings_count,
+          AVG(r.value)::double precision AS avg_rating
+        FROM photos ph
+        JOIN users u ON u.id = ph.user_id
+        JOIN ratings r ON r.photo_id = ph.id
+        WHERE ph.is_deleted=0
+          AND ph.moderation_status='active'
+          AND u.is_deleted=0
+          AND ph.day_key=$1
+          AND u.country=$2
+        GROUP BY ph.id, u.id
+        ORDER BY AVG(r.value) DESC, COUNT(r.id) DESC, ph.id DESC
+        LIMIT $3
+    """
+    async with p.acquire() as conn:
+        rows = await conn.fetch(query, str(day_key), c, int(limit))
     return [dict(r) for r in rows]
 
 

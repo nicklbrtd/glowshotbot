@@ -21,6 +21,10 @@ from database import (
     get_photo_rank_in_day,
     get_user_rating_summary,
     get_weekly_rank_for_user,
+    count_users_with_city, 
+    count_users_with_country,
+    get_daily_top_photos_by_city,
+    get_daily_top_photos_by_country
 )
 
 router = Router()
@@ -447,23 +451,169 @@ async def results_me(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:city")
 async def results_city(callback: CallbackQuery):
+    now = get_moscow_now()
     kb = build_results_menu_kb()
-    text = (
-        "🏙 <b>Мой город</b>\n\n"
-        "Скоро. Этот раздел будет работать, когда в городе будет достаточно участников."
-    )
-    await _show_text_result(callback, text, kb)
+
+    if now.hour < 7:
+        text = (
+            "⏰ Итоги по городу появляются после <b>07:00 по МСК</b>.\n\n"
+            f"Сейчас: <b>{now.strftime('%H:%M')}</b>."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    day_key = (now.date() - timedelta(days=1)).isoformat()
+
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    if not user:
+        await _show_text_result(callback, "🏙 <b>Мой город</b>\n\nПрофиль не найден. Попробуй /start.", kb)
+        await callback.answer()
+        return
+
+    city = (user.get("city") or "").strip()
+    if not city:
+        text = (
+            "🏙 <b>Мой город</b>\n\n"
+            "У тебя не указан город.\n"
+            "Зайди: <b>Профиль → Редактировать → Город</b>."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    people = await count_users_with_city(city)
+    if people < 100:
+        text = (
+            f"🏙 <b>Топ города: {city}</b>\n\n"
+            f"Пока участников маловато: <b>{people}</b> из <b>100</b>.\n\n"
+            "Этот раздел включится автоматически, когда в городе будет достаточно людей."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    top = await get_daily_top_photos_by_city(day_key, city, limit=10)
+    if not top:
+        text = (
+            f"🏙 <b>Топ города: {city}</b>\n"
+            f"📅 За вчера (<code>{day_key}</code>)\n\n"
+            "Пока нет ни одной фотографии с оценками в этом городе."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    lines = [
+        f"🏙 <b>Топ города: {city}</b>",
+        f"📅 За вчера (<code>{day_key}</code>)",
+        "",
+    ]
+
+    for i, item in enumerate(top, start=1):
+        avg = item.get("avg_rating")
+        avg_str = (f"{avg:.2f}".rstrip("0").rstrip(".") if avg is not None else "—")
+        title = item.get("title") or "Без названия"
+
+        author_name = (item.get("user_name") or "").strip()
+        username = item.get("user_username")
+        if username:
+            link_text = author_name or f"@{username}"
+            author_display = f'<a href="https://t.me/{username}">{link_text}</a>'
+        else:
+            author_display = author_name or "Неизвестный автор"
+
+        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "▪️"))
+        lines.append(f"{medal} {i}. <b>\"{title}\"</b>")
+        lines.append(f"    Автор: {author_display}")
+        lines.append(f"    ⭐ {avg_str}")
+        lines.append("")
+
+    await _show_text_result(callback, "\n".join(lines).strip(), kb)
     await callback.answer()
 
 
 @router.callback_query(F.data == "results:country")
 async def results_country(callback: CallbackQuery):
+    now = get_moscow_now()
     kb = build_results_menu_kb()
-    text = (
-        "🌍 <b>Моя страна</b>\n\n"
-        "Скоро. Этот раздел будет работать, когда в стране будет достаточно участников."
-    )
-    await _show_text_result(callback, text, kb)
+
+    if now.hour < 7:
+        text = (
+            "⏰ Итоги по стране появляются после <b>07:00 по МСК</b>.\n\n"
+            f"Сейчас: <b>{now.strftime('%H:%M')}</b>."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    day_key = (now.date() - timedelta(days=1)).isoformat()
+
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    if not user:
+        await _show_text_result(callback, "🌍 <b>Моя страна</b>\n\nПрофиль не найден. Попробуй /start.", kb)
+        await callback.answer()
+        return
+
+    country = (user.get("country") or "").strip()
+    if not country:
+        text = (
+            "🌍 <b>Моя страна</b>\n\n"
+            "У тебя не указана страна.\n"
+            "Зайди: <b>Профиль → Редактировать → Страна</b>."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    people = await count_users_with_country(country)
+    if people < 100:
+        text = (
+            f"🌍 <b>Топ страны: {country}</b>\n\n"
+            f"Пока участников маловато: <b>{people}</b> из <b>100</b>.\n\n"
+            "Этот раздел включится автоматически, когда в стране будет достаточно людей."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    top = await get_daily_top_photos_by_country(day_key, country, limit=10)
+    if not top:
+        text = (
+            f"🌍 <b>Топ страны: {country}</b>\n"
+            f"📅 За вчера (<code>{day_key}</code>)\n\n"
+            "Пока нет ни одной фотографии с оценками в этой стране."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    lines = [
+        f"🌍 <b>Топ страны: {country}</b>",
+        f"📅 За вчера (<code>{day_key}</code>)",
+        "",
+    ]
+
+    for i, item in enumerate(top, start=1):
+        avg = item.get("avg_rating")
+        avg_str = (f"{avg:.2f}".rstrip("0").rstrip(".") if avg is not None else "—")
+        title = item.get("title") or "Без названия"
+
+        author_name = (item.get("user_name") or "").strip()
+        username = item.get("user_username")
+        if username:
+            link_text = author_name or f"@{username}"
+            author_display = f'<a href="https://t.me/{username}">{link_text}</a>'
+        else:
+            author_display = author_name or "Неизвестный автор"
+
+        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "▪️"))
+        lines.append(f"{medal} {i}. <b>\"{title}\"</b>")
+        lines.append(f"    Автор: {author_display}")
+        lines.append(f"    ⭐ {avg_str}")
+        lines.append("")
+
+    await _show_text_result(callback, "\n".join(lines).strip(), kb)
     await callback.answer()
 
 

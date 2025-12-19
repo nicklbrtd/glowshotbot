@@ -24,6 +24,10 @@ from database import (
     get_awards_for_user,
     get_user_by_id,
     get_my_results_for_user,
+    update_user_city,
+    update_user_country,
+    set_user_city_visibility,
+    set_user_country_visibility,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -36,6 +40,8 @@ class ProfileEditStates(StatesGroup):
     waiting_new_age = State()
     waiting_new_bio = State()
     waiting_new_channel = State()
+    waiting_new_city = State()
+    waiting_new_country = State()
 
 
 def _plural_ru(value: int, one: str, few: str, many: str) -> str:
@@ -386,6 +392,21 @@ async def build_profile_view(user: dict):
 
         text_lines.append(f"📡 <b>Ссылка:</b> {display_link}")
 
+
+    city = (user.get("city") or "").strip()
+    country = (user.get("country") or "").strip()
+    show_city = bool(user.get("show_city", 1))
+    show_country = bool(user.get("show_country", 1))
+
+    loc_parts: list[str] = []
+    if city and show_city:
+        loc_parts.append(city)
+    if country and show_country:
+        loc_parts.append(country)
+
+    if loc_parts:
+        text_lines.append(f"📍 <b>Локация:</b> {' • '.join(loc_parts)}")
+
     # Описание профиля — тоже наверху, сразу после ссылки (если есть)
     text_lines.extend(
         [
@@ -518,9 +539,11 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     kb.button(text="📝 Описание", callback_data="profile:edit_bio")
     kb.button(text="⚧️ Пол", callback_data="profile:edit_gender")
     kb.button(text="📡 Ссылка", callback_data="profile:edit_channel")
+    kb.button(text="🏙 Город", callback_data="profile:edit_city")
+    kb.button(text="🌍 Страна", callback_data="profile:edit_country")
     kb.button(text="🗑 Удалить аккаунт", callback_data="profile:delete")
     kb.button(text="⬅️ Назад", callback_data="menu:profile")
-    kb.adjust(2, 2, 2, 1, 1)
+    kb.adjust(2, 2, 2, 2, 1, 1)
 
     await callback.message.edit_text(
         "✏️ Что хочешь изменить в профиле?",
