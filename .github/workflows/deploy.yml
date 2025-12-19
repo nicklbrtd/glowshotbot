@@ -7,25 +7,27 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
           script: |
-            set -e
-
-            cd /home/nick/glowshotbot
-
+            cd ~/glowshotbot
             git fetch --all
             git reset --hard origin/main
 
-            /home/nick/glowshotbot/venv/bin/pip install -r requirements.txt
+            source venv/bin/activate
+            pip install -r requirements.txt
 
             sudo systemctl restart glowshot-bot
             sudo systemctl restart glowshot-support
 
-            sudo systemctl --no-pager status glowshot-bot
-            sudo systemctl --no-pager status glowshot-support
+            sudo systemctl status glowshot-bot --no-pager
+            sudo systemctl status glowshot-support --no-pager
