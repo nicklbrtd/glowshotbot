@@ -13,7 +13,6 @@ from .menu import router as menu_router
 from .stats import router as stats_router
 from .users import router as users_router
 from .roles import router as roles_router
-from .payments import router as payments_router
 from .logs import router as logs_router
 from .broadcast import router as broadcast_router
 
@@ -30,7 +29,6 @@ router.include_router(menu_router)
 router.include_router(stats_router)
 router.include_router(users_router)
 router.include_router(roles_router)
-router.include_router(payments_router)
 router.include_router(logs_router)
 router.include_router(broadcast_router)
 if settings_router is not None:

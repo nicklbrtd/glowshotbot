@@ -116,12 +116,11 @@ def build_admin_menu() -> InlineKeyboardMarkup:
     kb.button(text="🙍‍♂️ Пользователи", callback_data="admin:users")
 
     # 3 ряд
-    kb.button(text="💰 Платежи", callback_data="admin:payments")
     kb.button(text="🧾 Логи / ошибки", callback_data="admin:logs:page:1")
 
     # 4 ряд
     kb.button(text="⚙️ Настройки", callback_data="admin:settings")
     kb.button(text="⬅️ В меню", callback_data="menu:back")
 
-    kb.adjust(2, 2, 2, 2)
+    kb.adjust(2, 2, 1, 2)
     return kb.as_markup()

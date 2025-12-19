@@ -125,11 +125,6 @@ class BroadcastStates(StatesGroup):
     waiting_text = State()
 
 
-class PaymentsStates(StatesGroup):
-    """Раздел «Платежи»: сервисные состояния (если нужно)."""
-    idle = State()
-
-
 class UserAdminStates(StatesGroup):
     """Раздел «Пользователи»: ожидаем идентификатор."""
     waiting_identifier_for_profile = State()
@@ -225,7 +220,6 @@ __all__ = [
     "AdminStates",
     "RoleStates",
     "BroadcastStates",
-    "PaymentsStates",
     "UserAdminStates",
     "UserAwardsStates",
     "AchievementStates",
