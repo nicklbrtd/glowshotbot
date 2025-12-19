@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
-from utils.time import get_moscow_now
-# чтобы handlers/results.py не падал
-from utils.time import get_moscow_today as get_moscow_today
+
+from utils.time import get_moscow_now, get_moscow_today
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -16,9 +15,37 @@ from keyboards.common import build_back_to_menu_kb
 from database import (
     get_weekly_best_photo,
     get_daily_top_photos,
+    get_user_by_tg_id,
+    get_user_best_photo_in_day,
+    count_active_photos_in_day,
+    get_photo_rank_in_day,
+    get_user_rating_summary,
+    get_weekly_rank_for_user,
 )
 
 router = Router()
+
+# ========== Меню итогов (база для всех) ==========
+
+def build_results_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Итоги дня", callback_data="results:day"),
+                InlineKeyboardButton(text="🗓 Итоги недели", callback_data="results:week"),
+            ],
+            [
+                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+            ],
+            [
+                InlineKeyboardButton(text="🏙 Мой город", callback_data="results:city"),
+                InlineKeyboardButton(text="🌍 Моя страна", callback_data="results:country"),
+            ],
+            [
+                InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+            ],
+        ]
+    )
 
 # ========== Итоги дня ==========
 def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
@@ -86,14 +113,10 @@ async def _show_text_result(
     text: str,
     reply_markup: InlineKeyboardMarkup,
 ) -> None:
-    """
-    UX-правило:
-    1) пытаемся отредактировать текущее сообщение;
-    2) если не вышло — удаляем его и отправляем новое.
-    """
+    """Best-effort render: try edit, else delete+send."""
     msg = callback.message
 
-    # 1) Пробуем отредактировать
+    # 1) Try to edit current message
     try:
         if msg.photo:
             await msg.edit_caption(caption=text, reply_markup=reply_markup)
@@ -103,7 +126,7 @@ async def _show_text_result(
     except Exception:
         pass
 
-    # 2) Фоллбек: удаляем и отправляем новое
+    # 2) Fallback: delete + send new
     try:
         await msg.delete()
     except Exception:
@@ -117,38 +140,10 @@ async def _show_text_result(
             disable_notification=True,
         )
     except Exception:
-        # прям самый последний шанс
         try:
             await msg.answer(text, reply_markup=reply_markup)
         except Exception:
             pass
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(
-                caption=text,
-                reply_markup=reply_markup,
-            )
-        else:
-            await callback.message.edit_text(
-                text,
-                reply_markup=reply_markup,
-            )
-    except Exception:
-        try:
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=reply_markup,
-                disable_notification=True,
-            )
-        except Exception:
-            try:
-                await callback.message.answer(
-                    text,
-                    reply_markup=reply_markup,
-                )
-            except Exception:
-                pass
 
 
 async def _show_photo_result(
@@ -348,6 +343,127 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
     nav = build_day_nav_kb(day_key, step=4)
 
     await _show_text_result(callback, text, nav)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "results:menu")
+async def results_menu(callback: CallbackQuery):
+    kb = build_results_menu_kb()
+    text = (
+        "🏁 <b>Итоги</b>\n\n"
+        "Выбирай раздел ниже 👇\n\n"
+        "<i>Пока что здесь базовые итоги для всех. Лиги/теги/конкурсы добавим позже.</i>"
+    )
+    await _show_text_result(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "results:me")
+async def results_me(callback: CallbackQuery):
+    now = get_moscow_now()
+    day_key = (now.date() - timedelta(days=1)).isoformat()
+
+    kb = build_results_menu_kb()
+
+    # Resolve current user
+    tg_id = callback.from_user.id
+    user = await get_user_by_tg_id(int(tg_id))
+    if not user:
+        text = (
+            "👤 <b>Мои итоги</b>\n\n"
+            "Я пока не вижу твой профиль в базе. Попробуй /start и зайди снова."
+        )
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    user_id = int(user["id"])
+
+    # Best photo for yesterday (even if it has 0 ratings)
+    best = await get_user_best_photo_in_day(user_id, day_key)
+
+    # Weekly rank (optional)
+    weekly_rank = await get_weekly_rank_for_user(user_id)
+
+    # If user had no photos yesterday
+    if not best:
+        summary = await get_user_rating_summary(user_id)
+        avg = summary.get("avg_received")
+        avg_str = (f"{avg:.2f}".rstrip("0").rstrip(".") if avg is not None else "—")
+
+        text = (
+            f"👤 <b>Мои итоги</b>\n\n"
+            f"За вчера (<code>{day_key}</code>) у тебя не было активных фото.\n\n"
+            f"📊 Твой общий рейтинг по полученным оценкам: <b>{avg_str}</b>\n"
+            f"⭐ Всего получено оценок: <b>{summary.get('ratings_received', 0)}</b>\n"
+        )
+        if weekly_rank is not None:
+            text += f"\n🗓 Место за 7 дней среди авторов: <b>#{weekly_rank}</b>"
+
+        await _show_text_result(callback, text, kb)
+        await callback.answer()
+        return
+
+    title = (best.get("title") or "Без названия").strip()
+    avg = best.get("avg_rating")
+    cnt = int(best.get("ratings_count") or 0)
+
+    avg_str = (f"{float(avg):.2f}".rstrip("0").rstrip(".") if avg is not None else "—")
+
+    # Photo rank in the day
+    place = await get_photo_rank_in_day(int(best["id"]), day_key)
+    total = await count_active_photos_in_day(day_key)
+
+    if place is not None and total > 0:
+        pct = (place / total) * 100.0
+        # "топ X%" — smaller is better
+        top_pct = f"{pct:.1f}".rstrip("0").rstrip(".")
+        place_line = f"🏁 Место в дне: <b>#{place}</b> из <b>{total}</b> (топ <b>{top_pct}%</b>)"
+    else:
+        place_line = "🏁 Место в дне: <b>—</b>"
+
+    caption_lines = [
+        f"👤 <b>Мои итоги за вчера</b> (<code>{day_key}</code>)",
+        "",
+        f"🖼️ <b>\"{title}\"</b>",
+        f"⭐ Рейтинг: <b>{avg_str}</b>",
+        f"🗳 Оценок: <b>{cnt}</b>",
+        place_line,
+    ]
+
+    if weekly_rank is not None:
+        caption_lines.append(f"🗓 Место за 7 дней среди авторов: <b>#{weekly_rank}</b>")
+
+    caption = "\n".join(caption_lines)
+
+    file_id = best.get("file_id")
+    if file_id:
+        await _show_photo_result(callback, file_id=str(file_id), caption=caption, reply_markup=kb)
+    else:
+        await _show_text_result(callback, caption, kb)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "results:city")
+async def results_city(callback: CallbackQuery):
+    kb = build_results_menu_kb()
+    text = (
+        "🏙 <b>Мой город</b>\n\n"
+        "Скоро. Этот раздел будет работать, когда в городе будет достаточно участников."
+    )
+    await _show_text_result(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "results:country")
+async def results_country(callback: CallbackQuery):
+    kb = build_results_menu_kb()
+    text = (
+        "🌍 <b>Моя страна</b>\n\n"
+        "Скоро. Этот раздел будет работать, когда в стране будет достаточно участников."
+    )
+    await _show_text_result(callback, text, kb)
     await callback.answer()
 
 

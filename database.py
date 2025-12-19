@@ -1695,24 +1695,102 @@ async def get_daily_top_photos(day_key: str | None = None, limit: int = 4) -> li
     return [dict(r) for r in rows]
 
 
-async def get_weekly_best_photo() -> dict | None:
+# Helper: count active, non-deleted photos for a given day_key
+async def count_active_photos_in_day(day_key: str) -> int:
+    """How many active, non-deleted photos exist for a given day_key."""
     p = _assert_pool()
-    now = get_moscow_now().date()
-    start = (now - timedelta(days=7)).isoformat()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM photos
+            WHERE is_deleted=0
+              AND moderation_status='active'
+              AND day_key=$1
+            """,
+            str(day_key),
+        )
+    return int(v or 0)
+
+
+# Helper: get user's best photo for a specific day_key (even if 0 ratings)
+async def get_user_best_photo_in_day(user_id: int, day_key: str) -> dict | None:
+    """Return user's best photo for a specific day_key (even if it has 0 ratings).
+
+    Ranking: avg_rating desc, ratings_count desc, created_at asc.
+    Adds keys: ratings_count, avg_rating.
+    """
+    p = _assert_pool()
     async with p.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT p.*,
-                   COUNT(r.id) AS ratings_count,
-                   AVG(r.value)::double precision AS avg_rating
-            FROM photos p
-            JOIN ratings r ON r.photo_id=p.id
-            WHERE p.is_deleted=0 AND p.moderation_status='active' AND p.day_key >= $1
-            GROUP BY p.id
-            ORDER BY AVG(r.value) DESC, COUNT(r.id) DESC
+            WITH s AS (
+              SELECT
+                ph.*,
+                COALESCE(AVG(r.value), 0)::double precision AS avg_rating,
+                COUNT(r.id)::int AS ratings_count
+              FROM photos ph
+              LEFT JOIN ratings r ON r.photo_id = ph.id
+              WHERE ph.user_id=$1
+                AND ph.day_key=$2
+                AND ph.is_deleted=0
+                AND ph.moderation_status='active'
+              GROUP BY ph.id
+            )
+            SELECT *
+            FROM s
+            ORDER BY avg_rating DESC, ratings_count DESC, created_at ASC, id ASC
             LIMIT 1
             """,
-            start
+            int(user_id),
+            str(day_key),
+        )
+    return dict(row) if row else None
+
+
+async def get_weekly_best_photo(start_iso: str | None = None, end_iso: str | None = None) -> dict | None:
+    """Best weekly photo within [start_iso, end_iso] (day_key range), Moscow days.
+
+    If dates are not provided, defaults to last 7 days including today.
+
+    Winner rule (as expected by handlers/results.py):
+    - only photos with avg_rating >= 9.0
+    - order by avg desc, ratings_count desc
+
+    Returns p.* plus:
+      ratings_count, avg_rating, user_name, user_username
+    """
+    p = _assert_pool()
+
+    now = get_moscow_now().date()
+    if not start_iso or not end_iso:
+        start_iso = (now - timedelta(days=6)).isoformat()
+        end_iso = now.isoformat()
+
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+              ph.*,
+              u.name     AS user_name,
+              u.username AS user_username,
+              COUNT(r.id)::int AS ratings_count,
+              AVG(r.value)::double precision AS avg_rating
+            FROM photos ph
+            JOIN ratings r ON r.photo_id = ph.id
+            JOIN users   u ON u.id = ph.user_id
+            WHERE ph.is_deleted=0
+              AND ph.moderation_status='active'
+              AND u.is_deleted=0
+              AND ph.day_key >= $1
+              AND ph.day_key <= $2
+            GROUP BY ph.id, u.id
+            HAVING AVG(r.value) >= 9.0
+            ORDER BY AVG(r.value) DESC, COUNT(r.id) DESC, ph.id DESC
+            LIMIT 1
+            """,
+            str(start_iso),
+            str(end_iso),
         )
     return dict(row) if row else None
 

@@ -245,6 +245,7 @@ def build_my_photo_stats_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+
 def _fmt_avg(v: float | None) -> str:
     if v is None:
         return "—"
@@ -252,6 +253,27 @@ def _fmt_avg(v: float | None) -> str:
         return f"{float(v):.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "—"
+
+
+# ===== Upload wizard navigation keyboard (Назад / Отмена) =====
+
+def build_upload_wizard_kb(*, back_to: str = "menu") -> InlineKeyboardMarkup:
+    """Inline keyboard for upload wizard.
+
+    back_to:
+      - "menu": go back to "Моя фотография" section
+      - "photo": go back to photo step (re-upload)
+    """
+    kb = InlineKeyboardBuilder()
+
+    if back_to == "photo":
+        kb.button(text="⬅️ Назад", callback_data="myphoto:upload_back")
+    else:
+        kb.button(text="⬅️ Назад", callback_data="myphoto:open")
+
+    kb.button(text="❌ Отмена", callback_data="myphoto:upload_cancel")
+    kb.adjust(2)
+    return kb.as_markup()
 
 
 async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
@@ -916,7 +938,62 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
+
 # ========= ДОБАВЛЕНИЕ ФОТО =========
+
+
+# --- Upload wizard: Cancel/Back handlers ---
+
+
+@router.callback_query(F.data == "myphoto:upload_cancel")
+async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
+    """Cancel upload wizard and return to My Photo section."""
+    try:
+        await state.clear()
+    except Exception:
+        pass
+
+    # Reuse existing My Photo entry handler to render proper UI.
+    callback.data = "myphoto:open"
+    await my_photo_menu(callback, state)
+
+
+@router.callback_query(F.data == "myphoto:upload_back")
+async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
+    """Go back inside upload wizard (from title step back to photo step)."""
+    cur_state = await state.get_state()
+
+    # If we are on title step — go back to photo step
+    if cur_state == MyPhotoStates.waiting_title.state:
+        await state.set_state(MyPhotoStates.waiting_photo)
+        await state.update_data(file_id=None, title=None)
+
+        text = "Окей, вернёмся назад. Теперь отправь фотографию (1 шт.), которую хочешь выложить."
+        kb = build_upload_wizard_kb(back_to="menu")
+
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=text, reply_markup=kb)
+            else:
+                await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb,
+                disable_notification=True,
+            )
+
+        await callback.answer()
+        return
+
+    # From any other wizard state (or no state) — just return to My Photo section
+    callback.data = "myphoto:open"
+    await my_photo_menu(callback, state)
 
 
 # ---- helper for upload limit after delete ----
@@ -996,12 +1073,13 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     )
 
     text = "Теперь отправь фотографию (1 шт.), которую хочешь выложить."
+    kb = build_upload_wizard_kb(back_to="menu")
 
     try:
         if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=None)
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
         else:
-            await callback.message.edit_text(text, reply_markup=None)
+            await callback.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest:
         try:
             await callback.message.delete()
@@ -1010,6 +1088,7 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         sent = await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
             text=text,
+            reply_markup=kb,
             disable_notification=True,
         )
         # важно: обновим upload_msg_id, иначе дальнейшие шаги будут ссылаться на удалённое сообщение
@@ -1064,8 +1143,9 @@ async def myphoto_got_photo(message: Message, state: FSMContext):
         photo=file_id,
         caption=(
             f"{draft_text}\n\n"
-            "Теперь напиши название этой работы."
+            "Теперь напиши название этой работы.\n\nМожешь нажать «Назад», чтобы заменить фото, или «Отмена»."
         ),
+        reply_markup=build_upload_wizard_kb(back_to="photo"),
         disable_notification=True,
     )
 
@@ -1113,6 +1193,7 @@ async def myphoto_got_title(message: Message, state: FSMContext):
                     "Название не может быть пустым.\n\n"
                     "Как назовём эту работу?"
                 ),
+                reply_markup=build_upload_wizard_kb(back_to="photo"),
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -1130,6 +1211,7 @@ async def myphoto_got_title(message: Message, state: FSMContext):
                     "В названии нельзя оставлять @username, ссылки или сайты.\n\n"
                     "Придумай название без контактов — только про саму фотографию."
                 ),
+                reply_markup=build_upload_wizard_kb(back_to="photo"),
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
