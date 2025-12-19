@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from typing import Dict
 
 from aiogram import Bot, Dispatcher, F
@@ -23,6 +24,9 @@ tickets: Dict[tuple[int, int], dict] = {}
 # pending_replies[agent_id] = (user_id, ticket_id), которому нужно ответить
 pending_replies: Dict[int, tuple[int, int]] = {}
 
+# pending_sections[user_id] = выбранный раздел, после которого ждём сообщение/вложение от пользователя
+pending_sections: Dict[int, str] = {}
+
 
 async def main():
     bot = Bot(
@@ -30,6 +34,61 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+
+    def build_start_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🐞 Баг / ошибка", callback_data="support_section:bug")],
+                [InlineKeyboardButton(text="💎 Вопрос по Премиум", callback_data="support_section:premium")],
+                [InlineKeyboardButton(text="🔐 Доступ к боту", callback_data="support_section:access")],
+                [InlineKeyboardButton(text="🚫 Жалоба", callback_data="support_section:complaint")],
+                [InlineKeyboardButton(text="📝 Другое", callback_data="support_section:other")],
+            ]
+        )
+
+    def section_label(code: str) -> str:
+        mapping = {
+            "bug": "Баг / ошибка",
+            "premium": "Вопрос по Премиум",
+            "access": "Доступ к боту",
+            "complaint": "Жалоба",
+            "other": "Другое",
+        }
+        return mapping.get(code, code)
+
+    @dp.message(CommandStart())
+    async def start_menu(message: Message):
+        # В чате поддержки /start не нужен
+        if message.chat.id == SUPPORT_CHAT_ID:
+            return
+
+        today = datetime.now().strftime("%d.%m.%Y")
+        text = (
+            "Привет! на связи поддержка GlowShot, что у вас случилось?\n"
+            f"ID: <code>{message.from_user.id}</code>\n"
+            f"дата: {today}"
+        )
+        await message.answer(text, reply_markup=build_start_menu())
+
+    @dp.callback_query(F.data.startswith("support_section:"))
+    async def support_section_callback(callback: CallbackQuery):
+        # Раздел выбирает только пользователь (не в SUPPORT_CHAT_ID)
+        if callback.message and callback.message.chat.id == SUPPORT_CHAT_ID:
+            await callback.answer("Эта кнопка не для чата поддержки.", show_alert=True)
+            return
+
+        try:
+            _, code = callback.data.split(":", 1)
+        except Exception:
+            await callback.answer("Ошибка данных.", show_alert=True)
+            return
+
+        pending_sections[callback.from_user.id] = code
+
+        await callback.message.answer(
+            "Супер! опишите поподробнее, что у вас случилось, я отправлю ваш запрос админам и вам ответят в ближайшее время."
+        )
+        await callback.answer("Ок ✅")
 
     @dp.message(Command("chatid"))
     async def get_chat_id(message: Message):
@@ -77,6 +136,7 @@ async def main():
                 message_id=support_msg_id,
                 text=(
                     f"✅ Вопрос #{ticket_id} решен\n\n"
+                    f"Раздел: <b>{ticket.get('section') or '—'}</b>\n\n"
                     f"Сообщение:\n"
                     f"{original_text}"
                 ),
@@ -126,11 +186,19 @@ async def main():
             ]
         )
 
-        # Шлём ответ юзеру
+        section = "—"
+        try:
+            section = (tickets.get((user_id, ticket_id)) or {}).get("section") or "—"
+        except Exception:
+            section = "—"
+
         await message.bot.send_message(
             chat_id=user_id,
             text=(
-                f"💬 <b>Ответ от поддержки на тикет #{ticket_id}</b>\n\n"
+                "💬 <b>Ответ от поддержки!</b>\n"
+                f"Тикет #{ticket_id}\n"
+                f"Раздел: <b>{section}</b>\n\n"
+                "Сообщение:\n"
                 f"{message.text}"
             ),
             reply_markup=feedback_kb,
@@ -143,14 +211,30 @@ async def main():
 
     @dp.message()
     async def handle_support(message: Message):
-        """
-        Любое сообщение НЕ из SUPPORT_CHAT_ID считаем тикетом от пользователя.
+        """ 
+        Сообщения НЕ из SUPPORT_CHAT_ID:
+        1) /start показывает меню разделов.
+        2) После выбора раздела следующее сообщение/вложение создаёт тикет.
         """
         if message.chat.id == SUPPORT_CHAT_ID:
             # для чата поддержки есть отдельный хендлер выше
             return
 
         user = message.from_user
+
+        # Если пользователь ещё не выбрал раздел — показываем меню
+        if user.id not in pending_sections:
+            today = datetime.now().strftime("%d.%m.%Y")
+            text = (
+                "Привет! на связи поддержка GlowShot, что у вас случилось?\n"
+                f"ID: <code>{user.id}</code>\n"
+                f"дата: {today}"
+            )
+            await message.answer(text, reply_markup=build_start_menu())
+            return
+
+        section_code = pending_sections.pop(user.id)
+        section = section_label(section_code)
 
         ticket_id = message.message_id  # используем message_id как номер тикета
 
@@ -159,31 +243,43 @@ async def main():
             f"Тикет: #{ticket_id}\n"
             f"ID пользователя: <code>{user.id}</code>\n"
             f"Username: @{user.username if user.username else '—'}\n"
-            "Сообщение:\n"
+            f"Раздел: <b>{section}</b>\n\n"
+            "Сообщение пользователя:\n"
         )
 
-        # 1) шлём текст в чат поддержки + кнопка "Ответить"
-        if message.text:
-            body = header + message.text
-        else:
-            body = header + "📎 Вложение"
-
-        reply_button = InlineKeyboardMarkup(
+        # Админские кнопки: Ответить / Завершить
+        admin_kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
                         text="✉️ Ответить",
                         callback_data=f"support_reply:{user.id}:{ticket_id}",
-                    )
+                    ),
+                    InlineKeyboardButton(
+                        text="✅ Завершить",
+                        callback_data=f"support_close:{user.id}:{ticket_id}",
+                    ),
                 ]
             ]
         )
 
+        # 1) Шлём заголовок в чат поддержки
+        # Текст выводим здесь, а вложения — отдельным forward'ом ниже
+        if message.text:
+            body = header + message.text
+        else:
+            body = header + "📎 Вложение"
+
         sent = await message.bot.send_message(
             chat_id=SUPPORT_CHAT_ID,
             text=body,
-            reply_markup=reply_button,
+            reply_markup=admin_kb,
         )
+
+        # 1.1) Если есть вложения — форвардим оригинал (чтобы были фото/файл и т.д.)
+        # Для чистого текста не форвардим, чтобы не дублировать.
+        if not message.text:
+            await message.forward(SUPPORT_CHAT_ID)
 
         # Сохраняем информацию о тикете в памяти
         tickets[(user.id, ticket_id)] = {
@@ -191,15 +287,12 @@ async def main():
             "user_id": user.id,
             "text": message.text or "📎 Вложение",
             "status": "open",
+            "section": section,
         }
-
-        # если это не текст, можно форварднуть оригинальное сообщение следом
-        if not message.text:
-            await message.forward(SUPPORT_CHAT_ID)
 
         # 2) отвечаем юзеру
         await message.answer(
-            f"Спасибо, твой номер тикета #{ticket_id}, жди ответа от поддержки 💌"
+            f"Отлично! ваша заявка #{ticket_id} создана!\nОжидайте ответа от поддержки."
         )
 
     @dp.callback_query(F.data.startswith("ticket_feedback:"))
@@ -239,6 +332,7 @@ async def main():
                     message_id=support_msg_id,
                     text=(
                         f"✅ Вопрос #{ticket_id} решен\n\n"
+                        f"Раздел: <b>{ticket.get('section') or '—'}</b>\n\n"
                         f"Сообщение:\n"
                         f"{original_text}"
                     ),
@@ -308,6 +402,49 @@ async def main():
         )
 
         await callback.answer("Режим ответа включен ✅")
+
+    @dp.callback_query(F.data.startswith("support_close:"))
+    async def support_close_callback(callback: CallbackQuery):
+        """Закрыть тикет кнопкой из чата поддержки (аналог /resolve)."""
+        try:
+            _, user_id_str, ticket_id_str = callback.data.split(":")
+            user_id = int(user_id_str)
+            ticket_id = int(ticket_id_str)
+        except (ValueError, AttributeError):
+            await callback.answer("Ошибка данных", show_alert=True)
+            return
+
+        key = (user_id, ticket_id)
+        ticket = tickets.get(key)
+        if not ticket:
+            await callback.answer("Тикет не найден (возможно, бот перезапускался).", show_alert=True)
+            return
+
+        support_msg_id = ticket.get("support_msg_id")
+        original_text = ticket.get("text") or "—"
+        section = ticket.get("section") or "—"
+
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=SUPPORT_CHAT_ID,
+                message_id=support_msg_id,
+                text=(
+                    f"✅ Вопрос #{ticket_id} решен\n\n"
+                    f"Раздел: <b>{section}</b>\n\n"
+                    "Сообщение:\n"
+                    f"{original_text}"
+                ),
+            )
+        except Exception:
+            pass
+
+        ticket["status"] = "resolved"
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await callback.answer("Тикет закрыт ✅")
 
     await dp.start_polling(bot)
 
