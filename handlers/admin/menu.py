@@ -31,6 +31,15 @@ except Exception:  # pragma: no cover
 router = Router()
 
 
+async def _reset_fsm_state_only(state: FSMContext) -> None:
+    """Сбрасываем только FSM-состояние, не трогая data (чтобы не терять admin_chat_id/admin_msg_id)."""
+    try:
+        await state.set_state(None)
+    except Exception:
+        # fallback (на всякий случай)
+        pass
+
+
 # =============================================================
 # ==== UI TEXT =================================================
 # =============================================================
@@ -52,7 +61,7 @@ def _build_admin_panel_text(tg_id: int) -> str:
 @router.message(Command("admin"))
 async def admin_entry(message: Message, state: FSMContext):
     # всегда сбрасываем, чтобы ничего не залипало
-    await state.clear()
+    await _reset_fsm_state_only(state)
 
     user = await _ensure_user(message)
     if user is None:
@@ -95,7 +104,10 @@ async def admin_menu(callback: CallbackQuery, state: FSMContext):
         return
 
     # ВАЖНО: при входе в главное админ-меню всегда сбрасываем состояния
-    await state.clear()
+    await _reset_fsm_state_only(state)
+
+    # Запоминаем id текущего сообщения, чтобы дальше ВСЕГДА его редактировать
+    await state.update_data(admin_chat_id=callback.message.chat.id, admin_msg_id=callback.message.message_id)
 
     await edit_or_answer(
         callback.message,
@@ -114,7 +126,7 @@ async def admin_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin:cancel")
 async def admin_cancel(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
+    await _reset_fsm_state_only(state)
     # возвращаем в обычное меню бота (или просто закрываем админку)
     try:
         await callback.message.delete()
@@ -135,7 +147,7 @@ async def admin_cancel(callback: CallbackQuery, state: FSMContext):
 async def admin_check_password(message: Message, state: FSMContext):
     user = await _ensure_user(message)
     if user is None:
-        await state.clear()
+        await _reset_fsm_state_only(state)
         return
 
     pwd = (message.text or "").strip()
@@ -167,7 +179,7 @@ async def admin_check_password(message: Message, state: FSMContext):
             # если в проекте другая схема ролей — просто продолжим (доступ будет в рамках текущей сессии)
             pass
 
-    await state.clear()
+    await _reset_fsm_state_only(state)
 
     await edit_or_answer(
         message,
