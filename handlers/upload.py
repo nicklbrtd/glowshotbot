@@ -984,8 +984,6 @@ async def myphoto_got_description(message: Message, state: FSMContext):
 # ====== DELETE PHOTO HANDLER PATCH ======
 
 # Patch the delete handler to show correct post-delete UI
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
 
 @router.callback_query(F.data.regexp(r"^myphoto:delete:(\d+)$"))
 async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
@@ -1207,6 +1205,58 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
             disable_notification=True,
         )
     await callback.answer("Отменено")
+
+
+
+# ====== COMMENTS SORT HANDLERS (EARLY CATCH) ======
+# Эти хендлеры ловят callbacks гарантированно, даже если ниже есть дубли/конфликты.
+
+@router.callback_query(F.data.startswith("myphoto:comments_sort:"))
+async def myphoto_comments_sort_toggle_early(callback: CallbackQuery, state: FSMContext):
+    # expected: myphoto:comments_sort:<photo_id>:<page>:<sort_key>:<sort_dir>:<0|1>
+    try:
+        parts = (callback.data or "").split(":")
+        photo_id = int(parts[2])
+        page = int(parts[3])
+        sort_key = parts[4] if len(parts) > 4 else "date"
+        sort_dir = parts[5] if len(parts) > 5 else "desc"
+        show_sort = parts[6] if len(parts) > 6 else "1"
+
+        if sort_key not in {"date", "score"}:
+            sort_key = "date"
+        if sort_dir not in {"asc", "desc"}:
+            sort_dir = "desc"
+        if show_sort not in {"0", "1"}:
+            show_sort = "1"
+
+        callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{show_sort}"
+        await myphoto_comments(callback, state)
+    except Exception as e:
+        await callback.answer(f"Сортировка не открылась: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("myphoto:comments_setsort:"))
+async def myphoto_comments_setsort_early(callback: CallbackQuery, state: FSMContext):
+    # expected: myphoto:comments_setsort:<photo_id>:<page>:<sort_key>:<sort_dir>:<0|1>
+    try:
+        parts = (callback.data or "").split(":")
+        photo_id = int(parts[2])
+        page = int(parts[3])
+        sort_key = parts[4] if len(parts) > 4 else "date"
+        sort_dir = parts[5] if len(parts) > 5 else "desc"
+        show_sort = parts[6] if len(parts) > 6 else "1"
+
+        if sort_key not in {"date", "score"}:
+            sort_key = "date"
+        if sort_dir not in {"asc", "desc"}:
+            sort_dir = "desc"
+        if show_sort not in {"0", "1"}:
+            show_sort = "1"
+
+        callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{show_sort}"
+        await myphoto_comments(callback, state)
+    except Exception as e:
+        await callback.answer(f"Сортировка не применилась: {e}", show_alert=True)
 
 
 # ====== MY PHOTO CALLBACK HANDLERS FOR COMMENTS/STATS/REPEAT/PROMOTE/EDIT ======
@@ -1481,34 +1531,6 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
-
-
-
-@router.callback_query(F.data.regexp(r"^myphoto:comments_sort:(\d+):(\d+):(date|score):(asc|desc):(0|1)$"))
-async def myphoto_comments_sort_toggle(callback: CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
-    photo_id = int(parts[2])
-    page = int(parts[3])
-    sort_key = parts[4]
-    sort_dir = parts[5]
-    show_sort = parts[6] == "1"
-
-    # просто переоткрываем комментарии с теми же параметрами
-    callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{1 if show_sort else 0}"
-    await myphoto_comments(callback, state)
-
-
-@router.callback_query(F.data.regexp(r"^myphoto:comments_setsort:(\d+):(\d+):(date|score):(asc|desc):(0|1)$"))
-async def myphoto_comments_setsort(callback: CallbackQuery, state: FSMContext):
-    parts = callback.data.split(":")
-    photo_id = int(parts[2])
-    page = int(parts[3])
-    sort_key = parts[4]
-    sort_dir = parts[5]
-    show_sort = parts[6] == "1"
-
-    callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{1 if show_sort else 0}"
-    await myphoto_comments(callback, state)
 
 
 # --- Stats handler ---
