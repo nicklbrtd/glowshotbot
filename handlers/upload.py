@@ -1493,6 +1493,7 @@ async def myphoto_comments_sort_toggle(callback: CallbackQuery, state: FSMContex
     sort_dir = parts[5]
     show_sort = parts[6] == "1"
 
+    # просто переоткрываем комментарии с теми же параметрами
     callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{1 if show_sort else 0}"
     await myphoto_comments(callback, state)
 
