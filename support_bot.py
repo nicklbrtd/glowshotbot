@@ -34,6 +34,12 @@ async def main():
     )
     dp = Dispatcher()
 
+    def find_ticket_key_by_id(ticket_id: int) -> tuple[int, int] | None:
+        for (uid, tid), _info in tickets.items():
+            if int(tid) == int(ticket_id):
+                return (uid, tid)
+        return None
+
     def build_start_menu() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -146,6 +152,114 @@ async def main():
         ticket["status"] = "resolved"
         await message.answer(f"Тикет #{ticket_id} помечен как решенный ✅")
 
+
+    @dp.message(F.chat.id == SUPPORT_CHAT_ID, Command("h"))
+    async def take_ticket_manual(message: Message):
+        """Взять тикет в работу: /h <ticket_id>. Включает режим ответа для оператора."""
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            await message.answer("Использование: /h <номер_тикета>")
+            return
+
+        try:
+            ticket_id = int(parts[1])
+        except ValueError:
+            await message.answer("Номер тикета должен быть числом.")
+            return
+
+        key = find_ticket_key_by_id(ticket_id)
+        if key is None:
+            await message.answer("Тикет с таким номером не найден (возможно, бот перезапускался).")
+            return
+
+        user_id, tid = key
+        pending_replies[message.from_user.id] = (user_id, tid)
+
+        # уведомим пользователя, что оператор подключился
+        try:
+            await message.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "👤 <b>Оператор подключился!</b>\n"
+                    f"Тикет #{ticket_id}\n\n"
+                    "Напишите уточнения или дождитесь ответа — я передам оператору."
+                ),
+            )
+        except Exception:
+            pass
+
+        await message.answer(
+            f"Ок, взял тикет #{ticket_id}. Напиши следующее сообщение в чат — я отправлю пользователю ✅",
+            reply_markup=ForceReply(selective=True),
+        )
+
+
+    @dp.message(F.chat.id == SUPPORT_CHAT_ID, Command("hd"))
+    async def close_ticket_manual(message: Message):
+        """Закрыть тикет вручную: /hd <ticket_id> (аналог /resolve)."""
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            await message.answer("Использование: /hd <номер_тикета>")
+            return
+
+        try:
+            ticket_id = int(parts[1])
+        except ValueError:
+            await message.answer("Номер тикета должен быть числом.")
+            return
+
+        key = find_ticket_key_by_id(ticket_id)
+        if key is None:
+            await message.answer("Тикет с таким номером не найден (возможно, бот перезапускался).")
+            return
+
+        ticket = tickets.get(key)
+        if not ticket:
+            await message.answer("Тикет не найден (возможно, бот перезапускался).")
+            return
+
+        support_msg_id = ticket.get("support_msg_id")
+        original_text = ticket.get("text") or "—"
+
+        try:
+            await message.bot.edit_message_text(
+                chat_id=SUPPORT_CHAT_ID,
+                message_id=support_msg_id,
+                text=(
+                    f"✅ Вопрос #{ticket_id} решен\n\n"
+                    f"Раздел: <b>{ticket.get('section') or '—'}</b>\n\n"
+                    f"Сообщение:\n"
+                    f"{original_text}"
+                ),
+            )
+        except Exception:
+            pass
+
+        ticket["status"] = "resolved"
+
+        # Если кто-то держит режим ответа на этот тикет — снимем
+        try:
+            to_del = [aid for aid, v in pending_replies.items() if v == key]
+            for aid in to_del:
+                pending_replies.pop(aid, None)
+        except Exception:
+            pass
+
+        # уведомим пользователя
+        try:
+            await message.bot.send_message(
+                chat_id=int(ticket.get("user_id") or key[0]),
+                text=(
+                    "✅ <b>Вопрос закрыт поддержкой</b>\n"
+                    f"Тикет #{ticket_id}\n\n"
+                    "Если проблема появится снова — просто напишите /start и создайте новый тикет."
+                ),
+            )
+        except Exception:
+            pass
+
+        await message.answer(f"Тикет #{ticket_id} закрыт ✅")
+
     # --- Обработка сообщений из чата поддержки (SUPPORT_CHAT_ID) ---
 
     @dp.message(F.chat.id == SUPPORT_CHAT_ID)
@@ -244,6 +358,7 @@ async def main():
             f"Username: @{user.username if user.username else '—'}\n"
             f"Раздел: <b>{section}</b>\n\n"
             "Сообщение пользователя:\n"
+            f"\n<b>Действия:</b> взять — /h {ticket_id} · закрыть — /hd {ticket_id}\n"
         )
 
         # Админские кнопки: Ответить / Завершить
@@ -436,7 +551,8 @@ async def main():
                         f"Username: @{callback.from_user.username if callback.from_user.username else '—'}\n"
                         f"Раздел: <b>{(ticket or {}).get('section') or '—'}</b>\n\n"
                         "Пользователь отметил, что ответ не решил проблему. Нужен оператор.\n\n"
-                        f"Пинг: {ping_line}"
+                        f"Пинг: {ping_line}\n\n"
+                        f"<b>Действия:</b> взять — /h {ticket_id} · закрыть — /hd {ticket_id}"
                     ),
                 )
             except Exception:
