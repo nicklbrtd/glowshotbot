@@ -15,6 +15,7 @@ from .users import router as users_router
 from .roles import router as roles_router
 from .payments import router as payments_router
 from .logs import router as logs_router
+from . import broadcast  as broadcast_router
 
 # settings.py может быть пустым/в процессе — подключаем мягко
 try:
@@ -31,5 +32,6 @@ router.include_router(users_router)
 router.include_router(roles_router)
 router.include_router(payments_router)
 router.include_router(logs_router)
+router.include_router(broadcast_router)
 if settings_router is not None:
     router.include_router(settings_router)
