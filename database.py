@@ -43,6 +43,151 @@ async def count_today_photos_for_user(user_id: int, *, include_deleted: bool = F
     return int(v or 0)
 
 
+async def get_photo_ratings_stats(photo_id: int) -> dict:
+    """Aggregate rating stats for a photo.
+
+    Returns keys:
+      ratings_count: int
+      avg_rating: float|None
+      last_rating: int|None
+      good_count: int  (value <= 5)
+      bad_count: int   (value >= 6)
+      rated_users: int (distinct user_id)
+    """
+    p = _assert_pool()
+
+    query = """
+        SELECT
+            COUNT(*)::int AS ratings_count,
+            AVG(value)::float AS avg_rating,
+            SUM(CASE WHEN value <= 5 THEN 1 ELSE 0 END)::int AS good_count,
+            SUM(CASE WHEN value >= 6 THEN 1 ELSE 0 END)::int AS bad_count,
+            COUNT(DISTINCT user_id)::int AS rated_users
+        FROM ratings
+        WHERE photo_id = $1
+    """
+
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(query, int(photo_id))
+        last = await conn.fetchval(
+            "SELECT value FROM ratings WHERE photo_id=$1 ORDER BY created_at DESC, id DESC LIMIT 1",
+            int(photo_id),
+        )
+
+    if not row:
+        return {
+            "ratings_count": 0,
+            "avg_rating": None,
+            "last_rating": None,
+            "good_count": 0,
+            "bad_count": 0,
+            "rated_users": 0,
+        }
+
+    return {
+        "ratings_count": int(row["ratings_count"] or 0),
+        "avg_rating": row["avg_rating"],
+        "last_rating": int(last) if last is not None else None,
+        "good_count": int(row["good_count"] or 0),
+        "bad_count": int(row["bad_count"] or 0),
+        "rated_users": int(row["rated_users"] or 0),
+    }
+
+
+async def count_super_ratings_for_photo(photo_id: int) -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM super_ratings WHERE photo_id=$1", int(photo_id))
+    return int(v or 0)
+
+
+async def count_comments_for_photo(photo_id: int) -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM comments WHERE photo_id=$1", int(photo_id))
+    return int(v or 0)
+
+
+async def count_active_users() -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted=0",)
+    return int(v or 0)
+
+
+async def count_photo_reports_for_photo(photo_id: int) -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM photo_reports WHERE photo_id=$1", int(photo_id))
+    return int(v or 0)
+
+
+async def get_photo_rank_in_day(photo_id: int, day_key: str) -> int | None:
+    """Return place (rank) of the photo within its day_key among active photos.
+
+    Ranking: avg_rating desc, ratings_count desc, created_at asc.
+    Includes photos with zero ratings.
+    """
+    if not day_key:
+        return None
+
+    p = _assert_pool()
+    query = """
+        WITH s AS (
+            SELECT
+                p.id,
+                COALESCE(AVG(r.value), 0)::float AS avg_rating,
+                COUNT(r.id)::int AS ratings_count,
+                p.created_at
+            FROM photos p
+            LEFT JOIN ratings r ON r.photo_id = p.id
+            WHERE p.day_key = $1 AND p.is_deleted=0 AND p.moderation_status='active'
+            GROUP BY p.id, p.created_at
+        ),
+        ranked AS (
+            SELECT
+                id,
+                RANK() OVER (ORDER BY avg_rating DESC, ratings_count DESC, created_at ASC) AS place
+            FROM s
+        )
+        SELECT place FROM ranked WHERE id = $2
+    """
+
+    async with p.acquire() as conn:
+        v = await conn.fetchval(query, str(day_key), int(photo_id))
+    return int(v) if v is not None else None
+
+
+async def get_link_ratings_count_for_photo(photo_id: int) -> int:
+    """Placeholder for 'Оценки по ссылке'.
+
+    If a future table exists (e.g. link_ratings), this will start returning real counts.
+    For now, safely returns 0.
+    """
+    p = _assert_pool()
+    try:
+        async with p.acquire() as conn:
+            v = await conn.fetchval("SELECT COUNT(*) FROM link_ratings WHERE photo_id=$1", int(photo_id))
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+async def get_photo_skip_count_for_photo(photo_id: int) -> int:
+    """Placeholder for per-photo skip statistics.
+
+    If a future table exists (e.g. photo_skips), this will return real counts.
+    For now, safely returns 0.
+    """
+    p = _assert_pool()
+    try:
+        async with p.acquire() as conn:
+            v = await conn.fetchval("SELECT COUNT(*) FROM photo_skips WHERE photo_id=$1", int(photo_id))
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
 async def init_db() -> None:
     global pool
     if not DB_DSN:

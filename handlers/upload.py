@@ -9,7 +9,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from aiogram.exceptions import TelegramBadRequest
-from keyboards.common import build_back_to_menu_kb
 
 from database import (
     get_user_by_tg_id,
@@ -25,16 +24,19 @@ from database import (
     get_weekly_photos_for_user,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
-    get_user_by_id,
     is_user_premium_active,
     get_active_photos_for_user,
     get_latest_photos_for_user,
-    is_photo_repeat_used,
-    mark_photo_repeat_used,
-    archive_photo_to_my_results,
     count_today_photos_for_user,
     get_comment_counts_for_photo,
-    get_comments_for_photo_sorted,
+    get_photo_ratings_stats,
+	count_super_ratings_for_photo,
+    count_comments_for_photo,
+	count_active_users,
+	count_photo_reports_for_photo,
+	get_photo_rank_in_day,
+	get_link_ratings_count_for_photo,
+	get_photo_skip_count_for_photo
 )
 from utils.time import get_moscow_now
 
@@ -227,6 +229,28 @@ def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ===== Stats keyboard and avg formatting helpers =====
+
+def build_my_photo_stats_keyboard(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def _fmt_avg(v: float | None) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "—"
 
 
 async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
@@ -719,6 +743,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ========= Навигация по своим фотографиям =========
 @router.callback_query(F.data.startswith("myphoto:nav:"))
 async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     """
@@ -727,6 +752,161 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     """
     await callback.answer("Сейчас доступна только одна активная фотография.")
     return
+
+
+# ====== 📊 Моя фотография: статистика ======
+@router.callback_query(F.data.startswith("myphoto:stats:"))
+async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка.")
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    # Only owner can view "my photo" stats
+    if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    # Premium flag (active)
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(int(user["tg_id"]))
+    except Exception:
+        is_premium_user = False
+
+    # Base stats
+    r = await get_photo_ratings_stats(photo_id)
+    ratings_count = int(r.get("ratings_count") or 0)
+    last_rating = r.get("last_rating")
+    avg_rating = r.get("avg_rating")
+
+    super_count = 0
+    try:
+        super_count = await count_super_ratings_for_photo(photo_id)
+    except Exception:
+        super_count = 0
+
+    comments_count = 0
+    try:
+        comments_count = await count_comments_for_photo(photo_id)
+    except Exception:
+        comments_count = 0
+
+    link_ratings = 0
+    try:
+        link_ratings = await get_link_ratings_count_for_photo(photo_id)
+    except Exception:
+        link_ratings = 0
+
+    lines: list[str] = []
+    lines.append("📊 <b>Статистика твоей фотографии:</b>")
+    lines.append("")
+    lines.append(f"Оценок: <b>{ratings_count}</b>")
+    lines.append(f"Последняя: <b>{last_rating if last_rating is not None else '—'}</b>")
+    lines.append(f"Средняя оценка: <b>{_fmt_avg(avg_rating)}</b>")
+    lines.append(f"Супер-оценок: <b>{super_count}</b>")
+    lines.append(f"Комментариев: <b>{comments_count}</b>")
+    lines.append(f"Оценки по ссылке: <b>{link_ratings}</b>")
+
+    lines.append("")
+
+    if is_premium_user:
+        place_now = None
+        try:
+            place_now = await get_photo_rank_in_day(photo_id, str(photo.get("day_key") or ""))
+        except Exception:
+            place_now = None
+
+        total_users = 0
+        try:
+            total_users = await count_active_users()
+        except Exception:
+            total_users = 0
+
+        rated_users = int(r.get("rated_users") or 0)
+        not_rated = max(total_users - rated_users - 1, 0)
+
+        good_cnt = int(r.get("good_count") or 0)  # <= 5
+        bad_cnt = int(r.get("bad_count") or 0)    # >= 6
+
+        skip_cnt = 0
+        try:
+            skip_cnt = await get_photo_skip_count_for_photo(photo_id)
+        except Exception:
+            skip_cnt = 0
+
+        reports_cnt = 0
+        try:
+            reports_cnt = await count_photo_reports_for_photo(photo_id)
+        except Exception:
+            reports_cnt = 0
+
+        # Activity days based on day_key (Moscow date)
+        activity_days = "—"
+        try:
+            dk = (photo.get("day_key") or "").strip()
+            if dk:
+                d = datetime.fromisoformat(dk).date()
+                days = (get_moscow_now().date() - d).days + 1
+                if days < 1:
+                    days = 1
+                activity_days = str(days)
+        except Exception:
+            activity_days = "—"
+
+        lines.append(f"Место в топ (сейчас): <b>{place_now if place_now is not None else '—'}</b>")
+        lines.append(f"Не оценившие: <b>{not_rated}</b>")
+        lines.append(f"Хорошие: <b>{good_cnt}</b>")
+        lines.append(f"Плохие: <b>{bad_cnt}</b>")
+        lines.append(f"Скип: <b>{skip_cnt}</b>")
+        lines.append(f"Жалобы: <b>{reports_cnt}</b>")
+        lines.append(f"Активность фотографии: <b>{activity_days}</b>")
+    else:
+        lines.append("Место в топ (сейчас): 💎 <b>Премиум</b>")
+        lines.append("Не оценившие: 💎 <b>Премиум</b>")
+        lines.append("Хорошие: 💎 <b>Премиум</b>")
+        lines.append("Плохие: 💎 <b>Премиум</b>")
+        lines.append("Скип: 💎 <b>Премиум</b>")
+        lines.append("Жалобы: 💎 <b>Премиум</b>")
+        lines.append("Активность фотографии: 💎 <b>Премиум</b>")
+
+    text = "\n".join(lines)
+    kb = build_my_photo_stats_keyboard(photo_id)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    await callback.answer()
 # ========= ДОБАВЛЕНИЕ ФОТО =========
 
 
@@ -1207,58 +1387,6 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Отменено")
 
 
-
-# ====== COMMENTS SORT HANDLERS (EARLY CATCH) ======
-# Эти хендлеры ловят callbacks гарантированно, даже если ниже есть дубли/конфликты.
-
-@router.callback_query(F.data.startswith("myphoto:comments_sort:"))
-async def myphoto_comments_sort_toggle_early(callback: CallbackQuery, state: FSMContext):
-    # expected: myphoto:comments_sort:<photo_id>:<page>:<sort_key>:<sort_dir>:<0|1>
-    try:
-        parts = (callback.data or "").split(":")
-        photo_id = int(parts[2])
-        page = int(parts[3])
-        sort_key = parts[4] if len(parts) > 4 else "date"
-        sort_dir = parts[5] if len(parts) > 5 else "desc"
-        show_sort = parts[6] if len(parts) > 6 else "1"
-
-        if sort_key not in {"date", "score"}:
-            sort_key = "date"
-        if sort_dir not in {"asc", "desc"}:
-            sort_dir = "desc"
-        if show_sort not in {"0", "1"}:
-            show_sort = "1"
-
-        callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{show_sort}"
-        await myphoto_comments(callback, state)
-    except Exception as e:
-        await callback.answer(f"Сортировка не открылась: {e}", show_alert=True)
-
-
-@router.callback_query(F.data.startswith("myphoto:comments_setsort:"))
-async def myphoto_comments_setsort_early(callback: CallbackQuery, state: FSMContext):
-    # expected: myphoto:comments_setsort:<photo_id>:<page>:<sort_key>:<sort_dir>:<0|1>
-    try:
-        parts = (callback.data or "").split(":")
-        photo_id = int(parts[2])
-        page = int(parts[3])
-        sort_key = parts[4] if len(parts) > 4 else "date"
-        sort_dir = parts[5] if len(parts) > 5 else "desc"
-        show_sort = parts[6] if len(parts) > 6 else "1"
-
-        if sort_key not in {"date", "score"}:
-            sort_key = "date"
-        if sort_dir not in {"asc", "desc"}:
-            sort_dir = "desc"
-        if show_sort not in {"0", "1"}:
-            show_sort = "1"
-
-        callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{show_sort}"
-        await myphoto_comments(callback, state)
-    except Exception as e:
-        await callback.answer(f"Сортировка не применилась: {e}", show_alert=True)
-
-
 # ====== MY PHOTO CALLBACK HANDLERS FOR COMMENTS/STATS/REPEAT/PROMOTE/EDIT ======
 
 # --- Helper keyboards ---
@@ -1276,64 +1404,22 @@ def _myphoto_comments_kb(
     has_prev: bool,
     has_next: bool,
     *,
-    sort_key: str,
-    sort_dir: str,
-    show_sort: bool,
+    sort_key: str = "date",
+    sort_dir: str = "desc",
+    show_sort: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
-    # пагинация
     nav_row: list[InlineKeyboardButton] = []
     if has_prev:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="⬅️",
-                callback_data=f"myphoto:comments:{photo_id}:{page-1}:{sort_key}:{sort_dir}:{1 if show_sort else 0}",
-            )
-        )
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}"))
     if has_next:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="➡️",
-                callback_data=f"myphoto:comments:{photo_id}:{page+1}:{sort_key}:{sort_dir}:{1 if show_sort else 0}",
-            )
-        )
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}"))
     if nav_row:
         kb.row(*nav_row)
 
-    # сортировка (тоггл)
-    kb.button(
-        text="🔽 Сортировать" if not show_sort else "🔼 Сортировать",
-        callback_data=f"myphoto:comments_sort:{photo_id}:{page}:{sort_key}:{sort_dir}:{0 if show_sort else 1}",
-    )
-
-    # раскрытые кнопки сортировки
-    if show_sort:
-        next_date_dir = "asc" if (sort_key == "date" and sort_dir == "desc") else "desc"
-        date_label = "🕒 По дате: новые" if (sort_key == "date" and sort_dir == "desc") else "🕒 По дате: старые"
-
-        next_score_dir = "asc" if (sort_key == "score" and sort_dir == "desc") else "desc"
-        score_label = "⭐ По оценке: высокие" if (sort_key == "score" and sort_dir == "desc") else "⭐ По оценке: низкие"
-
-        kb.row(
-            InlineKeyboardButton(
-                text=date_label,
-                callback_data=f"myphoto:comments_setsort:{photo_id}:{page}:date:{next_date_dir}:1",
-            ),
-            InlineKeyboardButton(
-                text=score_label,
-                callback_data=f"myphoto:comments_setsort:{photo_id}:{page}:score:{next_score_dir}:1",
-            ),
-        )
-
-    # назад (как ты хотел — отдельная кнопка ниже остальных)
-    kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
-    )
-
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     return kb.as_markup()
 
 
@@ -1430,13 +1516,7 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
 
     # comments (+1 for next page)
     try:
-        comments = await get_comments_for_photo_sorted(
-            photo_id,
-            limit=per_page + 1,
-            offset=offset,
-            sort_key=sort_key,
-            sort_dir=sort_dir,
-        )
+        comments = await get_comments_for_photo(photo_id, limit=per_page + 1, offset=offset)
     except Exception:
         # fallback to old function if something goes wrong
         try:
