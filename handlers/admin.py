@@ -39,6 +39,27 @@ from database import (
     get_bot_error_logs_page,
     get_bot_error_logs_count,
     clear_bot_error_logs,
+    get_users_sample,
+    get_active_users_last_24h,
+    get_online_users_recent,
+    get_total_activity_events,
+    get_new_users_last_days,
+    get_premium_stats,
+    get_blocked_users_page,
+    get_users_with_multiple_daily_top3,
+    get_user_admin_stats,
+    get_user_rating_summary,
+    get_today_photo_for_user,
+    get_photo_admin_stats,
+    get_payments_count,
+    get_payments_page,
+    get_revenue_summary,
+    get_subscriptions_total,
+    get_subscriptions_page,
+)
+
+router = Router()
+
 # ================= LOGS / ERRORS (Admin) =================
 
 _LOGS_PAGE_LIMIT = 10
@@ -306,27 +327,7 @@ async def admin_logs_clear_do(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(text, reply_markup=markup)
 
     await callback.answer()
-    # статистика и выборки пользователей
-    get_users_sample,
-    get_active_users_last_24h,
-    get_online_users_recent,
-    get_total_activity_events,
-    get_new_users_last_days,
-    get_premium_stats,
-    get_blocked_users_page,
-    get_users_with_multiple_daily_top3,
-    get_user_admin_stats,
-    get_user_rating_summary,
-    get_today_photo_for_user,
-    get_photo_admin_stats,
-    get_payments_count,
-    get_payments_page,
-    get_revenue_summary,
-    get_subscriptions_total,
-    get_subscriptions_page,
-)
 
-router = Router()
 
 # ================= HELPER: Edit last user prompt or answer =================
 async def _edit_user_prompt_or_answer(
