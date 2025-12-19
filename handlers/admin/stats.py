@@ -23,10 +23,9 @@ from database import (
     get_top_users_by_activity_events,
 )
 
-from .common import _ensure_admin, _safe_int
-
 from .common import (
     _ensure_admin,
+    _safe_int,
     _ensure_user,
     UserAdminStates,
     UserAwardsStates,

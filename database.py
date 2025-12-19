@@ -1692,8 +1692,8 @@ async def get_support_users() -> list[int]:
     return [int(r["tg_id"]) for r in rows]
 
 
-async def get_premium_users() -> list[dict]:
-    """Full rows for all premium users (for admin lists)."""
+async def get_premium_users(limit: int = 20, offset: int = 0) -> list[dict]:
+    """Страница премиум-пользователей (для админских списков)."""
     p = _assert_pool()
     async with p.acquire() as conn:
         rows = await conn.fetch(
@@ -1702,7 +1702,10 @@ async def get_premium_users() -> list[dict]:
             FROM users
             WHERE is_premium=1 AND is_deleted=0
             ORDER BY premium_until DESC NULLS LAST, id DESC
-            """
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset),
+            int(limit),
         )
     return [dict(r) for r in rows]
 
@@ -1742,7 +1745,7 @@ async def get_users_sample(
 # --- activity / online ---
 
 
-async def get_active_users_last_24h(limit: int = 20) -> tuple[int, list[dict]]:
+async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
     """(total, sample) of users with any activity in last 24h."""
     p = _assert_pool()
     since_iso = (get_moscow_now() - timedelta(hours=24)).isoformat()
@@ -1766,15 +1769,16 @@ async def get_active_users_last_24h(limit: int = 20) -> tuple[int, list[dict]]:
             ) a ON a.user_id = u.id
             WHERE u.is_deleted=0
             ORDER BY u.updated_at DESC NULLS LAST, u.created_at DESC, u.id DESC
-            LIMIT $2
+            OFFSET $2 LIMIT $3
             """,
             since_iso,
+            int(offset or 0),
             int(limit),
         )
     return int(total or 0), [dict(r) for r in rows]
 
 
-async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> tuple[int, list[dict]]:
+async def get_online_users_recent(window_minutes: int = 5, limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
     """
     Пользователи, у которых есть activity_events за последние N минут.
     Совместимо с вызовами:
@@ -1804,9 +1808,10 @@ async def get_online_users_recent(window_minutes: int = 5, limit: int = 20) -> t
             ) a ON a.user_id = u.id
             WHERE u.is_deleted=0
             ORDER BY u.updated_at DESC NULLS LAST, u.created_at DESC, u.id DESC
-            LIMIT $2
+            OFFSET $2 LIMIT $3
             """,
             since_iso,
+            int(offset or 0),
             int(limit),
         )
     return int(total or 0), [dict(r) for r in rows]
@@ -1830,6 +1835,41 @@ async def get_total_activity_events_last_days(days: int = 7) -> int:
             since_iso,
         )
     return int(v or 0)
+
+
+async def get_top_users_by_activity_events(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, rows) — топ пользователей по количеству событий активности."""
+    p = _assert_pool()
+
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM (
+              SELECT user_id
+              FROM activity_events
+              WHERE user_id IS NOT NULL
+              GROUP BY user_id
+            ) t
+            """
+        )
+
+        rows = await conn.fetch(
+            """
+            SELECT u.*, COUNT(a.id) AS events_count
+            FROM activity_events a
+            JOIN users u ON u.id = a.user_id
+            WHERE a.user_id IS NOT NULL
+              AND u.is_deleted=0
+            GROUP BY u.id
+            ORDER BY COUNT(a.id) DESC, u.updated_at DESC NULLS LAST, u.id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
+            int(limit),
+        )
+
+    return int(total or 0), [dict(r) for r in rows]
 
 
 # --- premium / new / blocked ---
@@ -1881,7 +1921,7 @@ async def get_premium_stats(limit: int = 20) -> dict:
     }
 
 
-async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, list[dict]]:
+async def get_new_users_last_days(days: int = 3, limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
     """(total, sample) for users created within last N days."""
     p = _assert_pool()
     cutoff = (get_moscow_now() - timedelta(days=int(days))).isoformat()
@@ -1896,9 +1936,10 @@ async def get_new_users_last_days(days: int = 3, limit: int = 20) -> tuple[int, 
             FROM users
             WHERE is_deleted=0 AND created_at >= $1
             ORDER BY created_at DESC, id DESC
-            LIMIT $2
+            OFFSET $2 LIMIT $3
             """,
             cutoff,
+            int(offset or 0),
             int(limit),
         )
     return int(total or 0), [dict(r) for r in rows]
