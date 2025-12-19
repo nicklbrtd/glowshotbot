@@ -1741,6 +1741,25 @@ async def get_support_users() -> list[int]:
     return [int(r["tg_id"]) for r in rows]
 
 
+async def get_support_users_full() -> list[dict]:
+    """Support users with tg_id and username.
+
+    Returns list of dicts: {"tg_id": int, "username": str|None}
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tg_id, username FROM users WHERE is_support=1 AND is_deleted=0"
+        )
+    out: list[dict] = []
+    for r in rows:
+        out.append({
+            "tg_id": int(r["tg_id"]),
+            "username": (str(r["username"]) if r["username"] is not None else None),
+        })
+    return out
+
+
 async def get_premium_users(limit: int = 20, offset: int = 0) -> list[dict]:
     """Страница премиум-пользователей (для админских списков)."""
     p = _assert_pool()

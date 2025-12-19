@@ -15,8 +15,7 @@ from aiogram.types import (
 )
 
 from config import SUPPORT_BOT_TOKEN, SUPPORT_CHAT_ID
-from database import get_support_users
-
+from database import get_support_users, get_support_users_full
 
 # tickets[(user_id, ticket_id)] = информация о тикете (сообщение в чате поддержки и текст пользователя)
 tickets: Dict[tuple[int, int], dict] = {}
@@ -345,30 +344,78 @@ async def main():
             await callback.answer("Спасибо, отметили вопрос как решенный ✅", show_alert=False)
             return
 
-        # статус "не решен" — предлагаем написать живому человеку
-        # пытаемся найти кого-то из поддержки
+        # статус "не решен" — эскалируем живому оператору поддержки
+        # get_support_users() в проекте может возвращать:
+        #  - list[int] (tg_id операторов)
+        #  - list[dict] (с полями tg_id/username и т.п.)
         try:
-            support_users = await get_support_users()
+            support_users = await get_support_users_full()
         except Exception:
             support_users = []
 
-        target_username = None
-        for u in support_users:
-            uname = u.get("username")
-            if uname:
-                target_username = uname
-                break
+        # Нормализуем кандидатов -> список словарей {tg_id:int, username:str|None}
+        candidates: list[dict] = []
+        for u in (support_users or [])[:200]:
+            if isinstance(u, int):
+                candidates.append({"tg_id": u, "username": None})
+                continue
+            if isinstance(u, dict):
+                tg_id = u.get("tg_id") or u.get("id") or u.get("user_id")
+                if tg_id is None:
+                    continue
+                try:
+                    tg_id = int(tg_id)
+                except Exception:
+                    continue
+                candidates.append({"tg_id": tg_id, "username": u.get("username")})
 
-        if target_username:
-            text = (
-                f"— Вопрос #{ticket_id} не решен.\n"
-                f"Напишите, пожалуйста, @{target_username} для дальнейшей помощи.\n\n"
-                f"Не забудь переслать ему сообщение с тикетом, чтобы он понимал, о чем речь."
-            )
+        # Пытаемся написать первому оператору в личку
+        operator_tg_id: int | None = None
+        operator_username: str | None = None
+        for c in candidates:
+            tg_id = c.get("tg_id")
+            if not tg_id:
+                continue
+            # не пингуем самого пользователя
+            if tg_id == callback.from_user.id:
+                continue
+            try:
+                await callback.bot.send_message(
+                    chat_id=int(tg_id),
+                    text=(
+                        "🆘 <b>Нужна помощь: вопрос не решён</b>\n\n"
+                        f"Тикет: #{ticket_id}\n"
+                        f"Пользователь ID: <code>{user_id}</code>\n"
+                        f"Username: @{callback.from_user.username if callback.from_user.username else '—'}\n"
+                        f"Раздел: <b>{(ticket or {}).get('section') or '—'}</b>\n\n"
+                        "Пожалуйста, зайдите в чат поддержки и ответьте пользователю по тикету."
+                    ),
+                )
+                operator_tg_id = int(tg_id)
+                operator_username = c.get("username")
+                break
+            except Exception:
+                continue
+
+        if operator_tg_id:
+            # Пользователю: подтверждаем эскалацию
+            if operator_username:
+                text = (
+                    f"— Вопрос #{ticket_id} не решен.\n"
+                    f"Я передал ваш запрос оператору @{operator_username}.\n"
+                    f"Ожидайте ответа от поддержки."
+                )
+            else:
+                text = (
+                    f"— Вопрос #{ticket_id} не решен.\n"
+                    f"Я передал ваш запрос оператору поддержки.\n"
+                    f"Ожидайте ответа от поддержки."
+                )
         else:
+            # Если не получилось никому написать (нет кандидатов / боты не могут писать в личку оператору и т.п.)
             text = (
                 f"— Вопрос #{ticket_id} не решен.\n"
-                f"Сейчас нет свободного оператора с указанным @username.\n"
+                f"Сейчас не удалось передать запрос оператору (возможно, у поддержки закрыта личка для ботов).\n"
                 f"Пожалуйста, напишите в общий чат поддержки ещё раз."
             )
 
