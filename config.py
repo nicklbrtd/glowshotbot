@@ -11,6 +11,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 MASTER_ADMIN_ID = int(os.getenv("MASTER_ADMIN_ID"))
 SUPPORT_BOT_TOKEN = os.getenv("SUPPORT_BOT_TOKEN")
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID"))
+SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/supofglowshotbot")
 
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)

@@ -13,7 +13,7 @@ HELP_TELEGRAPH_URL = getattr(
     "HELP_TELEGRAPH_URL",
     "https://telegra.ph/GlowShot---Informaciya-dlya-polzovatelej-12-16",
 )
-SUPPORT_URL = getattr(config, "SUPPORT_URL", "https://t.me/glowshotbot")
+SUPPORT_URL = getattr(config, "SUPPORT_URL", "https://t.me/supofglowshotbot")
 
 router = Router(name="help_center")
 
