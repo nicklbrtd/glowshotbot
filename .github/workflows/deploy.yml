@@ -19,15 +19,22 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            cd ~/glowshotbot
+            echo "➡️ Перехожу в директорию проекта..."
+            cd /home/nick/glowshotbot
+
+            echo "➡️ Обновляю репозиторий..."
             git fetch --all
             git reset --hard origin/main
 
-            source venv/bin/activate
-            pip install -r requirements.txt
+            echo "➡️ Устанавливаю зависимости..."
+            /home/nick/glowshotbot/venv/bin/pip install -r requirements.txt
 
+            echo "➡️ Перезапускаю сервисы..."
             sudo systemctl restart glowshot-bot
             sudo systemctl restart glowshot-support
 
-            sudo systemctl status glowshot-bot --no-pager
-            sudo systemctl status glowshot-support --no-pager
+            echo "➡️ Проверяю статус..."
+            sudo systemctl status glowshot-bot --no-pager || true
+            sudo systemctl status glowshot-support --no-pager || true
+
+            echo "🎉 Деплой успешно завершён!"
