@@ -33,6 +33,8 @@ from database import (
     mark_photo_repeat_used,
     archive_photo_to_my_results,
     count_today_photos_for_user,
+    get_comment_counts_for_photo,
+    get_comments_for_photo_sorted,
 )
 from utils.time import get_moscow_now
 
@@ -1218,17 +1220,70 @@ def _myphoto_back_kb(photo_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def _myphoto_comments_kb(photo_id: int, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+def _myphoto_comments_kb(
+    photo_id: int,
+    page: int,
+    has_prev: bool,
+    has_next: bool,
+    *,
+    sort_key: str,
+    sort_dir: str,
+    show_sort: bool,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+
+    # пагинация
+    nav_row: list[InlineKeyboardButton] = []
     if has_prev:
-        kb.button(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}")
+        nav_row.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=f"myphoto:comments:{photo_id}:{page-1}:{sort_key}:{sort_dir}:{1 if show_sort else 0}",
+            )
+        )
     if has_next:
-        kb.button(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}")
-    kb.adjust(2)
+        nav_row.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=f"myphoto:comments:{photo_id}:{page+1}:{sort_key}:{sort_dir}:{1 if show_sort else 0}",
+            )
+        )
+    if nav_row:
+        kb.row(*nav_row)
+
+    # сортировка (тоггл)
+    kb.button(
+        text="🔽 Сортировать" if not show_sort else "🔼 Сортировать",
+        callback_data=f"myphoto:comments_sort:{photo_id}:{page}:{sort_key}:{sort_dir}:{0 if show_sort else 1}",
+    )
+
+    # раскрытые кнопки сортировки
+    if show_sort:
+        next_date_dir = "asc" if (sort_key == "date" and sort_dir == "desc") else "desc"
+        date_label = "🕒 По дате: новые" if (sort_key == "date" and sort_dir == "desc") else "🕒 По дате: старые"
+
+        next_score_dir = "asc" if (sort_key == "score" and sort_dir == "desc") else "desc"
+        score_label = "⭐ По оценке: высокие" if (sort_key == "score" and sort_dir == "desc") else "⭐ По оценке: низкие"
+
+        kb.row(
+            InlineKeyboardButton(
+                text=date_label,
+                callback_data=f"myphoto:comments_setsort:{photo_id}:{page}:date:{next_date_dir}:1",
+            ),
+            InlineKeyboardButton(
+                text=score_label,
+                callback_data=f"myphoto:comments_setsort:{photo_id}:{page}:score:{next_score_dir}:1",
+            ),
+        )
+
+    # назад (как ты хотел — отдельная кнопка ниже остальных)
     kb.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
+    )
+    kb.row(
         InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
     )
+
     return kb.as_markup()
 
 
@@ -1276,13 +1331,15 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
 
 
 # --- Comments handler ---
-@router.callback_query(F.data.regexp(r"^myphoto:comments:(\d+):(\d+)$"))
+@router.callback_query(F.data.startswith("myphoto:comments:"))
 async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
 
     parts = callback.data.split(":")
+    # old: myphoto:comments:<pid>:<page>
+    # new: myphoto:comments:<pid>:<page>:<sort_key>:<sort_dir>:<show_sort>
     try:
         photo_id = int(parts[2])
         page = int(parts[3])
@@ -1290,39 +1347,121 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка.")
         return
 
+    sort_key = "date"
+    sort_dir = "desc"
+    show_sort = False
+
+    if len(parts) >= 6:
+        if parts[4] in {"date", "score"}:
+            sort_key = parts[4]
+        if parts[5] in {"asc", "desc"}:
+            sort_dir = parts[5]
+    if len(parts) >= 7:
+        show_sort = parts[6] == "1"
+
     photo = await get_photo_by_id(photo_id)
     if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
 
-    per_page = 5
+    per_page = 15
+    page = max(0, page)
     offset = page * per_page
 
+    # counts
+    anon_count = 0
+    public_count = 0
     try:
-        comments = await get_comments_for_photo(photo_id, limit=per_page + 1, offset=offset)
+        counts = await get_comment_counts_for_photo(photo_id)
+        anon_count = int(counts.get("anonymous") or 0)
+        public_count = int(counts.get("public") or 0)
     except Exception:
-        comments = []
+        pass
+
+    # comments (+1 for next page)
+    try:
+        comments = await get_comments_for_photo_sorted(
+            photo_id,
+            limit=per_page + 1,
+            offset=offset,
+            sort_key=sort_key,
+            sort_dir=sort_dir,
+        )
+    except Exception:
+        # fallback to old function if something goes wrong
+        try:
+            comments = await get_comments_for_photo(photo_id, limit=per_page + 1, offset=offset)
+        except Exception:
+            comments = []
 
     has_next = len(comments) > per_page
     comments = comments[:per_page]
     has_prev = page > 0
 
-    if not comments:
-        text = "💬 <b>Комментарии</b>\n\nПока комментариев нет."
-    else:
-        lines = ["💬 <b>Комментарии</b>"]
-        for c in comments:
-            author = (c.get("author_name") or c.get("username") or "Неизвестный")
-            body = (c.get("text") or "").strip()
-            if not body:
-                continue
-            if len(body) > 400:
-                body = body[:397] + "…"
-            lines.append("")
-            lines.append(f"<b>{author}</b>: {body}")
-        text = "\n".join(lines)
+    header = (
+        "💬 <b>Комментарии к твоей фотографии:</b>\n"
+        f"💎 Анонимные: <b>{anon_count}</b>\n"
+        f"Публичные: <b>{public_count}</b>\n"
+    )
 
-    kb = _myphoto_comments_kb(photo_id, page, has_prev, has_next)
+    if not comments:
+        text = header + "\nПока комментариев нет."
+        kb = _myphoto_comments_kb(
+            photo_id, page, has_prev, has_next,
+            sort_key=sort_key, sort_dir=sort_dir, show_sort=show_sort
+        )
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=text, reply_markup=kb)
+            else:
+                await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb,
+                disable_notification=True,
+            )
+        await callback.answer()
+        return
+
+    lines: list[str] = [header, ""]
+    start_num = offset + 1
+
+    for idx, c in enumerate(comments, start=start_num):
+        is_public = bool(int(c.get("is_public", 1)))
+        username = (c.get("username") or "").strip()
+        name = (c.get("author_name") or c.get("name") or "").strip()
+
+        if is_public:
+            who = f"@{username}" if username else "Пользователь"
+            if name:
+                who = f"{who} ({name})"
+        else:
+            who = "💎 Пользователь"
+
+        score_val = c.get("score")
+        if score_val is None:
+            score_val = "—"
+
+        body = (c.get("text") or "").strip()
+        if len(body) > 350:
+            body = body[:347] + "…"
+
+        lines.append(f"<b>{idx}.</b> {who} — <i>({score_val})</i>")
+        lines.append(f"Пишет: {body}")
+        lines.append("")
+
+    text = "\n".join(lines).rstrip()
+
+    kb = _myphoto_comments_kb(
+        photo_id, page, has_prev, has_next,
+        sort_key=sort_key, sort_dir=sort_dir, show_sort=show_sort
+    )
 
     try:
         if callback.message.photo:
@@ -1342,6 +1481,33 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
+
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:comments_sort:(\d+):(\d+):(date|score):(asc|desc):(0|1)$"))
+async def myphoto_comments_sort_toggle(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    photo_id = int(parts[2])
+    page = int(parts[3])
+    sort_key = parts[4]
+    sort_dir = parts[5]
+    show_sort = parts[6] == "1"
+
+    callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{1 if show_sort else 0}"
+    await myphoto_comments(callback, state)
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:comments_setsort:(\d+):(\d+):(date|score):(asc|desc):(0|1)$"))
+async def myphoto_comments_setsort(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    photo_id = int(parts[2])
+    page = int(parts[3])
+    sort_key = parts[4]
+    sort_dir = parts[5]
+    show_sort = parts[6] == "1"
+
+    callback.data = f"myphoto:comments:{photo_id}:{page}:{sort_key}:{sort_dir}:{1 if show_sort else 0}"
+    await myphoto_comments(callback, state)
 
 
 # --- Stats handler ---

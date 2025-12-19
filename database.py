@@ -867,6 +867,72 @@ async def create_comment(user_id: int, photo_id: int, text: str, is_public: bool
             get_moscow_now_iso(),
         )
 
+
+async def get_comment_counts_for_photo(photo_id: int) -> dict:
+    """Return counts of comments by visibility for a photo.
+
+    Returns: {"public": int, "anonymous": int}
+    """
+    p = _assert_pool()
+    query = """
+        SELECT
+            SUM(CASE WHEN is_public=1 THEN 1 ELSE 0 END) AS public,
+            SUM(CASE WHEN is_public=0 THEN 1 ELSE 0 END) AS anonymous
+        FROM comments
+        WHERE photo_id = $1
+    """
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(query, int(photo_id))
+    if not row:
+        return {"public": 0, "anonymous": 0}
+    return {"public": int(row["public"] or 0), "anonymous": int(row["anonymous"] or 0)}
+
+
+async def get_comments_for_photo_sorted(
+    photo_id: int,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    sort_key: str = "date",   # "date" | "score"
+    sort_dir: str = "desc",   # "asc" | "desc"
+) -> list[dict]:
+    """Comments for photo with sorting and rating value attached as 'score'.
+
+    ratings table uses column `value`.
+    """
+    sort_key = sort_key if sort_key in {"date", "score"} else "date"
+    sort_dir = sort_dir if sort_dir in {"asc", "desc"} else "desc"
+
+    if sort_key == "score":
+        order_clause = f"ORDER BY r.value {sort_dir.upper()} NULLS LAST, c.created_at DESC"
+    else:
+        order_clause = f"ORDER BY c.created_at {sort_dir.upper()}"
+
+    p = _assert_pool()
+    query = f"""
+        SELECT
+            c.id,
+            c.photo_id,
+            c.user_id,
+            c.text,
+            c.is_public,
+            c.created_at,
+            u.username,
+            u.name AS author_name,
+            r.value AS score
+        FROM comments c
+        LEFT JOIN users u ON u.id = c.user_id
+        LEFT JOIN ratings r ON r.user_id = c.user_id AND r.photo_id = c.photo_id
+        WHERE c.photo_id = $1
+        {order_clause}
+        LIMIT $2 OFFSET $3
+    """
+    async with p.acquire() as conn:
+        rows = await conn.fetch(query, int(photo_id), int(limit), int(offset))
+
+    return [dict(r) for r in rows]
+
+
 async def get_user_admin_stats(user_id: int) -> dict:
     """Статистика пользователя для админки.
 
