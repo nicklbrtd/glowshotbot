@@ -1205,6 +1205,253 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
             disable_notification=True,
         )
     await callback.answer("Отменено")
+
+
+# ====== MY PHOTO CALLBACK HANDLERS FOR COMMENTS/STATS/REPEAT/PROMOTE/EDIT ======
+
+# --- Helper keyboards ---
+def _myphoto_back_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")
+    kb.button(text="🏠 В меню", callback_data="menu:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _myphoto_comments_kb(photo_id: int, page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if has_prev:
+        kb.button(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}")
+    if has_next:
+        kb.button(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}")
+    kb.adjust(2)
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+# --- Back to main card handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:back:(\d+)$"))
+async def myphoto_back(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    photo_id_str = callback.data.split(":")[2]
+    try:
+        photo_id = int(photo_id_str)
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(photo_id)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=caption, reply_markup=kb)
+        else:
+            await callback.message.edit_text(caption, reply_markup=kb)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=photo["file_id"],
+            caption=caption,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    await callback.answer()
+
+
+# --- Comments handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:comments:(\d+):(\d+)$"))
+async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = callback.data.split(":")
+    try:
+        photo_id = int(parts[2])
+        page = int(parts[3])
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    per_page = 5
+    offset = page * per_page
+
+    try:
+        comments = await get_comments_for_photo(photo_id, limit=per_page + 1, offset=offset)
+    except Exception:
+        comments = []
+
+    has_next = len(comments) > per_page
+    comments = comments[:per_page]
+    has_prev = page > 0
+
+    if not comments:
+        text = "💬 <b>Комментарии</b>\n\nПока комментариев нет."
+    else:
+        lines = ["💬 <b>Комментарии</b>"]
+        for c in comments:
+            author = (c.get("author_name") or c.get("username") or "Неизвестный")
+            body = (c.get("text") or "").strip()
+            if not body:
+                continue
+            if len(body) > 400:
+                body = body[:397] + "…"
+            lines.append("")
+            lines.append(f"<b>{author}</b>: {body}")
+        text = "\n".join(lines)
+
+    kb = _myphoto_comments_kb(photo_id, page, has_prev, has_next)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    await callback.answer()
+
+
+# --- Stats handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:stats:(\d+)$"))
+async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    photo_id_str = callback.data.split(":")[2]
+    try:
+        photo_id = int(photo_id_str)
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    stats = await get_photo_stats(photo_id)
+    ratings_count = int(stats.get("ratings_count") or 0)
+    avg = stats.get("avg_rating")
+    if avg is None:
+        avg_str = "—"
+    else:
+        try:
+            avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            avg_str = "—"
+
+    views = int(stats.get("views") or 0) if isinstance(stats, dict) else 0
+    promotes = int(stats.get("promotes") or 0) if isinstance(stats, dict) else 0
+
+    text = (
+        "📊 <b>Статистика</b>\n\n"
+        f"💖 Оценок: <b>{ratings_count}</b>\n"
+        f"⭐️ Средняя: <b>{avg_str}</b>\n"
+    )
+    if views:
+        text += f"👀 Просмотров: <b>{views}</b>\n"
+    if promotes:
+        text += f"🚀 Продвижений: <b>{promotes}</b>\n"
+
+    kb = _myphoto_back_kb(photo_id)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    await callback.answer()
+
+
+# --- Promote handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:promote:(\d+)$"))
+async def myphoto_promote(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    photo_id_str = callback.data.split(":")[2]
+    try:
+        photo_id = int(photo_id_str)
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    can = await _compute_can_promote(photo)
+    if not can:
+        await callback.answer("Сейчас эту фотографию нельзя продвигать.", show_alert=True)
+        return
+
+    try:
+        await add_weekly_candidate(photo_id)
+    except Exception:
+        await callback.answer("Не удалось продвинуть фотографию. Попробуй позже.", show_alert=True)
+        return
+
+    await callback.answer("Готово! Фотография добавлена в недельный отбор ✅", show_alert=True)
+
+
+# --- Repeat (temporary) handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:repeat:(\d+)$"))
+async def myphoto_repeat(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Скоро ✨", show_alert=True)
+
+
+# --- Edit (temporary) handler ---
+@router.callback_query(F.data.regexp(r"^myphoto:edit:(\d+)$"))
+async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Скоро ✨", show_alert=True)
 # ====== FINALIZE PHOTO CREATION ======
 
 # Patch: _finalize_photo_creation supports both Message and CallbackQuery and does not rely on callback.message
