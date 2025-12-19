@@ -320,7 +320,7 @@ async def build_profile_view(user: dict):
                     try:
                         dt = datetime.fromisoformat(until)
                         human_until = dt.strftime("%d.%m.%Y")
-                        premium_status_line = f"активен до {human_until}"
+                        premium_status_line = f"активен (до {human_until})"
 
                         # Считаем, сколько дней осталось, если дата в будущем
                         try:
@@ -357,7 +357,7 @@ async def build_profile_view(user: dict):
             pass
 
     text_lines = [
-        f"👤 <b>Твой профиль</b>{premium_badge}",
+        "👤<b>Твой профиль</b>",
         f"Имя: {name}{age_part} лет" if age else f"Имя: {name}",
         f"Пол: {gender_icon}",
     ]
@@ -424,7 +424,7 @@ async def build_profile_view(user: dict):
 
     stats_block = (
         "📊 <b>Моя статистика</b>\n"
-        f"<blockquote><span class=\"tg-spoiler\">{'\n'.join(stats_lines)}</span></blockquote>"
+        f"<blockquote><span class=\>{'\n'.join(stats_lines)}</span></blockquote>"
     )
     text_lines.append(stats_block)
 
@@ -432,7 +432,7 @@ async def build_profile_view(user: dict):
     text_lines.extend([
         "",
         "💎 <b>GlowShot Premium</b>",
-        f"Статус: {premium_status_line}",
+        f"статус: {premium_status_line}",
     ])
 
     if premium_extra_line:
@@ -626,6 +626,228 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# -------------------- City / Country edit --------------------
+
+def _build_city_kb(user: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    show_city = bool(user.get("show_city", 1))
+    kb.button(text="✍️ Изменить", callback_data="profile:city:change")
+    kb.button(text="🗑 Удалить", callback_data="profile:city:delete")
+    kb.button(text=("🙈 Скрыть" if show_city else "👁 Показать"), callback_data="profile:city:toggle")
+    kb.button(text="⬅️ Назад", callback_data="profile:edit")
+    kb.adjust(2, 2)
+    return kb.as_markup()
+
+
+def _build_country_kb(user: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    show_country = bool(user.get("show_country", 1))
+    kb.button(text="✍️ Изменить", callback_data="profile:country:change")
+    kb.button(text="🗑 Удалить", callback_data="profile:country:delete")
+    kb.button(text=("🙈 Скрыть" if show_country else "👁 Показать"), callback_data="profile:country:toggle")
+    kb.button(text="⬅️ Назад", callback_data="profile:edit")
+    kb.adjust(2, 2)
+    return kb.as_markup()
+
+
+@router.callback_query(F.data == "profile:edit_city")
+async def profile_edit_city(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
+    city = (user.get("city") or "").strip() or "—"
+    show_city = bool(user.get("show_city", 1))
+    vis = "показан" if show_city else "скрыт"
+
+    text = (
+        "🏙 <b>Город</b>\n\n"
+        f"Текущий: <b>{city}</b>\n"
+        f"Отображение в профиле: <b>{vis}</b>\n"
+    )
+    await callback.message.edit_text(text, reply_markup=_build_city_kb(user))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:city:change")
+async def profile_city_change(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileEditStates.waiting_new_city)
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+    await callback.message.edit_text(
+        "🏙 Введи город одним сообщением.\n\nЕсли хочешь убрать — напиши <code>удалить</code>.",
+        reply_markup=build_back_kb(callback_data="profile:edit_city", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:city:delete")
+async def profile_city_delete(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user and user.get("id"):
+        await update_user_city(int(user["id"]), None)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    await callback.message.edit_text("🏙 Город удалён.", reply_markup=_build_city_kb(user or {}))
+    await callback.answer("Готово!")
+
+
+@router.callback_query(F.data == "profile:city:toggle")
+async def profile_city_toggle(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user and user.get("id"):
+        current = bool(user.get("show_city", 1))
+        await set_user_city_visibility(int(user["id"]), not current)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    city = (user.get("city") or "").strip() or "—"
+    show_city = bool(user.get("show_city", 1))
+    vis = "показан" if show_city else "скрыт"
+
+    text = (
+        "🏙 <b>Город</b>\n\n"
+        f"Текущий: <b>{city}</b>\n"
+        f"Отображение в профиле: <b>{vis}</b>\n"
+    )
+    await callback.message.edit_text(text, reply_markup=_build_city_kb(user))
+    await callback.answer("Ок!")
+
+
+@router.message(ProfileEditStates.waiting_new_city, F.text)
+async def profile_set_city(message: Message, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id")
+    edit_chat_id = data.get("edit_chat_id")
+
+    raw = (message.text or "").strip()
+
+    if raw.lower() in ("удалить", "delete", "remove"):
+        u = await get_user_by_tg_id(message.from_user.id)
+        if u and u.get("id"):
+            await update_user_city(int(u["id"]), None)
+        await state.clear()
+        await message.delete()
+        user = await get_user_by_tg_id(message.from_user.id)
+        text, markup = await build_profile_view(user)
+        await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup)
+        return
+
+    if has_links_or_usernames(raw) or has_promo_channel_invite(raw) or not raw:
+        await message.delete()
+        return
+
+    u = await get_user_by_tg_id(message.from_user.id)
+    if u and u.get("id"):
+        await update_user_city(int(u["id"]), raw)
+
+    await state.clear()
+    await message.delete()
+    user = await get_user_by_tg_id(message.from_user.id)
+    text, markup = await build_profile_view(user)
+    await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "profile:edit_country")
+async def profile_edit_country(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
+    country = (user.get("country") or "").strip() or "—"
+    show_country = bool(user.get("show_country", 1))
+    vis = "показана" if show_country else "скрыта"
+
+    text = (
+        "🌍 <b>Страна</b>\n\n"
+        f"Текущая: <b>{country}</b>\n"
+        f"Отображение в профиле: <b>{vis}</b>\n"
+    )
+    await callback.message.edit_text(text, reply_markup=_build_country_kb(user))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:country:change")
+async def profile_country_change(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileEditStates.waiting_new_country)
+    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+    await callback.message.edit_text(
+        "🌍 Введи страну одним сообщением.\n\nЕсли хочешь убрать — напиши <code>удалить</code>.",
+        reply_markup=build_back_kb(callback_data="profile:edit_country", text="⬅️ Назад"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:country:delete")
+async def profile_country_delete(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user and user.get("id"):
+        await update_user_country(int(user["id"]), None)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    await callback.message.edit_text("🌍 Страна удалена.", reply_markup=_build_country_kb(user or {}))
+    await callback.answer("Готово!")
+
+
+@router.callback_query(F.data == "profile:country:toggle")
+async def profile_country_toggle(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user and user.get("id"):
+        current = bool(user.get("show_country", 1))
+        await set_user_country_visibility(int(user["id"]), not current)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    country = (user.get("country") or "").strip() or "—"
+    show_country = bool(user.get("show_country", 1))
+    vis = "показана" if show_country else "скрыта"
+
+    text = (
+        "🌍 <b>Страна</b>\n\n"
+        f"Текущая: <b>{country}</b>\n"
+        f"Отображение в профиле: <b>{vis}</b>\n"
+    )
+    await callback.message.edit_text(text, reply_markup=_build_country_kb(user))
+    await callback.answer("Ок!")
+
+
+@router.message(ProfileEditStates.waiting_new_country, F.text)
+async def profile_set_country(message: Message, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id")
+    edit_chat_id = data.get("edit_chat_id")
+
+    raw = (message.text or "").strip()
+
+    if raw.lower() in ("удалить", "delete", "remove"):
+        u = await get_user_by_tg_id(message.from_user.id)
+        if u and u.get("id"):
+            await update_user_country(int(u["id"]), None)
+        await state.clear()
+        await message.delete()
+        user = await get_user_by_tg_id(message.from_user.id)
+        text, markup = await build_profile_view(user)
+        await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup)
+        return
+
+    if has_links_or_usernames(raw) or has_promo_channel_invite(raw) or not raw:
+        await message.delete()
+        return
+
+    u = await get_user_by_tg_id(message.from_user.id)
+    if u and u.get("id"):
+        await update_user_country(int(u["id"]), raw)
+
+    await state.clear()
+    await message.delete()
+    user = await get_user_by_tg_id(message.from_user.id)
+    text, markup = await build_profile_view(user)
+    await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup)
+
+
 # Handler to set channel link for premium users
 @router.message(ProfileEditStates.waiting_new_channel, F.text)
 async def profile_set_channel(message: Message, state: FSMContext):
@@ -811,6 +1033,7 @@ async def profile_set_gender(callback: CallbackQuery):
     mapping = {
         "male": "Парень",
         "female": "Девушка",
+        "other": "Другое",
         "na": "Не важно",
     }
     gender = mapping.get(code, "Не важно")
