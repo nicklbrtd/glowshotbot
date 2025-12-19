@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+# =============================================================
+# ==== ИМПОРТЫ =================================================
+# =============================================================
+
 from typing import Optional, Union
 
 from datetime import timedelta, datetime
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from handlers.payments import TARIFFS
-from keyboards.common import build_admin_menu
+from keyboards.common import build_admin_menu, build_back_kb
 
+from utils.time import get_moscow_now
+from config import ADMIN_PASSWORD, MASTER_ADMIN_ID
+
+ 
+# =============================================================
+# ==== ИМПОРТЫ ИЗ БАЗЫ ДАННЫХ (database.py) ====================
+# =============================================================
 from database import (
     get_user_by_tg_id,
     get_user_by_id,
@@ -46,6 +57,7 @@ from database import (
     get_total_activity_events,
     get_new_users_last_days,
     get_premium_stats,
+    get_top_users_by_activity_events,
     get_blocked_users_page,
     get_users_with_multiple_daily_top3,
     get_user_admin_stats,
@@ -59,105 +71,12 @@ from database import (
     get_subscriptions_page,
 )
 
+
 router = Router()
 
-
-# ================= ADMIN MENU / STATS =================
-
-@router.callback_query(F.data == "admin:menu")
-async def admin_menu(callback: CallbackQuery, state: FSMContext):
-    """Главный экран админ-панели."""
-    user = await _ensure_admin(callback)
-    if user is None:
-        return
-
-    text = (
-        "⚙️ <b>Админ-панель GlowShot</b>\n\n"
-        "Выбирай раздел ниже 👇"
-    )
-
-    try:
-        await callback.message.edit_text(text, reply_markup=build_admin_menu())
-    except Exception:
-        await callback.message.answer(text, reply_markup=build_admin_menu())
-
-    await callback.answer()
-
-
-def _safe_int(v) -> int:
-    try:
-        return int(v or 0)
-    except Exception:
-        return 0
-
-
-@router.callback_query(F.data == "admin:stats")
-async def admin_stats(callback: CallbackQuery, state: FSMContext):
-    """Сводная статистика (быстро, без сложных фильтров)."""
-    user = await _ensure_admin(callback)
-    if user is None:
-        return
-
-    total_users = active_24h = online_recent = total_events = new_7d = premium_total = 0
-
-    try:
-        total_users = _safe_int(await get_total_users())
-    except Exception:
-        pass
-
-    try:
-        active_24h = _safe_int(await get_active_users_last_24h())
-    except Exception:
-        pass
-
-    try:
-        online_recent = _safe_int(await get_online_users_recent())
-    except Exception:
-        pass
-
-    try:
-        total_events = _safe_int(await get_total_activity_events())
-    except Exception:
-        pass
-
-    try:
-        new_7d = _safe_int(await get_new_users_last_days(7))
-    except Exception:
-        pass
-
-    try:
-        prem = await get_premium_stats()
-        if isinstance(prem, dict):
-            premium_total = _safe_int(prem.get("total") or prem.get("premium_total") or prem.get("count"))
-        else:
-            premium_total = _safe_int(prem)
-    except Exception:
-        pass
-
-    text = (
-        "📊 <b>Статистика</b>\n\n"
-        f"👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"⚡ Активных за 24ч: <b>{active_24h}</b>\n"
-        f"🟢 Онлайн (recent): <b>{online_recent}</b>\n"
-        f"🧠 Всего событий активности: <b>{total_events}</b>\n"
-        f"🆕 Новых за 7 дней: <b>{new_7d}</b>\n"
-        f"🌟 Премиум (всего): <b>{premium_total}</b>\n"
-    )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🧾 Логи / ошибки", callback_data="admin:logs:page:1")
-    kb.button(text="🙍‍♂️ Пользователи", callback_data="admin:users")
-    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 1)
-
-    try:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
-    except Exception:
-        await callback.message.answer(text, reply_markup=kb.as_markup())
-
-    await callback.answer()
-
-# ================= LOGS / ERRORS (Admin) =================
+# =============================================================
+# ==== ЛОГИ / ОШИБКИ (админка) =================================
+# =============================================================
 
 _LOGS_PAGE_LIMIT = 10
 _MAX_TG_TEXT = 3900  # safe margin for Telegram 4096
@@ -426,7 +345,9 @@ async def admin_logs_clear_do(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# ================= HELPER: Edit last user prompt or answer =================
+# =============================================================
+# ==== ХЕЛПЕРЫ (админка / пользователи) ========================
+# =============================================================
 async def _edit_user_prompt_or_answer(
     message: Message,
     state: FSMContext,
@@ -546,6 +467,11 @@ async def _find_user_by_identifier(identifier: str) -> dict | None:
     return user
 
 
+ 
+# =============================================================
+# ==== FSM СТЕЙТЫ (админка) ====================================
+# =============================================================
+
 class UserAdminStates(StatesGroup):
     """
     FSM для раздела «Пользователи»:
@@ -560,6 +486,11 @@ class UserAwardsStates(StatesGroup):
     """Состояния для выдачи кастомной награды пользователю."""
     waiting_custom_award_text = State()
 
+
+ 
+# =============================================================
+# ==== ПОЛЬЗОВАТЕЛИ (админка) ==================================
+# =============================================================
 
 @router.callback_query(F.data == "admin:users")
 async def admin_users_menu(callback: CallbackQuery, state: FSMContext):
@@ -634,8 +565,8 @@ async def _render_admin_user_profile(
     premium_until = user.get("premium_until")
 
     is_blocked = bool(block_status.get("is_blocked"))
-    blocked_until = block_status.get("blocked_until")
-    blocked_reason = block_status.get("blocked_reason")
+    blocked_until = block_status.get("block_until")
+    blocked_reason = block_status.get("block_reason")
 
     avg_rating = rating_summary.get("avg_rating")
     ratings_count = rating_summary.get("ratings_count")
@@ -830,7 +761,9 @@ async def admin_users_find_profile_non_text(message: Message):
         pass
 
 
-# ========== USERS: ФОТОГРАФИЯ ==========
+# -------------------------------------------------------------
+# ---- Пользователи: Фото пользователя ------------------------
+# -------------------------------------------------------------
 @router.callback_query(F.data == "admin:users:photo")
 async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
     """
@@ -962,6 +895,10 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+ 
+# -------------------------------------------------------------
+# ---- Пользователи: Вернуться к профилю ----------------------
+# -------------------------------------------------------------
 @router.callback_query(F.data == "admin:users:profile")
 async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext):
     """
@@ -1026,6 +963,10 @@ async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext
 
 
 
+ 
+# -------------------------------------------------------------
+# ---- Пользователи: Статистика пользователя ------------------
+# -------------------------------------------------------------
 @router.callback_query(F.data == "admin:users:stats")
 async def admin_users_stats(callback: CallbackQuery, state: FSMContext):
     """
@@ -1919,9 +1860,6 @@ class AchievementStates(StatesGroup):
     waiting_edit_award_text = State()
     waiting_edit_award_icon = State()
 
-from keyboards.common import build_admin_menu, build_back_kb
-from utils.time import get_moscow_now
-from config import ADMIN_PASSWORD, MASTER_ADMIN_ID
 
 ADMIN_PANEL_TEXT = "<b>Админ-панель</b>\n\nВыбери раздел:"
 
@@ -5131,3 +5069,129 @@ async def award_seen(callback: CallbackQuery):
         await callback.answer("Спасибо! 🎉")
     except Exception:
         pass
+# =============================================================
+# ==== СТАТИСТИКА: СПИСКИ ПОЛЬЗОВАТЕЛЕЙ =======================
+# =============================================================
+
+_STATS_PAGE_LIMIT = 20
+
+
+def _fmt_user_short(u: dict) -> str:
+    tg_id = u.get("tg_id")
+    username = (u.get("username") or "").strip()
+    name = (u.get("name") or "").strip()
+    uname = f"@{username}" if username else "—"
+    nm = name if name else "Без имени"
+    return f"{uname} · {nm} · <code>{tg_id if tg_id is not None else '—'}</code>"
+
+
+def _stats_list_title(kind: str) -> str:
+    return {
+        "total": "👥 Все пользователи",
+        "active24": "⚡ Активные за 24ч",
+        "online": "🟢 Онлайн (recent)",
+        "events": "🧠 Топ по событиям активности",
+        "new7": "🆕 Новые за 7 дней",
+        "premium": "🌟 Премиум пользователи",
+    }.get(kind, "📋 Список")
+
+
+@router.callback_query(F.data.startswith("admin:stats:list:"))
+async def admin_stats_list(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    # admin:stats:list:<kind>:<page>
+    parts = (callback.data or "").split(":")
+    if len(parts) < 5:
+        await callback.answer("Некорректная команда.", show_alert=True)
+        return
+
+    kind = parts[3]
+    try:
+        page = int(parts[4])
+    except Exception:
+        page = 1
+
+    page = max(1, page)
+    offset = (page - 1) * _STATS_PAGE_LIMIT
+
+    total = 0
+    rows: list[dict] = []
+
+    try:
+        if kind == "total":
+            total = _safe_int(await get_total_users())
+            rows = await get_users_sample(limit=_STATS_PAGE_LIMIT, offset=offset, only_active=True)
+
+        elif kind == "active24":
+            total, rows = await get_active_users_last_24h(limit=_STATS_PAGE_LIMIT, offset=offset)
+
+        elif kind == "online":
+            total, rows = await get_online_users_recent(window_minutes=5, limit=_STATS_PAGE_LIMIT, offset=offset)
+
+        elif kind == "new7":
+            total, rows = await get_new_users_last_days(7, limit=_STATS_PAGE_LIMIT, offset=offset)
+
+        elif kind == "premium":
+            prem = await get_premium_stats()
+            if isinstance(prem, dict):
+                total = _safe_int(prem.get("total") or prem.get("premium_total") or prem.get("count"))
+            else:
+                total = _safe_int(prem)
+            rows = await get_premium_users(limit=_STATS_PAGE_LIMIT, offset=offset)
+
+        elif kind == "events":
+            total, rows = await get_top_users_by_activity_events(limit=_STATS_PAGE_LIMIT, offset=offset)
+
+        else:
+            await callback.answer("Неизвестный список.", show_alert=True)
+            return
+
+    except Exception:
+        await callback.answer("Не удалось получить список (ошибка БД).", show_alert=True)
+        return
+
+    total_pages = max(1, (int(total or 0) + _STATS_PAGE_LIMIT - 1) // _STATS_PAGE_LIMIT)
+    if page > total_pages:
+        page = total_pages
+
+    lines: list[str] = [
+        f"{_stats_list_title(kind)}",
+        f"Всего: <b>{int(total or 0)}</b>",
+        f"Страница: <b>{page}</b>/<b>{total_pages}</b>",
+        "",
+    ]
+
+    if not rows:
+        lines.append("Пусто.")
+    else:
+        for i, u in enumerate(rows, start=offset + 1):
+            if kind == "events" and (u.get("events_count") is not None):
+                lines.append(f"{i}. {_fmt_user_short(u)} · событий: <b>{int(u.get('events_count') or 0)}</b>")
+            else:
+                lines.append(f"{i}. {_fmt_user_short(u)}")
+
+    text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    if page > 1:
+        kb.button(text="⬅️", callback_data=f"admin:stats:list:{kind}:{page-1}")
+    if page < total_pages:
+        kb.button(text="➡️", callback_data=f"admin:stats:list:{kind}:{page+1}")
+
+    kb.button(text="⬅️ Назад к статистике", callback_data="admin:stats")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+
+    if page > 1 or page < total_pages:
+        kb.adjust(2, 1, 1)
+    else:
+        kb.adjust(1, 1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb.as_markup())
+
+    await callback.answer()

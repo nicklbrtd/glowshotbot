@@ -11,13 +11,13 @@ from config import BOT_TOKEN
 from database import init_db, log_bot_error
 
 from handlers.legal_center import router as help_center_router
+from handlers.admin import router as admin_router
 from handlers import (
     start,
     upload,
     rate,
     results,
     profile,
-    admin,
     registration,
     moderator,
     premium,
@@ -152,7 +152,7 @@ async def main() -> None:
     dp.include_router(upload.router)
     dp.include_router(rate.router)
     dp.include_router(results.router)
-    dp.include_router(admin.router)
+    dp.include_router(admin_router)    
     dp.include_router(moderator.router)
     dp.include_router(premium.router)
     dp.include_router(payments.router)
