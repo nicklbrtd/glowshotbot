@@ -412,11 +412,40 @@ async def main():
                     f"Ожидайте ответа от поддержки."
                 )
         else:
-            # Если не получилось никому написать (нет кандидатов / боты не могут писать в личку оператору и т.п.)
+            # Если не получилось никому написать в личку (часто из‑за ограничений Telegram),
+            # то эскалируем в общий чат поддержки (SUPPORT_CHAT_ID), где бот писать может всегда.
+            mentions = []
+            for c in candidates[:10]:
+                tg_id = c.get("tg_id")
+                uname = c.get("username")
+                if uname:
+                    mentions.append(f"@{uname}")
+                elif tg_id:
+                    # упоминание по tg_id работает в группах/супергруппах
+                    mentions.append(f'<a href="tg://user?id={int(tg_id)}">оператор</a>')
+
+            ping_line = " ".join(mentions) if mentions else "(операторы не найдены)"
+
+            try:
+                await callback.bot.send_message(
+                    chat_id=SUPPORT_CHAT_ID,
+                    text=(
+                        "⚠️ <b>Эскалация: вопрос не решён</b>\n\n"
+                        f"Тикет: #{ticket_id}\n"
+                        f"Пользователь ID: <code>{user_id}</code>\n"
+                        f"Username: @{callback.from_user.username if callback.from_user.username else '—'}\n"
+                        f"Раздел: <b>{(ticket or {}).get('section') or '—'}</b>\n\n"
+                        "Пользователь отметил, что ответ не решил проблему. Нужен оператор.\n\n"
+                        f"Пинг: {ping_line}"
+                    ),
+                )
+            except Exception:
+                pass
+
             text = (
                 f"— Вопрос #{ticket_id} не решен.\n"
-                f"Сейчас не удалось передать запрос оператору (возможно, у поддержки закрыта личка для ботов).\n"
-                f"Пожалуйста, напишите в общий чат поддержки ещё раз."
+                f"Я передал запрос в общий чат поддержки, оператор подключится.\n"
+                f"Ожидайте ответа от поддержки."
             )
 
         await callback.message.answer(text)
