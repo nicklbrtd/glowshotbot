@@ -788,7 +788,41 @@ async def _add_premium_days(conn, user_id: int, days: int) -> None:
         get_moscow_now_iso(),
     )
 
-# -------------------- user admin stats --------------------
+
+
+async def get_top_users_by_activity_events(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, rows) — топ пользователей по количеству событий активности."""
+    p = _assert_pool()
+
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM (
+              SELECT user_id
+              FROM activity_events
+              WHERE user_id IS NOT NULL
+              GROUP BY user_id
+            ) t
+            """
+        )
+
+        rows = await conn.fetch(
+            """
+            SELECT u.*, COUNT(a.id) AS events_count
+            FROM activity_events a
+            JOIN users u ON u.id = a.user_id
+            WHERE a.user_id IS NOT NULL
+              AND u.is_deleted=0
+            GROUP BY u.id
+            ORDER BY COUNT(a.id) DESC, u.updated_at DESC NULLS LAST, u.id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
+            int(limit),
+        )
+
+    return int(total or 0), [dict(r) for r in rows]
 
 # -------------------- comments --------------------
 
@@ -1835,42 +1869,6 @@ async def get_total_activity_events_last_days(days: int = 7) -> int:
             since_iso,
         )
     return int(v or 0)
-
-
-async def get_top_users_by_activity_events(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
-    """(total, rows) — топ пользователей по количеству событий активности."""
-    p = _assert_pool()
-
-    async with p.acquire() as conn:
-        total = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM (
-              SELECT user_id
-              FROM activity_events
-              WHERE user_id IS NOT NULL
-              GROUP BY user_id
-            ) t
-            """
-        )
-
-        rows = await conn.fetch(
-            """
-            SELECT u.*, COUNT(a.id) AS events_count
-            FROM activity_events a
-            JOIN users u ON u.id = a.user_id
-            WHERE a.user_id IS NOT NULL
-              AND u.is_deleted=0
-            GROUP BY u.id
-            ORDER BY COUNT(a.id) DESC, u.updated_at DESC NULLS LAST, u.id DESC
-            OFFSET $1 LIMIT $2
-            """,
-            int(offset or 0),
-            int(limit),
-        )
-
-    return int(total or 0), [dict(r) for r in rows]
-
 
 # --- premium / new / blocked ---
 
