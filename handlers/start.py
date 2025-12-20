@@ -17,7 +17,13 @@ router = Router()
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
-REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@glowshorchanel")
+
+# Channel required to use the bot (subscription gate)
+REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
+REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/nyqcreative")
+
+# Advertising channel shown inside the menu text (not the gate)
+AD_CHANNEL_LINK = os.getenv("AD_CHANNEL_LINK", "https://t.me/glowshorchanel")
 
 # Рандом-строки для рекламного блока (вторая строка)
 AD_LINES: list[str] = [
@@ -25,7 +31,6 @@ AD_LINES: list[str] = [
     "Оценивай больше — чаще попадаешь в топы 🏁",
     "Публикуй сильный кадр — и проси друзей оценить через ссылку 🔗⭐️",
 ]
-
 
 
 def _get_flag(user, key: str) -> bool:
@@ -43,9 +48,25 @@ def _get_flag(user, key: str) -> bool:
     return bool(value)
 
 
+def _normalize_chat_id(value: str) -> str:
+    """Convert a link like https://t.me/name to @name for get_chat_member."""
+    v = (value or "").strip()
+    if not v:
+        return "@nyqcreative"
+    if v.startswith("https://t.me/"):
+        tail = v.split("https://t.me/", 1)[1].strip("/")
+        if tail:
+            return "@" + tail
+    if v.startswith("t.me/"):
+        tail = v.split("t.me/", 1)[1].strip("/")
+        if tail:
+            return "@" + tail
+    return v
+
+
 async def is_user_subscribed(bot, user_id: int) -> bool:
     try:
-        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
+        member = await bot.get_chat_member(chat_id=_normalize_chat_id(str(REQUIRED_CHANNEL_ID)), user_id=user_id)
     except TelegramBadRequest:
         return False
 
@@ -59,10 +80,7 @@ def build_subscribe_keyboard() -> InlineKeyboardMarkup:
     """
     kb = InlineKeyboardBuilder()
 
-    if isinstance(REQUIRED_CHANNEL_ID, str) and REQUIRED_CHANNEL_ID.startswith("@"):
-        channel_link = f"https://t.me/{REQUIRED_CHANNEL_ID.lstrip('@')}"
-    else:
-        channel_link = "https://t.me/nyqcreative"
+    channel_link = REQUIRED_CHANNEL_LINK
 
     kb.button(
         text="🔔 Подписаться",
@@ -201,11 +219,6 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
     except Exception:
         pass
 
-    # Ссылка на канал
-    if isinstance(REQUIRED_CHANNEL_ID, str) and REQUIRED_CHANNEL_ID.startswith("@"):
-        channel_link = f"https://t.me/{REQUIRED_CHANNEL_ID.lstrip('@')}"
-    else:
-        channel_link = "https://t.me/nyqcreative"
 
     title_prefix = "💎 " if is_premium else ""
 
@@ -219,7 +232,7 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
 
     lines.append("")
     lines.append("📄 <b>Рекламный блок:</b>")
-    lines.append(f"• Подпишись на наш телеграм канал: {channel_link}")
+    lines.append(f"• Подпишись на наш телеграм канал: {AD_CHANNEL_LINK}")
     # рандомная вторая строка (всегда)
     if AD_LINES:
         lines.append(f"• {random.choice(AD_LINES)}")
