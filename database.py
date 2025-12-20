@@ -2349,26 +2349,18 @@ async def get_user_rating_summary(user_id: int) -> dict:
 
 
 async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
-    """Return user's best photo ("самое популярное") by Bayesian score.
+    """Return user's best photo for profile.
 
-    Includes soft-deleted photos so the profile can still show the best work
-    even when the user has 0 active photos.
-
-    Only moderation_status='active' photos are considered.
-
-    NOTE: Some callers may pass a Telegram id (tg_id) instead of internal users.id.
-    We resolve it safely here.
-
-    Ranking:
-      1) bayes_score desc
-      2) ratings_count desc
-      3) created_at asc
+    - Accepts either internal users.id OR Telegram tg_id (callers sometimes mix them).
+    - Includes soft-deleted photos (profile is career-wide).
+    - Does NOT filter by moderation_status (pending/other would otherwise disappear).
+    - Uses Bayesian score if ratings exist; otherwise still returns some photo.
     """
     p = _assert_pool()
     prior = _bayes_prior_weight()
 
     async with p.acquire() as conn:
-        global_mean, _global_cnt = await _get_global_rating_mean(conn)
+        global_mean, _ = await _get_global_rating_mean(conn)
 
         # Resolve to internal users.id (support accidental tg_id input)
         resolved_user_id = await conn.fetchval(
@@ -2399,7 +2391,6 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 FROM photos ph
                 LEFT JOIN ratings r ON r.photo_id = ph.id
                 WHERE ph.user_id=$1
-                  AND ph.moderation_status='active'
                 GROUP BY ph.id
             )
             SELECT
