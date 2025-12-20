@@ -503,6 +503,172 @@ async def ensure_schema() -> None:
 
 # -------------------- helpers --------------------
 
+# -------------------- share links / link ratings --------------------
+
+async def ensure_user_minimal_row(tg_id: int, username: str | None = None) -> dict | None:
+    """Ensure user row exists (minimal), without forcing full registration."""
+    return await _ensure_user_row(int(tg_id), username=username)
+
+
+def _make_share_code(n: int = 10) -> str:
+    # no 0/O/I for readability
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(random.choice(alphabet) for _ in range(n))
+
+
+async def get_or_create_share_link_code(owner_tg_id: int) -> str:
+    """Return active share code for owner, or create a new one."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT code
+            FROM photo_share_links
+            WHERE owner_tg_id=$1 AND is_active=1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            int(owner_tg_id),
+        )
+
+    if v:
+        return str(v)
+
+    now = get_moscow_now_iso()
+    for _ in range(10):
+        code = _make_share_code(10)
+        try:
+            async with p.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO photo_share_links (code, owner_tg_id, is_active, created_at)
+                    VALUES ($1,$2,1,$3)
+                    """,
+                    code,
+                    int(owner_tg_id),
+                    now,
+                )
+            return code
+        except Exception:
+            # extremely rare collision, retry
+            continue
+
+    code = _make_share_code(14)
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO photo_share_links (code, owner_tg_id, is_active, created_at)
+            VALUES ($1,$2,1,$3)
+            """,
+            code,
+            int(owner_tg_id),
+            now,
+        )
+    return code
+
+
+async def refresh_share_link_code(owner_tg_id: int) -> str:
+    """Disable previous active code and issue a new one."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE photo_share_links SET is_active=0 WHERE owner_tg_id=$1 AND is_active=1",
+            int(owner_tg_id),
+        )
+    return await get_or_create_share_link_code(int(owner_tg_id))
+
+
+async def get_owner_tg_id_by_share_code(code: str) -> int | None:
+    c = (code or "").strip()
+    if not c:
+        return None
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT owner_tg_id FROM photo_share_links WHERE code=$1 AND is_active=1",
+            c,
+        )
+    return int(v) if v is not None else None
+
+
+async def get_active_photo_for_owner_tg_id(owner_tg_id: int) -> dict | None:
+    """Return latest active (not deleted) photo for owner tg id."""
+    owner = await get_user_by_tg_id(int(owner_tg_id))
+    if not owner:
+        return None
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM photos
+            WHERE user_id=$1 AND is_deleted=0 AND moderation_status='active'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            int(owner["id"]),
+        )
+    return dict(row) if row else None
+
+
+async def get_user_rating_value(photo_id: int, user_id: int) -> int | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT value FROM ratings WHERE photo_id=$1 AND user_id=$2 LIMIT 1",
+            int(photo_id),
+            int(user_id),
+        )
+    return int(v) if v is not None else None
+
+
+async def has_user_commented(photo_id: int, user_id: int) -> bool:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT 1 FROM comments WHERE photo_id=$1 AND user_id=$2 LIMIT 1",
+            int(photo_id),
+            int(user_id),
+        )
+    return bool(v)
+
+
+async def add_rating_by_tg_id(
+    *,
+    photo_id: int,
+    rater_tg_id: int,
+    value: int,
+    source: str = "feed",
+    source_code: str | None = None,
+) -> bool:
+    """Insert rating for a tg user. Returns True if inserted, False if already exists."""
+    if value < 1 or value > 10:
+        return False
+
+    u = await ensure_user_minimal_row(int(rater_tg_id))
+    if not u:
+        return False
+
+    p = _assert_pool()
+    try:
+        async with p.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ratings (photo_id, user_id, value, source, source_code, created_at)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                """,
+                int(photo_id),
+                int(u["id"]),
+                int(value),
+                str(source or "feed"),
+                str(source_code) if source_code else None,
+                get_moscow_now_iso(),
+            )
+        return True
+    except asyncpg.exceptions.UniqueViolationError:
+        return False
+
 async def _ensure_user_row(tg_id: int, username: str | None = None) -> dict | None:
     u = await get_user_by_tg_id(tg_id)
     if u is not None:

@@ -258,7 +258,10 @@ async def lr_comment_finish(message: Message, state: FSMContext):
     code = str(data.get("lr_code") or "")
 
     text = (message.text or "").strip()
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     if not text:
         return
