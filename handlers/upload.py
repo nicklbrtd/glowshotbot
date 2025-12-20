@@ -8,7 +8,8 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from aiogram.exceptions import TelegramBadRequest, SkipHandler
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.dispatcher.event.bases import SkipHandler
 
 from database import (
     get_user_by_tg_id,
