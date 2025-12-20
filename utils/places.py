@@ -111,6 +111,12 @@ _FAMOUS_CITY_DEFAULT_COUNTRY = {
     "prague": "Czechia",
     "warsaw": "Poland",
     "budapest": "Hungary",
+    "moscow": "Russia",
+    "saint petersburg": "Russia",
+    "st petersburg": "Russia",
+    "st. petersburg": "Russia",
+    "petersburg": "Russia",
+    # Note: dots are stripped by _cmp_key, so "st. petersburg" still matches.
 }
 
 
@@ -252,7 +258,8 @@ async def _nominatim_search(q: str, limit: int = 5) -> list[dict]:
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    return []
+                    # Treat rate limits / temporary errors as "service unavailable"
+                    raise RuntimeError(f"Nominatim HTTP {resp.status}")
                 return await resp.json()
 
 def _best_city(addr: dict) -> str | None:
