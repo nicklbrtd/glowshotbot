@@ -151,7 +151,7 @@ def _looks_like_country(text: str) -> bool:
 
 _CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
 
-_CACHE_CC: dict[tuple[str, str], tuple[float, bool, str, str, bool]] = {}
+_CACHE_CC: dict[tuple[str, str], tuple[float, bool, str, str, str, bool]] = {}
 _TTL = 60 * 60 * 24 * 7  # 7 дней
 
 # чтобы не долбить Nominatim параллельно
@@ -273,6 +273,10 @@ def _best_country(addr: dict) -> str | None:
     v = addr.get("country")
     return str(v) if v else None
 
+def _best_country_code(addr: dict) -> str:
+    cc = (addr.get("country_code") or "").strip()
+    return cc.upper() if cc else ""
+
 async def validate_place(kind: str, raw: str) -> tuple[bool, str, bool]:
     """
     kind: 'city' or 'country'
@@ -366,31 +370,31 @@ async def validate_place(kind: str, raw: str) -> tuple[bool, str, bool]:
 
 # --- New: validate_city_and_country ---
 
-async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
-    """Validate and normalize a city, and also infer the country.
+async def validate_city_and_country_full(raw: str) -> tuple[bool, str, str, str, bool]:
+    """Validate and normalize a city, and also infer the country and its ISO code.
 
-    returns: (ok, canonical_city, canonical_country, used_geocoder)
+    returns: (ok, canonical_city, canonical_country, canonical_country_code, used_geocoder)
 
-    If the geocoder is unavailable, returns ok=True with normalized city and empty country
+    If the geocoder is unavailable, returns ok=True with normalized city and empty country/code
     (so UX doesn't break and we don't overwrite user's existing country with junk).
     """
     raw = _norm_spaces(raw)
     if not raw:
-        return False, "", "", False
+        return False, "", "", "", False
 
     if len(raw) > 64:
-        return False, "", "", False
+        return False, "", "", "", False
 
     if re.search(r"\d", raw):
-        return False, "", "", False
+        return False, "", "", "", False
 
     if re.search(r"[<>@#$/\\{}\[\]|~`^*=+]", raw):
-        return False, "", "", False
+        return False, "", "", "", False
 
     # If user typed a country name into the city field (e.g. "Россия"), reject it.
     # Otherwise Nominatim may return a country and we end up with "Россия, Россия".
     if "," not in raw and len(raw.split()) == 1 and _looks_like_country(raw):
-        return False, _title_case(raw), _normalize_country_name(_title_case(raw)), False
+        return False, _title_case(raw), _normalize_country_name(_title_case(raw)), "", False
 
     # Parse "city, country" / "country, city" / "country city" inputs
     city_hint = raw
@@ -430,14 +434,21 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
         country = _RU_CITY_TO_COUNTRY.get(cmp_city, "")
         if not country and country_hint:
             country = _normalize_country_name(_title_case(country_hint))
-        return True, city, country, False
+
+        country_code = ""
+        if _cmp_key(country) in ("россия", "росия"):
+            country_code = "RU"
+        elif _cmp_key(country) == "сша":
+            country_code = "US"
+
+        return True, city, country, country_code, False
 
     now = time.time()
     ck = (cmp_city, cmp_country_hint)
     if ck in _CACHE_CC:
-        ts, ok, city, country, used_geo = _CACHE_CC[ck]
+        ts, ok, city, country, country_code, used_geo = _CACHE_CC[ck]
         if (now - ts) < _TTL:
-            return ok, city, country, used_geo
+            return ok, city, country, country_code, used_geo
 
     # Build a geocoder query that includes country hint if user provided it
     if country_hint:
@@ -450,16 +461,17 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
     except Exception:
         # API down -> don't block the user, but don't overwrite country
         city_fallback = _title_case(city_hint)
-        _CACHE_CC[ck] = (now, True, city_fallback, "", False)
-        return True, city_fallback, "", False
+        _CACHE_CC[ck] = (now, True, city_fallback, "", "", False)
+        return True, city_fallback, "", "", False
 
     if not results:
         city_fallback = _title_case(city_hint)
-        _CACHE_CC[ck] = (now, False, city_fallback, "", True)
-        return False, city_fallback, "", True
+        _CACHE_CC[ck] = (now, False, city_fallback, "", "", True)
+        return False, city_fallback, "", "", True
 
     best_city = None
     best_country = None
+    best_country_code = ""
     best_sim = 0.0
     best_rank = -1
     best_importance = -1.0
@@ -472,6 +484,7 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
             addr = r.get("address") or {}
             cand_city = _best_city(addr)
             cand_country = _best_country(addr)
+            cand_country_code = _best_country_code(addr)
 
             if not cand_city:
                 cand_city = (r.get("display_name") or "").split(",", 1)[0].strip() or None
@@ -493,12 +506,14 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
                 best_importance = imp
                 best_city = cand_city
                 best_country = cand_country
+                best_country_code = cand_country_code
 
         if best_city is not None:
             break
 
     canonical_city = _title_case(best_city or city_hint)
     canonical_country = _normalize_country_name(_title_case(best_country or ""))
+    canonical_country_code = (best_country_code or "").upper()
 
     # If user provided country hint and geocoder couldn't infer it, use the hint
     if country_hint and not canonical_country:
@@ -508,11 +523,16 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
     if _cmp_key(canonical_city) == "орел":
         canonical_city = "Орёл"
         canonical_country = canonical_country or "Россия"
+        canonical_country_code = canonical_country_code or "RU"
 
     if _cmp_key(canonical_country) in ("россия", "росия"):
         canonical_country = "Россия"
+        canonical_country_code = canonical_country_code or "RU"
 
     canonical_country = _normalize_country_name(canonical_country)
+
+    if _cmp_key(canonical_country) == "сша":
+        canonical_country_code = canonical_country_code or "US"
 
     # Guard: avoid "Страна, Страна" in profile
     if canonical_country and _cmp_key(canonical_city) == _cmp_key(canonical_country):
@@ -521,6 +541,7 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
             canonical_city = _title_case(city_hint)
         else:
             canonical_country = ""
+            canonical_country_code = ""
 
     ok = best_sim >= 0.72
 
@@ -529,5 +550,16 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
     if not country_hint and _looks_like_country(canonical_city):
         ok = False
 
-    _CACHE_CC[ck] = (now, ok, canonical_city, canonical_country, True)
-    return ok, canonical_city, canonical_country, True
+    _CACHE_CC[ck] = (now, ok, canonical_city, canonical_country, canonical_country_code, True)
+    return ok, canonical_city, canonical_country, canonical_country_code, True
+
+
+async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
+    """Backward-compatible wrapper.
+
+    returns: (ok, canonical_city, canonical_country, used_geocoder)
+
+    Use `validate_city_and_country_full()` to also get ISO country code.
+    """
+    ok, city, country, _country_code, used_geo = await validate_city_and_country_full(raw)
+    return ok, city, country, used_geo

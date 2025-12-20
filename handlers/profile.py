@@ -31,8 +31,8 @@ from database import (
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
-from utils.places import validate_place, validate_city_and_country
-from utils.flags import country_to_flag
+from utils.places import validate_place, validate_city_and_country, validate_city_and_country_full
+from utils.flags import country_to_flag, country_display
 
 router = Router()
 
@@ -248,7 +248,7 @@ async def build_profile_view(user: dict):
     loc_parts: list[str] = []
     # по запросу: сначала страна, потом город
     if country and show_country:
-        loc_parts.append(country)
+        loc_parts.append(country_display(country))
     if city and show_city:
         loc_parts.append(city)
 
@@ -594,7 +594,7 @@ async def profile_set_city(message: Message, state: FSMContext):
         return
 
     # Validate + normalize city + infer country
-    is_ok, canonical_city, canonical_country, _used_geocoder = await validate_city_and_country(raw)
+    is_ok, canonical_city, canonical_country, canonical_country_code, _used_geocoder = await validate_city_and_country_full(raw)
     if not is_ok:
         await message.delete()
         try:
@@ -618,7 +618,10 @@ async def profile_set_city(message: Message, state: FSMContext):
     if u and u.get("id"):
         await update_user_city(int(u["id"]), canonical_city)
         # Auto-update country if we could infer it
-        if canonical_country:
+        # Prefer storing ISO code (RU/US/ES/...) when available
+        if canonical_country_code:
+            await update_user_country(int(u["id"]), canonical_country_code)
+        elif canonical_country:
             await update_user_country(int(u["id"]), canonical_country)
 
     await state.clear()
