@@ -17,7 +17,9 @@ router = Router()
 
 REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
 # TODO: заполняй вручную — если пусто, премиум-блок не показывается
-PREMIUM_WEEKLY_UPDATES: list[str] = []
+PREMIUM_WEEKLY_UPDATES: list[str] = [
+    "🆕 Улучшена статистика в профиле (умный скор, больше метрик)",
+]
 
 
 def _get_flag(user, key: str) -> bool:
@@ -87,7 +89,6 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
     can_change_text = "—"
     active_rating_text = "—"
     can_rate_text = "—"
-    online_text = "—"
 
     try:
         # Берём пул из database.py (он у тебя уже есть)
@@ -187,30 +188,6 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
             except Exception:
                 pass
 
-            # Онлайн: пробуем несколько распространённых колонок last_active*
-            try:
-                # Порядок важен: пробуем самые вероятные имена
-                candidates = [
-                    "last_active_at",
-                    "last_seen_at",
-                    "last_activity_at",
-                    "last_seen",
-                ]
-                online = None
-                for col in candidates:
-                    try:
-                        online = await conn.fetchval(
-                            f"SELECT COUNT(*)::int FROM users WHERE {col} > (NOW() - INTERVAL '5 minutes')",
-                        )
-                        if online is not None:
-                            break
-                    except Exception:
-                        continue
-
-                if online is not None:
-                    online_text = str(int(online))
-            except Exception:
-                pass
 
     except Exception:
         # Если что-то пошло не так — просто оставляем дефолтные "—"
@@ -220,20 +197,19 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
         f"Фото: {active_count_text} активная ({can_change_text})",
         f"Рейтинг: {active_rating_text}",
         f"Можно оценить: {can_rate_text}",
-        f"Онлайн: {online_text}",
     ]
 
-    # Сворачиваемая цитата
-    stats_block = "<blockquote expandable>" + "\n".join(stats_lines) + "</blockquote>"
+    stats_block = "\n".join(stats_lines)
 
     lines: list[str] = []
-    lines.append(f"Привет, {safe_name} 👋")
-    lines.append("")
+    greet_prefix = "💎 " if is_premium else ""
+    lines.append(f"{greet_prefix}Привет, {safe_name}")
     lines.append(stats_block)
 
     # Рекламный блок — только не премиум, и всегда показываем
     if not is_premium:
         promos = [
+            "🆕 Новость: скоро появятся новые итоги и больше топов 🏁",
             "💎 Хочешь больше возможностей? Премиум скоро станет ещё круче.",
             "💎 Премиум даёт 2 активные фотки и расширенную статистику.",
             "💎 Поддержи проект — получи удобные фичи и меньше ограничений.",
