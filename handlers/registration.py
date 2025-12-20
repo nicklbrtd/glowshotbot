@@ -5,7 +5,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
-from database import create_user, get_user_by_tg_id
+from database import upsert_user_profile, get_user_by_tg_id
 from keyboards.common import build_main_menu
 
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -31,23 +31,42 @@ async def _get_reg_context(state: FSMContext) -> tuple[int | None, int | None]:
 async def registration_start(callback: CallbackQuery, state: FSMContext):
 
     existing = await get_user_by_tg_id(callback.from_user.id)
-    if existing is not None:
+    if existing is not None and (existing.get("name") or "").strip():
         await callback.answer("Ты уже зарегистрирован.", show_alert=True)
-        await callback.message.edit_text(
-            "Ты уже в системе. Вот главное меню:",
-            reply_markup=build_main_menu(),
-        )
+        try:
+            await callback.message.edit_text(
+                "Ты уже в системе. Вот главное меню:",
+                reply_markup=build_main_menu(),
+            )
+        except TelegramBadRequest:
+            # If it's a photo message, edit caption instead
+            await callback.message.edit_caption(
+                caption="Ты уже в системе. Вот главное меню:",
+                reply_markup=build_main_menu(),
+            )
         return
 
-    await state.update_data(
-        reg_msg_id=callback.message.message_id,
-        reg_chat_id=callback.message.chat.id,
-    )
-
     await state.set_state(RegistrationStates.waiting_name)
-    await callback.message.edit_text(
-        "Напиши имя или свой псевдоним.",
-    )
+
+    # If registration starts from a photo message (e.g., link rating result), delete it so the photo disappears
+    # and continue registration in a fresh text message.
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        msg = await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text="Напиши имя или свой псевдоним.",
+        )
+        await state.update_data(reg_msg_id=msg.message_id, reg_chat_id=msg.chat.id)
+    else:
+        await state.update_data(
+            reg_msg_id=callback.message.message_id,
+            reg_chat_id=callback.message.chat.id,
+        )
+        await callback.message.edit_text("Напиши имя или свой псевдоним.")
+
     await callback.answer()
 
 
@@ -320,7 +339,7 @@ async def registration_bio(message: Message, state: FSMContext):
 
     tg_user = message.from_user
 
-    await create_user(
+    await upsert_user_profile(
         tg_id=tg_user.id,
         username=tg_user.username,
         name=name,
@@ -363,7 +382,7 @@ async def registration_bio_skip(callback: CallbackQuery, state: FSMContext):
 
     tg_user = callback.from_user
 
-    await create_user(
+    await upsert_user_profile(
         tg_id=tg_user.id,
         username=tg_user.username,
         name=name,

@@ -7,12 +7,8 @@ from aiogram.filters import CommandStart
 from aiogram.filters.command import CommandObject
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
-
-from utils.validation import has_links_or_usernames, has_promo_channel_invite
 
 from database import (
     get_user_by_tg_id,
@@ -24,15 +20,10 @@ from database import (
     get_active_photo_for_owner_tg_id,
     ensure_user_minimal_row,
     add_rating_by_tg_id,
-    has_user_commented,          # если нет — сделай как SELECT 1 из comments
-    get_user_rating_value,       # если нет — сделай как SELECT value из ratings
-    create_comment,
+    get_user_rating_value,
 )
 
 router = Router()
-
-class LinkCommentStates(StatesGroup):
-    waiting_text = State()
 
 _BOT_USERNAME: str | None = None
 
@@ -46,9 +37,10 @@ async def _get_bot_username(obj: Message | CallbackQuery) -> str:
     return _BOT_USERNAME
 
 def _is_registered(u: dict | None) -> bool:
+    # Minimal rows may exist (link rating). Registered = profile name is filled.
     if not u:
         return False
-    return bool((u.get("name") or "").strip()) and (u.get("age") is not None)
+    return bool((u.get("name") or "").strip())
 
 def _share_kb(photo_id: int, link: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -57,25 +49,49 @@ def _share_kb(photo_id: int, link: str) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
     return kb.as_markup()
 
-def _rate_kb(owner_tg_id: int, code: str, rated_value: int | None, commented: bool) -> InlineKeyboardMarkup:
+def _rate_kb(
+    *,
+    owner_tg_id: int,
+    code: str,
+    rated_value: int | None,
+    is_registered: bool,
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
     if rated_value is None:
         kb.row(*[InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{i}:{code}") for i in range(1, 6)])
         kb.row(*[InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{i}:{code}") for i in range(6, 11)])
-    else:
-        kb.row(InlineKeyboardButton(text=f"✅ Твоя оценка: {rated_value}", callback_data="lr:noop"))
+        return kb.as_markup()
 
-    if commented:
-        kb.row(InlineKeyboardButton(text="💬 Комментарий отправлен", callback_data="lr:noop"))
+    if is_registered:
+        kb.row(InlineKeyboardButton(text="✅ Отлично", callback_data="lr:done"))
     else:
-        kb.row(InlineKeyboardButton(text="💬 Комментарий", callback_data=f"lr:comment:{owner_tg_id}:{code}"))
+        kb.row(InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data="auth:start"))
 
     return kb.as_markup()
 
+
+def _fmt_pub_date(photo: dict) -> str:
+    raw = (photo.get("created_at") or "").strip()
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime
+
+        s = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%d.%m.%Y")
+    except Exception:
+        if "T" in raw:
+            return raw.split("T", 1)[0]
+        return raw
+
 async def _render_link_ui(target: Message | CallbackQuery, owner_tg_id: int, code: str):
-    viewer_tg_id = target.from_user.id if isinstance(target, Message) else target.from_user.id
-    viewer = await ensure_user_minimal_row(viewer_tg_id, username=target.from_user.username)
+    viewer_tg_id = target.from_user.id
+    # minimal row for uniqueness tracking (even if not registered)
+    await ensure_user_minimal_row(viewer_tg_id, username=target.from_user.username)
+    viewer_full = await get_user_by_tg_id(int(viewer_tg_id))
+    is_reg = _is_registered(viewer_full)
 
     photo = await get_active_photo_for_owner_tg_id(owner_tg_id)
     if not photo:
@@ -90,46 +106,83 @@ async def _render_link_ui(target: Message | CallbackQuery, owner_tg_id: int, cod
     owner_username = (owner_user or {}).get("username")
 
     rated_value = None
-    commented = False
-    if viewer and viewer.get("id"):
-        rated_value = await get_user_rating_value(int(photo["id"]), int(viewer["id"]))
-        commented = await has_user_commented(int(photo["id"]), int(viewer["id"]))
+    if viewer_full and viewer_full.get("id"):
+        rated_value = await get_user_rating_value(int(photo["id"]), int(viewer_full["id"]))
 
     title = (photo.get("title") or "Фотография").strip()
-    caption = (
-        "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
-        f"<b>\"{title}\"</b>\n"
-        + (f"Автор: @{owner_username}\n" if owner_username else "")
-        + "\nПоставь оценку от 1 до 10 👇"
-    )
+    pub = _fmt_pub_date(photo)
+    pub_inline = f"  <i>{pub}</i>" if pub else ""
 
-    kb = _rate_kb(owner_tg_id, code, rated_value, commented)
-
-    if isinstance(target, Message):
-        await target.bot.send_photo(
-            chat_id=target.chat.id,
-            photo=photo["file_id"],
-            caption=caption,
-            reply_markup=kb,
-            disable_notification=True,
+    if rated_value is None:
+        text = (
+            "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
+            f"<b>\"{title}\"</b>{pub_inline}\n"
+            + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+            + "\nПоставь оценку от 1 до 10 👇\n"
+            + "<i>Регистрация не нужна, чтобы оценить.</i>"
         )
     else:
-        try:
-            if target.message.photo:
-                await target.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
-            else:
-                await target.message.edit_text(caption, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            await target.message.bot.send_photo(
-                chat_id=target.message.chat.id,
+        text = (
+            "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
+            f"<b>\"{title}\"</b>{pub_inline}\n"
+            + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+            + f"\n<b>Твоя оценка:</b> {rated_value}"
+        )
+
+    kb = _rate_kb(owner_tg_id=owner_tg_id, code=code, rated_value=rated_value, is_registered=is_reg)
+
+    if rated_value is None:
+        # BEFORE rating: show photo + rating keyboard
+        if isinstance(target, Message):
+            await target.bot.send_photo(
+                chat_id=target.chat.id,
                 photo=photo["file_id"],
-                caption=caption,
+                caption=text,
                 reply_markup=kb,
                 disable_notification=True,
+                parse_mode="HTML",
             )
+        else:
+            try:
+                if target.message.photo:
+                    await target.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+                else:
+                    await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                await target.message.bot.send_photo(
+                    chat_id=target.message.chat.id,
+                    photo=photo["file_id"],
+                    caption=text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                    parse_mode="HTML",
+                )
+        return
+
+    # AFTER rating: remove the photo message (if any) and show compact TEXT result
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.delete()
+        except Exception:
+            pass
+        await target.message.bot.send_message(
+            chat_id=target.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+            parse_mode="HTML",
+        )
+    else:
+        await target.bot.send_message(
+            chat_id=target.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+            parse_mode="HTML",
+        )
 
 @router.callback_query(F.data.startswith("myphoto:share:"))
-async def myphoto_share(callback: CallbackQuery, state: FSMContext):
+async def myphoto_share(callback: CallbackQuery):
     photo_id = int(callback.data.split(":")[2])
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted"):
@@ -169,14 +222,14 @@ async def myphoto_share(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("myphoto:share_refresh:"))
-async def myphoto_share_refresh(callback: CallbackQuery, state: FSMContext):
+async def myphoto_share_refresh(callback: CallbackQuery):
     photo_id = int(callback.data.split(":")[2])
     await refresh_share_link_code(int(callback.from_user.id))
     callback.data = f"myphoto:share:{photo_id}"
-    await myphoto_share(callback, state)
+    await myphoto_share(callback)
 
 @router.message(CommandStart())
-async def start_rate_link(message: Message, command: CommandObject, state: FSMContext):
+async def start_rate_link(message: Message, command: CommandObject):
     args = (command.args or "").strip()
     if not args.startswith("rate_"):
         raise SkipHandler
@@ -189,12 +242,8 @@ async def start_rate_link(message: Message, command: CommandObject, state: FSMCo
 
     await _render_link_ui(message, int(owner_tg_id), code)
 
-@router.callback_query(F.data == "lr:noop")
-async def lr_noop(callback: CallbackQuery):
-    await callback.answer()
-
 @router.callback_query(F.data.startswith("lr:set:"))
-async def lr_set(callback: CallbackQuery, state: FSMContext):
+async def lr_set(callback: CallbackQuery):
     _, _, owner_tg_id_s, value_s, code = (callback.data or "").split(":", 4)
     owner_tg_id = int(owner_tg_id_s)
     value = int(value_s)
@@ -222,74 +271,10 @@ async def lr_set(callback: CallbackQuery, state: FSMContext):
     await callback.answer("✅ Оценка учтена!" if ok else "Ты уже оценивал(а) этот кадр.", show_alert=not ok)
     await _render_link_ui(callback, owner_tg_id, code)
 
-@router.callback_query(F.data.startswith("lr:comment:"))
-async def lr_comment(callback: CallbackQuery, state: FSMContext):
-    _, _, owner_tg_id_s, code = (callback.data or "").split(":", 3)
-    owner_tg_id = int(owner_tg_id_s)
-
-    viewer = await ensure_user_minimal_row(int(callback.from_user.id), username=callback.from_user.username)
-    if not _is_registered(viewer):
-        await callback.answer("Чтобы комментировать, нужно зарегистрироваться (заполнить профиль) — /start.", show_alert=True)
-        return
-
-    photo = await get_active_photo_for_owner_tg_id(owner_tg_id)
-    if not photo:
-        await callback.answer("❌ У автора сейчас нет активной фотографии.", show_alert=True)
-        return
-
-    owner_user = await get_user_by_id(int(photo["user_id"]))
-    if owner_user and int(owner_user.get("tg_id") or 0) == int(callback.from_user.id):
-        await callback.answer("Нельзя комментировать свою фотографию.", show_alert=True)
-        return
-
-    if await has_user_commented(int(photo["id"]), int(viewer["id"])):
-        await callback.answer("Ты уже оставлял(а) комментарий.", show_alert=True)
-        return
-
-    await state.set_state(LinkCommentStates.waiting_text)
-    await state.update_data(lr_owner_tg_id=owner_tg_id, lr_code=code)
-
-    await callback.answer()
-    await callback.message.answer("💬 Напиши комментарий одним сообщением (без ссылок и @username).", disable_notification=True)
-
-@router.message(LinkCommentStates.waiting_text, F.text)
-async def lr_comment_finish(message: Message, state: FSMContext):
-    data = await state.get_data()
-    owner_tg_id = int(data.get("lr_owner_tg_id") or 0)
-    code = str(data.get("lr_code") or "")
-
-    text = (message.text or "").strip()
+@router.callback_query(F.data == "lr:done")
+async def lr_done(callback: CallbackQuery):
     try:
-        await message.delete()
+        await callback.message.delete()
     except Exception:
         pass
-
-    if not text:
-        return
-
-    if has_links_or_usernames(text) or has_promo_channel_invite(text):
-        await message.bot.send_message(message.chat.id, "❌ В комментарии нельзя ссылки/@username. Попробуй ещё раз.")
-        return
-
-    viewer = await get_user_by_tg_id(int(message.from_user.id))
-    if not _is_registered(viewer):
-        await state.clear()
-        await message.bot.send_message(message.chat.id, "❌ Чтобы комментировать, нужно зарегистрироваться — /start.")
-        return
-
-    photo = await get_active_photo_for_owner_tg_id(owner_tg_id)
-    if not photo:
-        await state.clear()
-        await message.bot.send_message(message.chat.id, "❌ У автора сейчас нет активной фотографии.")
-        return
-
-    if await has_user_commented(int(photo["id"]), int(viewer["id"])):
-        await state.clear()
-        await message.bot.send_message(message.chat.id, "Ты уже оставлял(а) комментарий.")
-        return
-
-    await create_comment(int(viewer["id"]), int(photo["id"]), text, is_public=True)
-    await state.clear()
-
-    await message.bot.send_message(message.chat.id, "✅ Комментарий отправлен!", disable_notification=True)
-    await _render_link_ui(message, owner_tg_id, code)
+    await callback.answer()
