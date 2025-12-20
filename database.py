@@ -167,6 +167,17 @@ async def get_link_ratings_count_for_photo(photo_id: int) -> int:
     return int(v or 0)
 
 
+async def get_ratings_count_for_photo(photo_id: int) -> int:
+    """Total ratings count for the photo (all sources)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT COUNT(*) FROM ratings WHERE photo_id=$1",
+            int(photo_id),
+        )
+    return int(v or 0)
+
+
 async def get_photo_skip_count_for_photo(photo_id: int) -> int:
     """Placeholder for per-photo skip statistics.
 

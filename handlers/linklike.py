@@ -21,6 +21,8 @@ from database import (
     ensure_user_minimal_row,
     add_rating_by_tg_id,
     get_user_rating_value,
+    get_link_ratings_count_for_photo, 
+    get_ratings_count_for_photo,
 )
 
 router = Router()
@@ -48,6 +50,18 @@ def _share_kb(photo_id: int, link: str) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="♻️ Обновить ссылку", callback_data=f"myphoto:share_refresh:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
     return kb.as_markup()
+
+async def _get_share_counts(photo_id: int) -> tuple[int | None, int | None]:
+    """Return (link_ratings_count, total_ratings_count). Uses best-effort DB helpers."""
+    try:
+        # Prefer dedicated helpers if they exist
+
+        link_cnt = await get_link_ratings_count_for_photo(int(photo_id))
+        total_cnt = await get_ratings_count_for_photo(int(photo_id))
+        return int(link_cnt or 0), int(total_cnt or 0)
+    except Exception:
+        # Fallback: do not break share UI if counts are unavailable
+        return None, None
 
 def _rate_kb(
     *,
@@ -200,13 +214,21 @@ async def myphoto_share(callback: CallbackQuery):
 
     text = (
         "🔗 <b>Поделиться фотографией</b>\n\n"
-        "Хочешь больше оценок на фотографии?\n"
         "Не хватает оценок до проходного?\n\n"
-        "Ты можешь поделиться ссылкой и отправить друзьям.\n"
-        "Но учти: там тоже можно поставить <b>1</b> балл 😅\n\n"
-        "<b>Вот твоя ссылка — скопируй:</b>\n"
+        "Ты можешь поделиться ссылкой:\n"
+        "Например: в профиле, в тгк или с друзьями.\n"
+        "Но учти: там тоже можно поставить <b>плохую</b> оценку!\n\n"
+        "✨ <b>Твоя ссылка — скопируй или жми Поделиться</b>\n"
         f"<code>{link}</code>"
     )
+
+    link_cnt, total_cnt = await _get_share_counts(photo_id)
+    if link_cnt is not None and total_cnt is not None:
+        text += (
+            "\n\n"
+            f"🔗⭐️ Кол-во оценок по ссылке: <b>{link_cnt}</b>\n"
+            f"⭐️ Всего оценок: <b>{total_cnt}</b>"
+        )
 
     kb = _share_kb(photo_id, link)
 
@@ -224,9 +246,42 @@ async def myphoto_share(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("myphoto:share_refresh:"))
 async def myphoto_share_refresh(callback: CallbackQuery):
     photo_id = int(callback.data.split(":")[2])
-    await refresh_share_link_code(int(callback.from_user.id))
-    callback.data = f"myphoto:share:{photo_id}"
-    await myphoto_share(callback)
+
+    # Issue a new active code and render it immediately in the same message
+    code = await refresh_share_link_code(int(callback.from_user.id))
+    bot_username = await _get_bot_username(callback)
+    link = f"https://t.me/{bot_username}?start=rate_{code}"
+
+    text = (
+        "🔗 <b>Поделиться фотографией</b>\n\n"
+        "Не хватает оценок до проходного?\n\n"
+        "Ты можешь поделиться ссылкой:\n"
+        "Например: в профиле, в тгк или с друзьями.\n"
+        "Но учти: там тоже можно поставить <b>плохую</b> оценку!\n\n"
+        "✨ <b>Твоя ссылка — скопируй или жми Поделиться</b>\n"
+        f"<code>{link}</code>"
+    )
+
+    link_cnt, total_cnt = await _get_share_counts(photo_id)
+    if link_cnt is not None and total_cnt is not None:
+        text += (
+            "\n\n"
+            f"🔗⭐️ Кол-во оценок по ссылке: <b>{link_cnt}</b>\n"
+            f"⭐️ Всего оценок: <b>{total_cnt}</b>"
+        )
+
+    kb = _share_kb(photo_id, link)
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+    await callback.answer("♻️ Ссылка обновлена!")
 
 @router.message(CommandStart())
 async def start_rate_link(message: Message, command: CommandObject):
