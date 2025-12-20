@@ -201,6 +201,7 @@ def _parse_premium_until(raw: str) -> str | None:
 
 
 
+
 async def _edit_premium_prompt_or_answer(
     message: Message,
     state: FSMContext,
@@ -235,6 +236,25 @@ async def _edit_premium_prompt_or_answer(
         pass
 
 
+# === Premium "soft clear" helper ===
+async def _premium_soft_clear(state: FSMContext):
+    """Clear FSM state/data but keep IDs of the premium service message to avoid message spam."""
+    data = await state.get_data()
+    chat_id = data.get("premium_prompt_chat_id")
+    msg_id = data.get("premium_prompt_msg_id")
+
+    await state.clear()
+
+    if chat_id and msg_id:
+        await state.update_data(premium_prompt_chat_id=chat_id, premium_prompt_msg_id=msg_id)
+
+
+
+def build_premium_notice_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Просмотрено", callback_data="user:premium:seen")
+    kb.adjust(1)
+    return kb.as_markup()
 # -------------------- Premium notification helper --------------------
 
 async def _notify_user_premium_change(
@@ -273,7 +293,13 @@ async def _notify_user_premium_change(
         )
 
     try:
-        await bot.send_message(chat_id=tg_id, text=text, parse_mode="HTML")
+        await bot.send_message(
+            chat_id=tg_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=build_premium_notice_kb(),
+            disable_notification=True,
+        )
     except Exception:
         # User may block the bot or disallow messages; ignore silently.
         return
@@ -843,8 +869,7 @@ async def admin_premium_menu(callback: CallbackQuery, state: FSMContext):
     admin = await _ensure_admin(callback)
     if not admin:
         return
-
-    await state.clear()
+    await _premium_soft_clear(state)
 
     text = (
         "<b>Премиум</b>\n\n"
@@ -904,8 +929,7 @@ async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
     admin = await _ensure_admin(callback)
     if not admin:
         return
-
-    await state.clear()
+    await _premium_soft_clear(state)
     await state.set_state(PremiumAdminStates.waiting_identifier_for_grant)
 
     text = (
@@ -1009,7 +1033,7 @@ async def admin_premium_grant_forever(callback: CallbackQuery, state: FSMContext
     kb.button(text="⬅️ Назад", callback_data="admin:premium")
     kb.adjust(1)
 
-    await state.clear()
+    await _premium_soft_clear(state)
     await _edit_premium_prompt_or_answer(callback.message, state, f"✅ Премиум выдан: <b>{label}</b>\nСрок: <b>бессрочно</b>", kb.as_markup())
     await callback.answer()
 
@@ -1029,7 +1053,7 @@ async def admin_premium_grant_set_until(message: Message, state: FSMContext):
     data = await state.get_data()
     u = data.get("pending_premium_user")
     if not u or not u.get("tg_id"):
-        await state.clear()
+        await _premium_soft_clear(state)
         await _edit_premium_prompt_or_answer(message, state, "Сессия сбилась. Открой «Премиум» заново.", build_premium_menu_kb())
         return
 
@@ -1088,7 +1112,7 @@ async def admin_premium_grant_set_until(message: Message, state: FSMContext):
     kb.button(text="⬅️ Назад", callback_data="admin:premium")
     kb.adjust(1)
 
-    await state.clear()
+    await _premium_soft_clear(state)
     await _edit_premium_prompt_or_answer(message, state, f"✅ Премиум выдан: <b>{label}</b>\nСрок: <b>{until_text}</b>", kb.as_markup())
 
 
@@ -1097,8 +1121,7 @@ async def admin_premium_revoke(callback: CallbackQuery, state: FSMContext):
     admin = await _ensure_admin(callback)
     if not admin:
         return
-
-    await state.clear()
+    await _premium_soft_clear(state)
     await state.set_state(PremiumAdminStates.waiting_identifier_for_revoke)
 
     text = (
@@ -1170,5 +1193,23 @@ async def admin_premium_revoke_do(message: Message, state: FSMContext):
     kb.button(text="📋 Список", callback_data="admin:premium:list")
     kb.adjust(1)
 
-    await state.clear()
+    await _premium_soft_clear(state)
     await _edit_premium_prompt_or_answer(message, state, f"✅ Премиум снят: <b>{label}</b>", kb.as_markup())
+
+
+# ===============================================================
+# ============== ПОЛЬЗОВАТЕЛИ: ПРЕМИУМ УВЕДЫ ====================
+# ===============================================================
+
+@router.callback_query(F.data == "user:premium:seen")
+async def user_premium_notice_seen(callback: CallbackQuery):
+    try:
+        if callback.message:
+            await callback.message.delete()
+    except Exception:
+        pass
+
+    try:
+        await callback.answer("Ок")
+    except Exception:
+        pass
