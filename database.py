@@ -2356,6 +2356,9 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
 
     Only moderation_status='active' photos are considered.
 
+    NOTE: Some callers may pass a Telegram id (tg_id) instead of internal users.id.
+    We resolve it safely here.
+
     Ranking:
       1) bayes_score desc
       2) ratings_count desc
@@ -2367,6 +2370,19 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
     async with p.acquire() as conn:
         global_mean, _global_cnt = await _get_global_rating_mean(conn)
 
+        # Resolve to internal users.id (support accidental tg_id input)
+        resolved_user_id = await conn.fetchval(
+            "SELECT id FROM users WHERE id=$1 AND is_deleted=0",
+            int(user_id),
+        )
+        if resolved_user_id is None:
+            resolved_user_id = await conn.fetchval(
+                "SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0",
+                int(user_id),
+            )
+        if resolved_user_id is None:
+            return None
+
         row = await conn.fetchrow(
             """
             WITH stats AS (
@@ -2375,7 +2391,6 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     ph.user_id,
                     ph.file_id,
                     ph.title,
-                    ph.day_key,
                     ph.is_deleted,
                     ph.created_at,
                     COUNT(r.id)::int AS ratings_count,
@@ -2403,7 +2418,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 id ASC
             LIMIT 1
             """,
-            int(user_id),
+            int(resolved_user_id),
             int(prior),
             float(global_mean),
         )

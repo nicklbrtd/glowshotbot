@@ -153,14 +153,10 @@ async def build_profile_view(user: dict):
             if cnt <= 0:
                 avg_rating_text = "—"
             else:
-                # Prefer smart score; also show raw average as context
+                # Show only the smart (Bayesian) average
                 if bayes_val is not None:
                     bayes_str = f"{bayes_val:.2f}".rstrip("0").rstrip(".")
-                    if avg_val is not None:
-                        avg_str = f"{avg_val:.2f}".rstrip("0").rstrip(".")
-                        avg_rating_text = f"{bayes_str}★ (умная), {cnt} оценок\nсыр.: {avg_str}★"
-                    else:
-                        avg_rating_text = f"{bayes_str}★ (умная), {cnt} оценок"
+                    avg_rating_text = f"{bayes_str}★, {cnt} оценок"
                 elif avg_val is not None:
                     avg_str = f"{avg_val:.2f}".rstrip("0").rstrip(".")
                     avg_rating_text = f"{avg_str}★, {cnt} оценок"
