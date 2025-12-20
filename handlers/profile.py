@@ -24,7 +24,6 @@ from database import (
     is_user_premium_active,
     get_awards_for_user,
     get_user_by_id,
-    get_my_results_for_user,
     update_user_city,
     update_user_country,
     set_user_city_visibility,
@@ -45,6 +44,7 @@ class ProfileEditStates(StatesGroup):
     waiting_new_city = State()
 
 
+
 def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     """
     Простое склонение русских слов по числу:
@@ -59,6 +59,31 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     if 2 <= v <= 4:
         return few
     return many
+
+
+# --- Country flag helper ---
+def _country_flag(country: str) -> str:
+    c = (country or "").strip()
+    if not c:
+        return "📍"
+
+    # Most common (can be extended later)
+    flags = {
+        "Россия": "🇷🇺",
+        "США": "🇺🇸",
+        "United States": "🇺🇸",
+        "United States Of America": "🇺🇸",
+        "USA": "🇺🇸",
+        "US": "🇺🇸",
+        "Испания": "🇪🇸",
+        "France": "🇫🇷",
+        "Франция": "🇫🇷",
+        "Germany": "🇩🇪",
+        "Германия": "🇩🇪",
+        "Italy": "🇮🇹",
+        "Италия": "🇮🇹",
+    }
+    return flags.get(c, "📍")
 
 
 @router.callback_query(F.data.startswith("myresults:"))
@@ -248,7 +273,8 @@ async def build_profile_view(user: dict):
         loc_parts.append(city)
 
     if loc_parts:
-        text_lines.append(f"📍Локация: {', '.join(loc_parts)}")
+        flag = _country_flag(country) if (country and show_country) else "📍"
+        text_lines.append(f"{flag} Локация: {', '.join(loc_parts)}")
 
     # Ссылка (для премиум-пользователей, если указана)
     tg_link = user.get("tg_channel_link")

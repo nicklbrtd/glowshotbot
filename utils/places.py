@@ -19,12 +19,36 @@ _RU_CITY_TO_COUNTRY = {
     "oryol": "Россия",
 }
 
+
 _RU_COUNTRY_FIXES = {
     "росия": "Россия",
     "россия": "Россия",
     "russia": "Россия",
     "rusia": "Россия",
 }
+
+# Canonical short names for some countries (to keep UI compact)
+_COUNTRY_CANON_MAP = {
+    # USA
+    "соединенные штаты америки": "США",
+    "соединённые штаты америки": "США",
+    "соединенные штаты": "США",
+    "соединённые штаты": "США",
+    "united states of america": "США",
+    "united states": "США",
+    "u.s.a": "США",
+    "usa": "США",
+    "u.s.": "США",
+    "us": "США",
+}
+
+def _normalize_country_name(name: str) -> str:
+    """Normalize country names (compact canonical names where desired)."""
+    nm = _norm_spaces(name or "")
+    if not nm:
+        return ""
+    key = _cmp_key(nm)
+    return _COUNTRY_CANON_MAP.get(key, nm)
 
 _CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
 
@@ -211,6 +235,9 @@ async def validate_place(kind: str, raw: str) -> tuple[bool, str, bool]:
     if kind == "country" and _cmp_key(canonical) in ("россия", "росия"):
         canonical = "Россия"
 
+    if kind == "country":
+        canonical = _normalize_country_name(canonical)
+
     ok = best_score >= 0.72
     _CACHE[ck] = (now, ok, canonical)
     return ok, canonical, True
@@ -296,7 +323,7 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
             break
 
     canonical_city = _title_case(best_city or query)
-    canonical_country = _title_case(best_country or "")
+    canonical_country = _normalize_country_name(_title_case(best_country or ""))
 
     # Ё / common RU fixes
     if _cmp_key(canonical_city) == "орел":
@@ -305,6 +332,8 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
 
     if _cmp_key(canonical_country) in ("россия", "росия"):
         canonical_country = "Россия"
+
+    canonical_country = _normalize_country_name(canonical_country)
 
     ok = best_score >= 0.72
     _CACHE_CC[ck] = (now, ok, canonical_city, canonical_country, True)
