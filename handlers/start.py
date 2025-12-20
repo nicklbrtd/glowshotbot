@@ -5,7 +5,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest, SkipHandler
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import InlineKeyboardMarkup
 from utils.time import get_moscow_now
 
