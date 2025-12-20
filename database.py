@@ -698,6 +698,31 @@ async def _ensure_user_row(tg_id: int, username: str | None = None) -> dict | No
 
 # -------------------- users --------------------
 
+async def upsert_user_profile(
+    *,
+    tg_id: int,
+    username: str | None,
+    name: str | None,
+    gender: str | None,
+    age: int | None,
+    bio: str | None,
+) -> None:
+    """Create or update a user profile.
+
+    Needed because some flows create a minimal user row (e.g. rating-by-link), and registration
+    should UPDATE that row instead of failing on unique constraints.
+
+    This is a thin wrapper around `create_user`, which already performs an UPSERT.
+    """
+    await create_user(
+        tg_id=int(tg_id),
+        username=username,
+        name=name,
+        gender=gender,
+        age=age,
+        bio=bio,
+    )
+
 async def create_user(tg_id: int, username: str | None, name: str | None, gender: str | None,
                       age: int | None, bio: str | None) -> dict:
     p = _assert_pool()
