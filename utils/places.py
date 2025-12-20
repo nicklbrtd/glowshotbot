@@ -147,6 +147,27 @@ def _passes_kind_filter(kind: str, r: dict) -> bool:
         return at in _COUNTRY_ADDRESSTYPES
     return True
 
+def _city_kind_rank(r: dict) -> int:
+    """Prefer real cities over villages/hamlets when names are ambiguous."""
+    at = (r.get("addresstype") or "").lower()
+    # Highest priority first
+    if at == "city":
+        return 6
+    if at in ("town", "borough"):
+        return 5
+    if at in ("municipality",):
+        return 4
+    if at in ("county", "district"):
+        return 3
+    if at in ("suburb", "locality"):
+        return 2
+    if at in ("village",):
+        return 1
+    if at in ("hamlet",):
+        return 0
+    # Unknown -> neutral
+    return 2
+
 def _norm_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
@@ -388,7 +409,9 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
 
     best_city = None
     best_country = None
-    best_score = 0.0
+    best_sim = 0.0
+    best_rank = -1
+    best_importance = -1.0
 
     for pass_no in (1, 2):
         for r in results:
@@ -405,9 +428,18 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
             if not cand_city:
                 continue
 
-            score = difflib.SequenceMatcher(a=_cmp_key(city_hint), b=_cmp_key(cand_city)).ratio()
-            if score > best_score:
-                best_score = score
+            sim = difflib.SequenceMatcher(a=_cmp_key(city_hint), b=_cmp_key(cand_city)).ratio()
+            rank = _city_kind_rank(r)
+            try:
+                imp = float(r.get("importance") or 0.0)
+            except Exception:
+                imp = 0.0
+
+            # Lexicographic preference: higher name similarity, then "more city-like", then more important
+            if (sim, rank, imp) > (best_sim, best_rank, best_importance):
+                best_sim = sim
+                best_rank = rank
+                best_importance = imp
                 best_city = cand_city
                 best_country = cand_country
 
@@ -439,7 +471,7 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
         else:
             canonical_country = ""
 
-    ok = best_score >= 0.72
+    ok = best_sim >= 0.72
 
     # Final sanity: if result still looks like a country (and user didn't provide a country hint), reject.
     # Example: user typed "Россия" as city.
