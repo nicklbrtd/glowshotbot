@@ -3,7 +3,7 @@ import random
 import html
 from aiogram import Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, LinkPreviewOptions
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -15,7 +15,9 @@ from keyboards.common import build_main_menu
 
 router = Router()
 
-REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@glowshorchanel")
 
 # Рандом-строки для рекламного блока (вторая строка)
 AD_LINES: list[str] = [
@@ -24,10 +26,6 @@ AD_LINES: list[str] = [
     "Публикуй сильный кадр — и проси друзей оценить через ссылку 🔗⭐️",
 ]
 
-# Новости (ручной список, показываем первые 1–5)
-NEWS_ITEMS: list[str] = [
-    "20.12.25: Теперь тудым сюдым и тд",
-]
 
 
 def _get_flag(user, key: str) -> bool:
@@ -226,11 +224,6 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
     if AD_LINES:
         lines.append(f"• {random.choice(AD_LINES)}")
 
-    if NEWS_ITEMS:
-        lines.append("")
-        lines.append("👨‍💻 <b>Новости:</b>")
-        for item in NEWS_ITEMS[:5]:
-            lines.append(f"• {html.escape(str(item), quote=False)}")
 
     lines.append("")
     lines.append("Публикуй · Оценивай · Побеждай")
@@ -296,6 +289,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     chat_id=message.chat.id,
                     message_id=menu_msg_id,
                     reply_markup=reply_kb,
+                    link_preview_options=NO_PREVIEW,
                 )
                 edited = True
             except Exception:
@@ -307,6 +301,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 menu_text,
                 reply_markup=reply_kb,
                 disable_notification=True,
+                link_preview_options=NO_PREVIEW,
             )
             data["menu_msg_id"] = sent.message_id
             await state.set_data(data)
@@ -375,6 +370,7 @@ async def cmd_start(message: Message, state: FSMContext):
                         is_moderator=is_moderator,
                         is_premium=is_premium,
                     ),
+                    link_preview_options=NO_PREVIEW,
                 )
             except TelegramBadRequest:
                 # Если редактирование не удалось (сообщение удалено/устарело) — отправляем новое
@@ -386,6 +382,7 @@ async def cmd_start(message: Message, state: FSMContext):
                         is_premium=is_premium,
                     ),
                     disable_notification=True,
+                    link_preview_options=NO_PREVIEW,
                 )
         else:
             # Меню ещё ни разу не показывалось — отправляем новое сообщение
@@ -397,6 +394,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     is_premium=is_premium,
                 ),
                 disable_notification=True,
+                link_preview_options=NO_PREVIEW,
             )
 
         # Если мы отправили новое меню — запоминаем его message_id в состоянии
@@ -436,6 +434,7 @@ async def subscription_check(callback: CallbackQuery):
                     is_moderator=is_moderator,
                     is_premium=is_premium,
                 ),
+                link_preview_options=NO_PREVIEW,
             )
         except Exception:
             try:
@@ -448,6 +447,7 @@ async def subscription_check(callback: CallbackQuery):
                         is_premium=is_premium,
                     ),
                     disable_notification=True,
+                    link_preview_options=NO_PREVIEW,
                 )
             except Exception:
                 await callback.message.answer(
@@ -458,6 +458,7 @@ async def subscription_check(callback: CallbackQuery):
                         is_premium=is_premium,
                     ),
                     disable_notification=True,
+                    link_preview_options=NO_PREVIEW,
                 )
         await callback.answer("Спасибо за подписку! 🎉", show_alert=False)
     else:
@@ -495,6 +496,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 is_moderator=is_moderator,
                 is_premium=is_premium,
             ),
+            link_preview_options=NO_PREVIEW,
         )
         menu_msg_id = callback.message.message_id
     except Exception:
@@ -509,6 +511,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                     is_premium=is_premium,
                 ),
                 disable_notification=True,
+                link_preview_options=NO_PREVIEW,
             )
         except Exception:
             sent = await callback.message.answer(
@@ -519,6 +522,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                     is_premium=is_premium,
                 ),
                 disable_notification=True,
+                link_preview_options=NO_PREVIEW,
             )
         menu_msg_id = sent.message_id
 
