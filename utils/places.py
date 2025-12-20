@@ -321,6 +321,11 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
     if re.search(r"[<>@#$/\\{}\[\]|~`^*=+]", raw):
         return False, "", "", False
 
+    # If user typed a country name into the city field (e.g. "Россия"), reject it.
+    # Otherwise Nominatim may return a country and we end up with "Россия, Россия".
+    if "," not in raw and len(raw.split()) == 1 and _looks_like_country(raw):
+        return False, _title_case(raw), _normalize_country_name(_title_case(raw)), False
+
     # Parse "city, country" / "country, city" / "country city" inputs
     city_hint = raw
     country_hint = ""
@@ -433,7 +438,13 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
             canonical_city = _title_case(city_hint)
         else:
             canonical_country = ""
-            
+
     ok = best_score >= 0.72
+
+    # Final sanity: if result still looks like a country (and user didn't provide a country hint), reject.
+    # Example: user typed "Россия" as city.
+    if not country_hint and _looks_like_country(canonical_city):
+        ok = False
+
     _CACHE_CC[ck] = (now, ok, canonical_city, canonical_country, True)
     return ok, canonical_city, canonical_country, True
