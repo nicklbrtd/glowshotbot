@@ -50,9 +50,64 @@ def _normalize_country_name(name: str) -> str:
     key = _cmp_key(nm)
     return _COUNTRY_CANON_MAP.get(key, nm)
 
+# A small list for parsing inputs like "Россия Орёл" or "Madrid, Spain".
+# (Not a full world database – just common countries for UX.)
+_COMMON_COUNTRIES = {
+    "россия",
+    "сша",
+    "украина",
+    "казахстан",
+    "беларусь",
+    "польша",
+    "германия",
+    "франция",
+    "италия",
+    "испания",
+    "великобритания",
+    "англия",
+    "uk",
+    "united kingdom",
+    "китай",
+    "china",
+    "япония",
+    "japan",
+    "южная корея",
+    "корея",
+    "south korea",
+    "india",
+    "индия",
+    "турция",
+    "turkey",
+    "оаэ",
+    "uae",
+    "united arab emirates",
+}
+
+
+def _looks_like_country(text: str) -> bool:
+    t = _norm_spaces(text or "")
+    if not t:
+        return False
+    key = _cmp_key(t)
+
+    # Direct hits
+    if key in _RU_COUNTRY_FIXES:
+        return True
+    if key in _COUNTRY_CANON_MAP:
+        return True
+    if key in _COMMON_COUNTRIES:
+        return True
+
+    # Canonicalization check (e.g. "Соединенные Штаты" -> "США")
+    canon = _normalize_country_name(_title_case(t))
+    if _cmp_key(canon) in ("россия", "сша"):
+        return True
+
+    return False
+
 _CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
 
-_CACHE_CC: dict[tuple[str], tuple[float, bool, str, str, bool]] = {}
+_CACHE_CC: dict[tuple[str, str], tuple[float, bool, str, str, bool]] = {}
 _TTL = 60 * 60 * 24 * 7  # 7 дней
 
 # чтобы не долбить Nominatim параллельно
@@ -266,33 +321,65 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
     if re.search(r"[<>@#$/\\{}\[\]|~`^*=+]", raw):
         return False, "", "", False
 
-    cmp = _cmp_key(raw)
+    # Parse "city, country" / "country, city" / "country city" inputs
+    city_hint = raw
+    country_hint = ""
+
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(parts) >= 2:
+            # Decide which side is country
+            if _looks_like_country(parts[-1]):
+                city_hint = parts[0]
+                country_hint = parts[-1]
+            elif _looks_like_country(parts[0]):
+                country_hint = parts[0]
+                city_hint = parts[-1]
+            else:
+                city_hint = parts[0]
+                country_hint = parts[-1]
+    else:
+        tokens = raw.split()
+        if len(tokens) >= 2 and _looks_like_country(tokens[0]):
+            country_hint = tokens[0]
+            city_hint = " ".join(tokens[1:])
+
+    cmp_city = _cmp_key(city_hint)
+    cmp_country_hint = _cmp_key(country_hint) if country_hint else ""
 
     # Quick fixes for popular typos
-    if cmp in _RU_CITY_FIXES:
-        city = _RU_CITY_FIXES[cmp]
-        country = _RU_CITY_TO_COUNTRY.get(cmp, "")
+    if cmp_city in _RU_CITY_FIXES:
+        city = _RU_CITY_FIXES[cmp_city]
+        country = _RU_CITY_TO_COUNTRY.get(cmp_city, "")
+        if not country and country_hint:
+            country = _normalize_country_name(_title_case(country_hint))
         return True, city, country, False
 
     now = time.time()
-    ck = (cmp,)
+    ck = (cmp_city, cmp_country_hint)
     if ck in _CACHE_CC:
         ts, ok, city, country, used_geo = _CACHE_CC[ck]
         if (now - ts) < _TTL:
             return ok, city, country, used_geo
 
-    query = _title_case(raw)
+    # Build a geocoder query that includes country hint if user provided it
+    if country_hint:
+        query = f"{_title_case(city_hint)}, {_title_case(country_hint)}"
+    else:
+        query = _title_case(city_hint)
 
     try:
         results = await _nominatim_search(query, limit=5)
     except Exception:
         # API down -> don't block the user, but don't overwrite country
-        _CACHE_CC[ck] = (now, True, query, "", False)
-        return True, query, "", False
+        city_fallback = _title_case(city_hint)
+        _CACHE_CC[ck] = (now, True, city_fallback, "", False)
+        return True, city_fallback, "", False
 
     if not results:
-        _CACHE_CC[ck] = (now, False, query, "", True)
-        return False, query, "", True
+        city_fallback = _title_case(city_hint)
+        _CACHE_CC[ck] = (now, False, city_fallback, "", True)
+        return False, city_fallback, "", True
 
     best_city = None
     best_country = None
@@ -313,7 +400,7 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
             if not cand_city:
                 continue
 
-            score = difflib.SequenceMatcher(a=_cmp_key(raw), b=_cmp_key(cand_city)).ratio()
+            score = difflib.SequenceMatcher(a=_cmp_key(city_hint), b=_cmp_key(cand_city)).ratio()
             if score > best_score:
                 best_score = score
                 best_city = cand_city
@@ -322,8 +409,12 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
         if best_city is not None:
             break
 
-    canonical_city = _title_case(best_city or query)
+    canonical_city = _title_case(best_city or city_hint)
     canonical_country = _normalize_country_name(_title_case(best_country or ""))
+
+    # If user provided country hint and geocoder couldn't infer it, use the hint
+    if country_hint and not canonical_country:
+        canonical_country = _normalize_country_name(_title_case(country_hint))
 
     # Ё / common RU fixes
     if _cmp_key(canonical_city) == "орел":
@@ -335,6 +426,14 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
 
     canonical_country = _normalize_country_name(canonical_country)
 
+    # Guard: avoid "Страна, Страна" in profile
+    if canonical_country and _cmp_key(canonical_city) == _cmp_key(canonical_country):
+        # If we have a meaningful city hint, prefer it
+        if _cmp_key(city_hint) and _cmp_key(city_hint) != _cmp_key(canonical_country):
+            canonical_city = _title_case(city_hint)
+        else:
+            canonical_country = ""
+            
     ok = best_score >= 0.72
     _CACHE_CC[ck] = (now, ok, canonical_city, canonical_country, True)
     return ok, canonical_city, canonical_country, True

@@ -32,6 +32,7 @@ from database import (
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_place, validate_city_and_country
+from utils.flags import country_to_flag
 
 router = Router()
 
@@ -63,29 +64,6 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     return many
 
 
-# --- Country flag helper ---
-def _country_flag(country: str) -> str:
-    c = (country or "").strip()
-    if not c:
-        return "📍"
-
-    # Most common (can be extended later)
-    flags = {
-        "Россия": "🇷🇺",
-        "США": "🇺🇸",
-        "United States": "🇺🇸",
-        "United States Of America": "🇺🇸",
-        "USA": "🇺🇸",
-        "US": "🇺🇸",
-        "Испания": "🇪🇸",
-        "France": "🇫🇷",
-        "Франция": "🇫🇷",
-        "Germany": "🇩🇪",
-        "Германия": "🇩🇪",
-        "Italy": "🇮🇹",
-        "Италия": "🇮🇹",
-    }
-    return flags.get(c, "📍")
 
 
 @router.callback_query(F.data.startswith("myresults:"))
@@ -275,7 +253,7 @@ async def build_profile_view(user: dict):
         loc_parts.append(city)
 
     if loc_parts:
-        flag = _country_flag(country) if (country and show_country) else "📍"
+        flag = country_to_flag(country) if (country and show_country) else "📍"
         text_lines.append(f"{flag} Локация: {', '.join(loc_parts)}")
 
     # Ссылка (для премиум-пользователей, если указана)
