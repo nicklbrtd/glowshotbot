@@ -7,7 +7,6 @@ from __future__ import annotations
 # • модераторы
 # • помощники
 # • поддержка
-# • премиум
 #
 # Файл самодостаточный: не зависит от admin.py.
 
@@ -20,7 +19,6 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from utils.time import get_moscow_now
 from config import MASTER_ADMIN_ID
 
 from database import (
@@ -30,12 +28,9 @@ from database import (
     get_moderators,
     get_helpers,
     get_support_users,
-    get_premium_users,
     set_user_moderator_by_tg_id,
     set_user_helper_by_tg_id,
     set_user_support_by_tg_id,
-    set_user_premium_role_by_tg_id,
-    set_user_premium_status,
 )
 
 from .common import (
@@ -207,32 +202,6 @@ def _fmt_user_line(u: dict) -> str:
     return f"• {label} — <code>{tg_id}</code>"
 
 
-def _parse_premium_until(raw: str) -> str | None:
-    """
-    Принимаем:
-    - '30' (дней)
-    - '31.12.2025' (дата)
-    - пусто -> None (бессрочно)
-    Возвращаем ISO-строку или None.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return None
-
-    if s.isdigit():
-        days = int(s)
-        if days <= 0:
-            return None
-        until = get_moscow_now() + timedelta(days=days)
-        return until.isoformat()
-
-    try:
-        dt = datetime.strptime(s, "%d.%m.%Y").replace(hour=23, minute=59, second=59)
-        return dt.isoformat()
-    except Exception:
-        return None
-
-
 # =============================================================
 # ==== КОНФИГ РОЛЕЙ ===========================================
 # =============================================================
@@ -343,48 +312,15 @@ async def admin_roles_router(callback: CallbackQuery, state: FSMContext):
 
     # ======================= LIST =======================
     if action == "list":
-        if role_code == "premium":
-            users = await get_premium_users()
-            if not users:
-                text = "Сейчас нет ни одного премиум-пользователя."
-            else:
-                now_date = get_moscow_now().date()
-                lines: list[str] = ["<b>Премиум-пользователи</b>", ""]
-                for u in users[:200]:
-                    username = u.get("username")
-                    name = u.get("name") or "Без имени"
-                    label = f"@{username}" if username else name
-
-                    premium_until = u.get("premium_until")
-                    if premium_until:
-                        try:
-                            until_dt = datetime.fromisoformat(premium_until)
-                            until_str = until_dt.strftime("%d.%m.%Y")
-                            days_left = (until_dt.date() - now_date).days
-                            if days_left < 0:
-                                duration = f"до {until_str} (истёк)"
-                            elif days_left == 0:
-                                duration = "до конца дня"
-                            else:
-                                duration = f"до {until_str}"
-                        except Exception:
-                            duration = str(premium_until)
-                    else:
-                        duration = "бессрочно"
-
-                    lines.append(f"• {label} — ({duration})")
-
-                text = "\n".join(lines)
+        tg_ids = await cfg["get_list"]()
+        users = await _users_from_tg_ids([int(x) for x in tg_ids])
+        if not users:
+            text = f"Сейчас нет ни одного {cfg['name_single']}."
         else:
-            tg_ids = await cfg["get_list"]()
-            users = await _users_from_tg_ids([int(x) for x in tg_ids])
-            if not users:
-                text = f"Сейчас нет ни одного {cfg['name_single']}."
-            else:
-                lines = [f"<b>{cfg['title']}</b>", ""]
-                for u in users:
-                    lines.append(_fmt_user_line(u))
-                text = "\n".join(lines)
+            lines = [f"<b>{cfg['title']}</b>", ""]
+            for u in users:
+                lines.append(_fmt_user_line(u))
+            text = "\n".join(lines)
 
         kb = InlineKeyboardBuilder()
         kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
@@ -468,27 +404,6 @@ async def roles_add_user(message: Message, state: FSMContext):
 
     tg_id = int(u.get("tg_id"))
 
-    # Премиум — спросим срок
-    if role_code == "premium":
-        await state.update_data(pending_user=u)
-        await state.set_state(RoleStates.waiting_premium_until)
-
-        text = (
-            "💎 <b>Премиум</b>\n\n"
-            "Введи срок премиума:\n"
-            "• число дней (например <code>30</code>)\n"
-            "или\n"
-            "• дату окончания в формате <code>31.12.2025</code>\n\n"
-            "Если отправишь пусто — сделаю бессрочно."
-        )
-
-        kb = InlineKeyboardBuilder()
-        kb.button(text="⬅️ Назад", callback_data="admin:roles:premium")
-        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-        kb.adjust(1)
-
-        await _edit_role_prompt_or_answer(message, state, text, kb.as_markup())
-        return
 
     # остальные роли
     try:
@@ -510,60 +425,6 @@ async def roles_add_user(message: Message, state: FSMContext):
         message,
         state,
         f"✅ Роль <b>{cfg['name_single']}</b> выдана пользователю:\n{_fmt_user_line(u)}",
-        kb.as_markup(),
-    )
-
-
-@router.message(RoleStates.waiting_premium_until, F.text)
-async def roles_premium_until(message: Message, state: FSMContext):
-    admin_user = await _ensure_admin(message)
-    if admin_user is None:
-        return
-
-    raw = (message.text or "").strip()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    data = await state.get_data()
-    u = data.get("pending_user")
-    if not u:
-        await state.clear()
-        await message.answer("Сессия премиума сбилась. Открой «Роли → Премиум» заново.")
-        return
-
-    tg_id = int(u.get("tg_id"))
-
-    premium_until = _parse_premium_until(raw)
-
-    try:
-        set_user_premium_role_by_tg_id(tg_id, True)
-        set_user_premium_status(tg_id, True, premium_until=premium_until)
-    except Exception:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="⬅️ Назад", callback_data="admin:roles:premium")
-        kb.adjust(1)
-        await _edit_role_prompt_or_answer(message, state, "Не удалось выдать премиум (ошибка БД).", kb.as_markup())
-        return
-
-    until_text = "бессрочно"
-    if premium_until:
-        try:
-            until_text = "до " + datetime.fromisoformat(premium_until).strftime("%d.%m.%Y")
-        except Exception:
-            until_text = str(premium_until)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📋 Список", callback_data="admin:roles:premium:list")
-    kb.button(text="⬅️ Назад", callback_data="admin:roles:premium")
-    kb.adjust(1)
-
-    await state.clear()
-    await _edit_role_prompt_or_answer(
-        message,
-        state,
-        f"✅ Премиум выдан пользователю:\n{_fmt_user_line(u)}\nСрок: <b>{until_text}</b>",
         kb.as_markup(),
     )
 
@@ -600,11 +461,7 @@ async def roles_remove_user(message: Message, state: FSMContext):
     tg_id = int(u.get("tg_id"))
 
     try:
-        if role_code == "premium":
-            set_user_premium_role_by_tg_id(tg_id, False)
-            set_user_premium_status(tg_id, False, premium_until=None)
-        else:
-            await cfg["set_func"](tg_id, False)
+        await cfg["set_func"](tg_id, False)
     except Exception:
         kb = InlineKeyboardBuilder()
         kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
@@ -628,7 +485,6 @@ async def roles_remove_user(message: Message, state: FSMContext):
 
 @router.message(RoleStates.waiting_user_for_add)
 @router.message(RoleStates.waiting_user_for_remove)
-@router.message(RoleStates.waiting_premium_until)
 async def roles_ignore_non_text(message: Message):
     try:
         await message.delete()
