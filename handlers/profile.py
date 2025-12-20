@@ -43,7 +43,6 @@ class ProfileEditStates(StatesGroup):
     waiting_new_bio = State()
     waiting_new_channel = State()
     waiting_new_city = State()
-    waiting_new_country = State()
 
 
 def _plural_ru(value: int, one: str, few: str, many: str) -> str:
@@ -398,14 +397,16 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="🪪 Имя", callback_data="profile:edit_name")
     kb.button(text="🎂 Возраст", callback_data="profile:edit_age")
+
     kb.button(text="📝 Описание", callback_data="profile:edit_bio")
     kb.button(text="⚧️ Пол", callback_data="profile:edit_gender")
+
     kb.button(text="📡 Ссылка", callback_data="profile:edit_channel")
     kb.button(text="🏙 Город", callback_data="profile:edit_city")
-    kb.button(text="🌍 Страна", callback_data="profile:edit_country")
+
     kb.button(text="🗑 Удалить аккаунт", callback_data="profile:delete")
     kb.button(text="⬅️ Назад", callback_data="menu:profile")
-    kb.adjust(2, 2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 1, 1)
 
     await callback.message.edit_text(
         "✏️ Что хочешь изменить в профиле?",
@@ -625,22 +626,15 @@ async def profile_set_city(message: Message, state: FSMContext):
 async def profile_edit_country(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
-        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
-        return
-
-    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
-
-    country = (user.get("country") or "").strip() or "—"
-    show_country = bool(user.get("show_country", 1))
-    vis = "показана" if show_country else "скрыта"
-
-    text = (
+            await callback.message.edit_text(
         "🌍 <b>Страна</b>\n\n"
-        f"Текущая: <b>{country}</b>\n"
-        f"Отображение в профиле: <b>{vis}</b>\n"
+        "Страна определяется автоматически по городу.\n"
+        "Чтобы изменить страну — просто измени город 🏙✨",
+        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        parse_mode="HTML",
     )
-    await callback.message.edit_text(text, reply_markup=_build_country_kb(user), parse_mode="HTML")
     await callback.answer()
+    return
 
 
 @router.callback_query(F.data == "profile:country:change")
