@@ -155,9 +155,34 @@ def build_premium_menu_kb() -> InlineKeyboardMarkup:
 
 
 def _parse_premium_until(raw: str) -> str | None:
-    """days ('30') OR date ('31.12.2025') OR empty => None"""
+    """Accept:
+    - days: '30'
+    - date: '31.12.2025'
+    - forever: 'навсегда' / 'без срока' / 'бессрочно' / 'forever' / '∞' / '-'
+
+    Returns ISO datetime string or None (forever).
+    Raises ValueError on invalid input.
+    """
     s = (raw or "").strip()
+
+    # Treat empty as invalid here because user can't actually send “empty” in Telegram.
+    # We keep forever via explicit tokens/button.
     if not s:
+        raise ValueError("empty")
+
+    s_low = s.lower()
+    forever_tokens = {
+        "навсегда",
+        "без срока",
+        "безсрока",
+        "бессрочно",
+        "forever",
+        "infinite",
+        "∞",
+        "-",
+        "0",
+    }
+    if s_low in forever_tokens:
         return None
 
     if s.isdigit():
@@ -172,7 +197,8 @@ def _parse_premium_until(raw: str) -> str | None:
         dt = dt.replace(hour=23, minute=59, second=59, microsecond=0)
         return dt.isoformat()
     except Exception:
-        return None
+        raise ValueError("invalid")
+
 
 
 async def _edit_premium_prompt_or_answer(
@@ -207,6 +233,50 @@ async def _edit_premium_prompt_or_answer(
         await state.update_data(premium_prompt_chat_id=sent.chat.id, premium_prompt_msg_id=sent.message_id)
     except Exception:
         pass
+
+
+# -------------------- Premium notification helper --------------------
+
+async def _notify_user_premium_change(
+    bot,
+    tg_id: int,
+    *,
+    is_enabled: bool,
+    until_iso: str | None,
+    admin_label: str,
+):
+    """Best-effort notification to user about premium changes."""
+
+    def _fmt_until(iso: str | None) -> str:
+        if not iso:
+            return "бессрочно"
+        try:
+            return "до " + datetime.fromisoformat(iso).strftime("%d.%m.%Y")
+        except Exception:
+            return "до " + str(iso)
+
+    admin_label_safe = html.escape(admin_label or "админа", quote=False)
+
+    if is_enabled:
+        until_text = _fmt_until(until_iso)
+        text = (
+            "💎 <b>GlowShot Premium активирован</b>\n\n"
+            f"Вы получили Premium от {admin_label_safe}.\n"
+            f"Срок: <b>{html.escape(until_text, quote=False)}</b>\n\n"
+            "Теперь вам доступны премиум‑функции в боте ✨"
+        )
+    else:
+        text = (
+            "💤 <b>GlowShot Premium отключён</b>\n\n"
+            f"Premium был отключён админом {admin_label_safe}.\n"
+            "Если это ошибка — напишите в поддержку."
+        )
+
+    try:
+        await bot.send_message(chat_id=tg_id, text=text, parse_mode="HTML")
+    except Exception:
+        # User may block the bot or disallow messages; ignore silently.
+        return
 
 
 # =============================================================
@@ -278,11 +348,12 @@ async def _render_admin_user_profile(
     """Собрать текст профиля пользователя (для админки)."""
     internal_id = user["id"]
     tg_id = user.get("tg_id")
-    username = user.get("username")
-    name = user.get("name") or "Без имени"
-    gender = user.get("gender") or "—"
+    username_raw = user.get("username")
+    username = html.escape(str(username_raw), quote=False) if username_raw else None
+    name = html.escape(str(user.get("name") or "Без имени"), quote=False)
+    gender = html.escape(str(user.get("gender") or "—"), quote=False)
     age = user.get("age")
-    bio = (user.get("bio") or "").strip()
+    bio = html.escape(str((user.get("bio") or "").strip()), quote=False)
     created_at = user.get("created_at")
     updated_at = user.get("updated_at")
 
@@ -334,7 +405,7 @@ async def _render_admin_user_profile(
     if is_blocked:
         block_text = f"да, до { _fmt_dt(blocked_until) }" if blocked_until else "да, без срока"
         if blocked_reason:
-            block_text += f"\nПричина: {blocked_reason}"
+            block_text += f"\nПричина: {html.escape(str(blocked_reason), quote=False)}"
     else:
         block_text = "нет"
 
@@ -510,7 +581,7 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
         try:
             await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=kb.as_markup())
+            await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
         await callback.answer()
         return
@@ -606,16 +677,18 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
         # иногда падает на caption — попробуем коротко
         safe_caption = caption[:3800] + "..." if len(caption) > 3800 else caption
         try:
-            await callback.message.answer(safe_caption, reply_markup=kb.as_markup())
+            sent = await callback.message.answer(safe_caption, reply_markup=kb.as_markup(), parse_mode="HTML")
+            await state.update_data(user_prompt_chat_id=sent.chat.id, user_prompt_msg_id=sent.message_id)
         except Exception:
             pass
 
     except Exception:
         # fallback: пробуем редактировать подпись, если сообщение уже с фото
         try:
-            await callback.message.edit_caption(caption=caption, reply_markup=kb.as_markup())
+            await callback.message.edit_caption(caption=caption, reply_markup=kb.as_markup(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(caption, reply_markup=kb.as_markup())
+            sent = await callback.message.answer(caption, reply_markup=kb.as_markup(), parse_mode="HTML")
+            await state.update_data(user_prompt_chat_id=sent.chat.id, user_prompt_msg_id=sent.message_id)
 
     await callback.answer()
 
@@ -876,18 +949,69 @@ async def admin_premium_grant_get_user(message: Message, state: FSMContext):
 
     text = (
         "💎 <b>Срок премиума</b>\n\n"
-        "Введи срок:\n"
+        "Выбери вариант:\n"
         "• число дней (например <code>30</code>)\n"
-        "или\n"
-        "• дату окончания <code>31.12.2025</code>\n\n"
-        "Если отправишь пусто — будет бессрочно."
+        "• дату окончания <code>31.12.2025</code>\n"
+        "• или нажми кнопку <b>♾ Бессрочно</b>\n\n"
+        "Можно также написать словом: <code>навсегда</code> / <code>без срока</code> / <code>бессрочно</code>."
     )
 
     kb = InlineKeyboardBuilder()
+    kb.button(text="♾ Бессрочно", callback_data="admin:premium:grant:forever")
     kb.button(text="⬅️ Назад", callback_data="admin:premium")
     kb.adjust(1)
 
     await _edit_premium_prompt_or_answer(message, state, text, kb.as_markup())
+
+
+# Handler for "Бессрочно" button
+@router.callback_query(F.data == "admin:premium:grant:forever")
+async def admin_premium_grant_forever(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    data = await state.get_data()
+    u = data.get("pending_premium_user")
+    if not u or not u.get("tg_id"):
+        await callback.answer("Сначала выбери пользователя.", show_alert=True)
+        return
+
+    tg_id = int(u["tg_id"])
+
+    await set_user_premium_status(tg_id, True, premium_until=None)
+
+    # Notify user (best-effort)
+    admin_label = "админа"
+    try:
+        a = admin
+        if isinstance(a, dict):
+            if a.get("username"):
+                admin_label = "@" + str(a.get("username"))
+            elif a.get("name"):
+                admin_label = str(a.get("name"))
+    except Exception:
+        admin_label = "админа"
+
+    await _notify_user_premium_change(
+        callback.message.bot,
+        tg_id,
+        is_enabled=True,
+        until_iso=None,
+        admin_label=admin_label,
+    )
+
+    label = f"@{u.get('username')}" if u.get("username") else (u.get("name") or "Без имени")
+    label = html.escape(str(label), quote=False)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Список", callback_data="admin:premium:list")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.adjust(1)
+
+    await state.clear()
+    await _edit_premium_prompt_or_answer(callback.message, state, f"✅ Премиум выдан: <b>{label}</b>\nСрок: <b>бессрочно</b>", kb.as_markup())
+    await callback.answer()
 
 
 @router.message(PremiumAdminStates.waiting_premium_until, F.text)
@@ -910,10 +1034,44 @@ async def admin_premium_grant_set_until(message: Message, state: FSMContext):
         return
 
     tg_id = int(u["tg_id"])
-    premium_until = _parse_premium_until(raw)
+    try:
+        premium_until = _parse_premium_until(raw)
+    except ValueError:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="♾ Бессрочно", callback_data="admin:premium:grant:forever")
+        kb.button(text="⬅️ Назад", callback_data="admin:premium")
+        kb.adjust(1)
+
+        await _edit_premium_prompt_or_answer(
+            message,
+            state,
+            "❌ Не понял срок.\n\nВведи <code>30</code> (дней) или <code>31.12.2025</code>, либо нажми <b>♾ Бессрочно</b>.",
+            kb.as_markup(),
+        )
+        return
 
     # ВАЖНО: await, иначе “пишет выдано, но не выдано”
     await set_user_premium_status(tg_id, True, premium_until=premium_until)
+
+    # Notify user (best-effort)
+    admin_label = "админа"
+    try:
+        a = admin
+        if isinstance(a, dict):
+            if a.get("username"):
+                admin_label = "@" + str(a.get("username"))
+            elif a.get("name"):
+                admin_label = str(a.get("name"))
+    except Exception:
+        admin_label = "админа"
+
+    await _notify_user_premium_change(
+        message.bot,
+        tg_id,
+        is_enabled=True,
+        until_iso=premium_until,
+        admin_label=admin_label,
+    )
 
     until_text = "бессрочно"
     if premium_until:
@@ -983,6 +1141,26 @@ async def admin_premium_revoke_do(message: Message, state: FSMContext):
 
     # ВАЖНО: await
     await set_user_premium_status(tg_id, False, premium_until=None)
+
+    # Notify user (best-effort)
+    admin_label = "админа"
+    try:
+        a = admin
+        if isinstance(a, dict):
+            if a.get("username"):
+                admin_label = "@" + str(a.get("username"))
+            elif a.get("name"):
+                admin_label = str(a.get("name"))
+    except Exception:
+        admin_label = "админа"
+
+    await _notify_user_premium_change(
+        message.bot,
+        tg_id,
+        is_enabled=False,
+        until_iso=None,
+        admin_label=admin_label,
+    )
 
     label = f"@{u.get('username')}" if u.get("username") else (u.get("name") or "Без имени")
     label = html.escape(str(label), quote=False)
