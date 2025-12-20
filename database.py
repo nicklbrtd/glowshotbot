@@ -136,6 +136,54 @@ async def get_photo_ratings_stats(photo_id: int) -> dict:
     }
 
 
+# Aggregate stats for a photo including Bayes score.
+async def get_photo_stats(photo_id: int) -> dict:
+    """Aggregate stats for a photo including Bayes score.
+
+    Returns keys:
+      ratings_count: int
+      avg_rating: float|None
+      bayes_score: float|None
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+              COUNT(r.id)::int AS ratings_count,
+              AVG(r.value)::float AS avg_rating,
+              COALESCE(SUM(r.value), 0)::float AS sum_values
+            FROM ratings r
+            WHERE r.photo_id = $1
+            """,
+            int(photo_id),
+        )
+
+        ratings_count = int(row["ratings_count"] or 0) if row else 0
+        avg_rating = row["avg_rating"] if row else None
+        sum_values = float(row["sum_values"] or 0) if row else 0.0
+        comments_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM comments WHERE photo_id=$1",
+            int(photo_id),
+        )
+
+        global_mean, _global_cnt = await _get_global_rating_mean(conn)
+        prior = _bayes_prior_weight()
+        bayes = _bayes_score(
+            sum_values=sum_values,
+            n=ratings_count,
+            global_mean=global_mean,
+            prior=prior,
+        )
+
+    return {
+        "ratings_count": ratings_count,
+        "avg_rating": avg_rating,
+        "bayes_score": bayes,
+        "comments_count": int(comments_count or 0),
+    }
+
+
 async def count_super_ratings_for_photo(photo_id: int) -> int:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -534,16 +582,19 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_owner ON photo_share_links(owner_tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_active ON photo_share_links(is_active);")
 
-        # migration: users.city/country + flags (до индексов!)
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_city INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_country INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_points INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_code TEXT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_updated_at TEXT;")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'feed';")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source_code TEXT;")
 
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_city ON users(city);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_rank_points ON users(rank_points);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at ON bot_error_logs(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_news_created_at ON premium_news(created_at);")
@@ -705,6 +756,7 @@ async def add_rating_by_tg_id(
         return False
 
     p = _assert_pool()
+    now = get_moscow_now_iso()
     try:
         async with p.acquire() as conn:
             await conn.execute(
@@ -717,8 +769,24 @@ async def add_rating_by_tg_id(
                 int(value),
                 str(source or "feed"),
                 str(source_code) if source_code else None,
-                get_moscow_now_iso(),
+                now,
             )
+
+            # Invalidate author's rank cache (their photo got a new rating)
+            try:
+                owner_user_id = await conn.fetchval(
+                    "SELECT user_id FROM photos WHERE id=$1 LIMIT 1",
+                    int(photo_id),
+                )
+                if owner_user_id is not None:
+                    await conn.execute(
+                        "UPDATE users SET rank_updated_at=NULL, updated_at=$1 WHERE id=$2",
+                        now,
+                        int(owner_user_id),
+                    )
+            except Exception:
+                pass
+
         return True
     except asyncpg.exceptions.UniqueViolationError:
         return False
@@ -1746,27 +1814,6 @@ async def hard_delete_photo(photo_id: int) -> None:
         await conn.execute("DELETE FROM photos WHERE id=$1", int(photo_id))
 
 
-async def get_photo_stats(photo_id: int) -> dict:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT COUNT(*) AS ratings_count, AVG(value)::double precision AS avg_rating
-            FROM ratings WHERE photo_id=$1
-            """,
-            int(photo_id)
-        )
-        comments_count = await conn.fetchval("SELECT COUNT(*) FROM comments WHERE photo_id=$1", int(photo_id))
-    cnt = int((row["ratings_count"] if row else 0) or 0)
-    avg = row["avg_rating"] if row else None
-    if avg is not None:
-        try:
-            avg = float(avg)
-        except Exception:
-            avg = None
-    return {"ratings_count": cnt, "avg_rating": avg, "comments_count": int(comments_count or 0)}
-
-
 async def get_comments_for_photo(photo_id: int, *, only_public: bool = False) -> list[dict]:
     p = _assert_pool()
     where_public = "AND c.is_public=1" if only_public else ""
@@ -1838,6 +1885,21 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
             """,
             int(photo_id), int(user_id), int(value), now
         )
+
+        # Invalidate author's rank cache (their photo got a new rating)
+        try:
+            owner_user_id = await conn.fetchval(
+                "SELECT user_id FROM photos WHERE id=$1 LIMIT 1",
+                int(photo_id),
+            )
+            if owner_user_id is not None:
+                await conn.execute(
+                    "UPDATE users SET rank_updated_at=NULL, updated_at=$1 WHERE id=$2",
+                    now,
+                    int(owner_user_id),
+                )
+        except Exception:
+            pass
 
 
 async def set_super_rating(user_id: int, photo_id: int) -> bool:
@@ -2268,7 +2330,151 @@ async def get_my_results_for_user(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# -------------------- profile summary --------------------
+# ====================================================
+# ================ profile summary ===================
+# ====================================================
+
+
+# -------------------- ranks --------------------
+
+async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
+    """Calculate rank points for a user.
+
+    Strategy is defined in utils.ranks (pure math):
+      photo_points = bayes_score * log1p(ratings_count)
+
+    We intentionally DO NOT filter by is_deleted here.
+    That way a user cannot "reset" rank by deleting photos.
+
+    We DO filter moderation_status='active' to exclude rejected/hidden content.
+
+    Returns an int suitable for caching in users.rank_points.
+    """
+    p = _assert_pool()
+    limit_photos = int(limit_photos or 10)
+    if limit_photos <= 0:
+        limit_photos = 10
+
+    from utils.ranks import photo_points as _photo_points, points_to_int as _points_to_int
+
+    prior = _bayes_prior_weight()
+
+    async with p.acquire() as conn:
+        global_mean, _global_cnt = await _get_global_rating_mean(conn)
+
+        rows = await conn.fetch(
+            """
+            SELECT
+              ph.id AS photo_id,
+              COUNT(r.id)::int AS ratings_count,
+              COALESCE(SUM(r.value), 0)::float AS sum_values,
+              MAX(ph.created_at) AS created_at_max
+            FROM photos ph
+            LEFT JOIN ratings r ON r.photo_id = ph.id
+            WHERE ph.user_id=$1
+              AND ph.moderation_status='active'
+            GROUP BY ph.id
+            ORDER BY created_at_max DESC NULLS LAST, ph.id DESC
+            LIMIT $2
+            """,
+            int(user_id),
+            int(limit_photos),
+        )
+
+    total_points = 0.0
+    for row in rows or []:
+        n = int(row["ratings_count"] or 0)
+        s = float(row["sum_values"] or 0.0)
+        bayes = _bayes_score(sum_values=s, n=n, global_mean=global_mean, prior=prior)
+        total_points += _photo_points(bayes_score=bayes, ratings_count=n)
+
+    return _points_to_int(total_points)
+
+
+async def refresh_user_rank_cache(user_id: int, *, limit_photos: int = 10) -> dict:
+    """Recalculate and store user's rank cache in DB."""
+    p = _assert_pool()
+    from utils.ranks import rank_from_points, format_rank
+
+    points = await calc_user_rank_points(int(user_id), limit_photos=limit_photos)
+    rank = rank_from_points(points)
+    now_iso = get_moscow_now_iso()
+
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE users
+            SET rank_points=$1,
+                rank_code=$2,
+                rank_updated_at=$3,
+                updated_at=$3
+            WHERE id=$4
+            """,
+            int(points),
+            str(rank.code),
+            now_iso,
+            int(user_id),
+        )
+
+    return {"rank_points": int(points), "rank_code": str(rank.code), "rank_label": format_rank(points)}
+
+
+async def get_user_rank_cached(user_id: int, *, max_age_seconds: int = 6 * 60 * 60) -> dict:
+    """Return user's cached rank; refresh if stale."""
+    p = _assert_pool()
+    max_age_seconds = int(max_age_seconds or 0)
+    if max_age_seconds <= 0:
+        max_age_seconds = 6 * 60 * 60
+
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT rank_points, rank_code, rank_updated_at
+            FROM users
+            WHERE id=$1 AND is_deleted=0
+            """,
+            int(user_id),
+        )
+
+    if not row:
+        return {"rank_points": 0, "rank_code": None, "rank_label": "🟢 Начинающий"}
+
+    points = int(row["rank_points"] or 0)
+    updated_at = row["rank_updated_at"]
+
+    stale = True
+    if updated_at:
+        try:
+            dt = datetime.fromisoformat(str(updated_at))
+            stale = (get_moscow_now() - dt).total_seconds() > max_age_seconds
+        except Exception:
+            stale = True
+
+    if stale:
+        return await refresh_user_rank_cache(int(user_id))
+
+    from utils.ranks import format_rank
+    return {"rank_points": points, "rank_code": row["rank_code"], "rank_label": format_rank(points)}
+
+
+async def get_user_rank_by_tg_id(tg_id: int, *, max_age_seconds: int = 6 * 60 * 60) -> dict:
+    u = await get_user_by_tg_id(int(tg_id))
+    if not u:
+        return {"rank_points": 0, "rank_code": None, "rank_label": "🟢 Начинающий"}
+    return await get_user_rank_cached(int(u["id"]), max_age_seconds=max_age_seconds)
+
+
+async def invalidate_user_rank_cache(user_id: int) -> None:
+    """Mark rank cache stale so next read recalculates."""
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET rank_updated_at=NULL, updated_at=$1 WHERE id=$2",
+            now,
+            int(user_id),
+        )
+
 
 async def count_photos_by_user(user_id: int) -> int:
     p = _assert_pool()
@@ -2967,63 +3173,3 @@ async def get_or_create_share_link_code(owner_tg_id: int) -> str:
         )
     return code
 
-async def refresh_share_link_code(owner_tg_id: int) -> str:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        await conn.execute(
-            "UPDATE photo_share_links SET is_active=0 WHERE owner_tg_id=$1 AND is_active=1",
-            int(owner_tg_id),
-        )
-    return await get_or_create_share_link_code(owner_tg_id)
-
-async def get_owner_tg_id_by_share_code(code: str) -> int | None:
-    c = (code or "").strip()
-    if not c:
-        return None
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        v = await conn.fetchval(
-            "SELECT owner_tg_id FROM photo_share_links WHERE code=$1 AND is_active=1",
-            c,
-        )
-    return int(v) if v is not None else None
-
-async def get_active_photo_for_owner_tg_id(owner_tg_id: int) -> dict | None:
-    owner = await get_user_by_tg_id(int(owner_tg_id))
-    if not owner:
-        return None
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT * FROM photos
-            WHERE user_id=$1 AND is_deleted=0 AND moderation_status='active'
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            int(owner["id"]),
-        )
-    return dict(row) if row else None
-
-async def add_rating_by_tg_id(*, photo_id: int, rater_tg_id: int, value: int, source: str="feed", source_code: str|None=None) -> bool:
-    if value < 1 or value > 10:
-        return False
-    u = await ensure_user_minimal_row(int(rater_tg_id))
-    if not u:
-        return False
-    p = _assert_pool()
-    try:
-        async with p.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO ratings (photo_id, user_id, value, source, source_code, created_at)
-                VALUES ($1,$2,$3,$4,$5,$6)
-                """,
-                int(photo_id), int(u["id"]), int(value),
-                str(source or "feed"),
-                str(source_code) if source_code else None,
-                get_moscow_now_iso(),
-            )
-        return True
-    except asyncpg.exceptions.UniqueViolationError:
-        return False

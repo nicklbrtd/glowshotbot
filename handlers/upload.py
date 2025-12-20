@@ -502,18 +502,18 @@ async def build_my_photo_main_text(photo: dict) -> str:
     # статистика
     stats = await get_photo_stats(photo["id"])
     ratings_count = int(stats.get("ratings_count") or 0)
-    avg = stats.get("avg_rating")
+    score = stats.get("bayes_score")
 
-    if avg is None:
-        avg_str = "—"
+    if score is None:
+        score_str = "—"
         trend = "📉"
     else:
         try:
-            avg_f = float(avg)
-            avg_str = f"{avg_f:.2f}".rstrip("0").rstrip(".")
-            trend = "📈" if avg_f >= 7 else "📉"
+            score_f = float(score)
+            score_str = f"{score_f:.2f}".rstrip("0").rstrip(".")
+            trend = "📈" if score_f >= 7 else "📉"
         except Exception:
-            avg_str = "—"
+            score_str = "—"
             trend = "📉"
 
     description = (photo.get("description") or "").strip()
@@ -523,7 +523,7 @@ async def build_my_photo_main_text(photo: dict) -> str:
     lines.append("")
     lines.append(f"📅 Опубликовано: {pub_str}г")
     lines.append(f"💖 Оценок: {ratings_count}")
-    lines.append(f"{trend} Рейтинг: <b>{avg_str}</b>")
+    lines.append(f"{trend} Рейтинг: <b>{score_str}</b>")
 
     if description:
         lines.append("")
@@ -826,7 +826,12 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         return
     ratings_count = int(r.get("ratings_count") or 0)
     last_rating = r.get("last_rating")
-    avg_rating = r.get("avg_rating")
+    # Показываем Bayes-рейтинг вместо средней
+    smart_score = None
+    try:
+        smart_score = (await get_photo_stats(photo_id)).get("bayes_score")
+    except Exception:
+        smart_score = None
 
     super_count = 0
     try:
@@ -851,7 +856,7 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
     lines.append("")
     lines.append(f"⭐️ Оценок всего: <b>{ratings_count}</b>")
     lines.append(f"🕒 Последняя оценка: <b>{last_rating if last_rating is not None else '—'}</b>")
-    lines.append(f"📈 Средняя оценка: <b>{_fmt_avg(avg_rating)}</b>")
+    lines.append(f"📈 Рейтинг: <b>{_fmt_avg(smart_score)}</b>")
     lines.append(f"🔥 Супер-оценок: <b>{super_count}</b>")
     lines.append(f"💬 Комментариев: <b>{comments_count}</b>")
     lines.append(f"🔗⭐️ Оценки по ссылке: <b>{link_ratings}</b>")

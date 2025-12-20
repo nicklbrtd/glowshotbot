@@ -18,6 +18,7 @@ from database import (
     count_photos_by_user,
     count_active_photos_by_user,
     get_user_rating_summary,
+    get_user_rank_by_tg_id,
     get_most_popular_photo_for_user,
     get_weekly_rank_for_user,
     get_user_premium_status,
@@ -98,8 +99,6 @@ async def build_profile_view(user: dict):
         gender_icon = "🙋‍♂️"
     elif gender_raw == "Девушка":
         gender_icon = "🙋‍♀️"
-    elif gender_raw in ("Другое", "Other"):
-        gender_icon = "🙋"
     elif gender_raw in ("Не важно", None, ""):
         gender_icon = "❔"
     else:
@@ -129,6 +128,15 @@ async def build_profile_view(user: dict):
 
     user_id = user.get("id")
     tg_id = user.get("tg_id")
+
+    # Rank (cached)
+    rank_label = None
+    if tg_id:
+        try:
+            r = await get_user_rank_by_tg_id(int(tg_id))
+            rank_label = (r or {}).get("rank_label")
+        except Exception:
+            rank_label = None
 
     if user_id:
         # Всего загружено фото
@@ -273,6 +281,7 @@ async def build_profile_view(user: dict):
     text_lines = [
         f"👤<b>Твой профиль</b>{premium_badge}",
         f"Имя: {name}{age_part} лет" if age else f"Имя: {name}",
+        f"🏷 Ранг: {rank_label}" if rank_label else "🏷 Ранг: 🟢 Начинающий",
         f"Пол: {gender_icon}",
     ]
 
@@ -901,10 +910,9 @@ async def profile_edit_gender(callback: CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text="Парень", callback_data="profile:set_gender:male")
     kb.button(text="Девушка", callback_data="profile:set_gender:female")
-    kb.button(text="Другое", callback_data="profile:set_gender:other")
     kb.button(text="Не важно", callback_data="profile:set_gender:na")
     kb.button(text="⬅️ Назад", callback_data="menu:profile")
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 1, 1)
 
     await callback.message.edit_text(
         "Выбери, как тебя указать в профиле.\n\n",
@@ -919,7 +927,6 @@ async def profile_set_gender(callback: CallbackQuery):
     mapping = {
         "male": "Парень",
         "female": "Девушка",
-        "other": "Другое",
         "na": "Не важно",
     }
     gender = mapping.get(code, "Не важно")
