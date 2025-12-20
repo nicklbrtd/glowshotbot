@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+import time
 from datetime import datetime, timedelta
 
 import asyncpg
@@ -12,6 +13,48 @@ import traceback
 
 DB_DSN = os.getenv("DATABASE_URL")
 pool: asyncpg.Pool | None = None
+
+# Cache global rating mean so we don't query it on every profile view.
+# Stored as (ts, mean, count)
+_GLOBAL_RATING_CACHE: tuple[float, float, int] | None = None
+_GLOBAL_RATING_TTL_SECONDS = 300
+
+
+def _bayes_prior_weight() -> int:
+    """How many virtual votes the global mean contributes.
+
+    Tunable constant. 20 works well for 1..10 ratings.
+    """
+    return 20
+
+
+async def _get_global_rating_mean(conn: asyncpg.Connection) -> tuple[float, int]:
+    """Return (global_mean, global_count) for all ratings.
+
+    Uses a short in-process cache.
+    """
+    global _GLOBAL_RATING_CACHE
+    now = time.time()
+    if _GLOBAL_RATING_CACHE is not None:
+        ts, mean, cnt = _GLOBAL_RATING_CACHE
+        if (now - ts) < _GLOBAL_RATING_TTL_SECONDS:
+            return float(mean), int(cnt)
+
+    row = await conn.fetchrow("SELECT AVG(value)::float AS mean, COUNT(*)::int AS cnt FROM ratings")
+    cnt = int(row["cnt"]) if row and row["cnt"] is not None else 0
+    mean_raw = row["mean"] if row else None
+
+    # If the bot is new / no ratings yet, use a neutral default.
+    mean = float(mean_raw) if mean_raw is not None else 7.0
+
+    _GLOBAL_RATING_CACHE = (now, mean, cnt)
+    return mean, cnt
+
+
+def _bayes_score(*, sum_values: float, n: int, global_mean: float, prior: int) -> float | None:
+    if n <= 0:
+        return None
+    return (prior * float(global_mean) + float(sum_values)) / (prior + int(n))
 
 
 def _assert_pool() -> asyncpg.Pool:
@@ -2242,51 +2285,129 @@ async def count_active_photos_by_user(user_id: int) -> int:
 
 
 async def get_user_rating_summary(user_id: int) -> dict:
+    """Profile rating summary.
+
+    Backward-compatible keys:
+      - ratings_given
+      - ratings_received
+      - avg_received
+
+    Added "smart" keys:
+      - bayes_received
+      - global_mean
+      - prior
+
+    Important: ratings_received/avg include BOTH active and soft-deleted photos
+    so users cannot reset their profile stats by deleting a photo.
+    Only moderation_status='active' photos are considered.
+    """
     p = _assert_pool()
+    prior = _bayes_prior_weight()
+
     async with p.acquire() as conn:
-        given = await conn.fetchval("SELECT COUNT(*) FROM ratings WHERE user_id=$1", int(user_id))
-        received = await conn.fetchval(
-            """
-            SELECT COUNT(r.id)
-            FROM ratings r
-            JOIN photos p ON p.id=r.photo_id
-            WHERE p.user_id=$1
-            """,
-            int(user_id)
+        global_mean, _global_cnt = await _get_global_rating_mean(conn)
+
+        given = await conn.fetchval(
+            "SELECT COUNT(*)::int FROM ratings WHERE user_id=$1",
+            int(user_id),
         )
-        avg_received = await conn.fetchval(
+
+        row = await conn.fetchrow(
             """
-            SELECT AVG(r.value)::double precision
-            FROM ratings r
-            JOIN photos p ON p.id=r.photo_id
-            WHERE p.user_id=$1
+            SELECT
+                COUNT(r.id)::int AS ratings_received,
+                COALESCE(SUM(r.value), 0)::float AS ratings_sum,
+                AVG(r.value)::float AS avg_received
+            FROM photos ph
+            LEFT JOIN ratings r ON r.photo_id = ph.id
+            WHERE ph.user_id=$1
+              AND ph.moderation_status='active'
             """,
-            int(user_id)
+            int(user_id),
         )
-    avg = None
-    if avg_received is not None:
-        try:
-            avg = float(avg_received)
-        except Exception:
-            avg = None
-    return {"ratings_given": int(given or 0), "ratings_received": int(received or 0), "avg_received": avg}
+
+    ratings_received = int(row["ratings_received"] or 0) if row else 0
+    ratings_sum = float(row["ratings_sum"] or 0.0) if row else 0.0
+    avg_received = row["avg_received"] if row and row["avg_received"] is not None else None
+
+    # Smart Bayesian average (stabilizes score for small n)
+    bayes = _bayes_score(
+        sum_values=ratings_sum,
+        n=ratings_received,
+        global_mean=global_mean,
+        prior=prior,
+    )
+
+    return {
+        "ratings_given": int(given or 0),
+        "ratings_received": int(ratings_received),
+        "avg_received": float(avg_received) if avg_received is not None else None,
+        "bayes_received": float(bayes) if bayes is not None else None,
+        "global_mean": float(global_mean),
+        "prior": int(prior),
+    }
 
 
 async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
+    """Return user's best photo ("самое популярное") by Bayesian score.
+
+    Includes soft-deleted photos so the profile can still show the best work
+    even when the user has 0 active photos.
+
+    Only moderation_status='active' photos are considered.
+
+    Ranking:
+      1) bayes_score desc
+      2) ratings_count desc
+      3) created_at asc
+    """
     p = _assert_pool()
+    prior = _bayes_prior_weight()
+
     async with p.acquire() as conn:
+        global_mean, _global_cnt = await _get_global_rating_mean(conn)
+
         row = await conn.fetchrow(
             """
-            SELECT p.*, COUNT(r.id) AS ratings_count, AVG(r.value)::double precision AS avg_rating
-            FROM photos p
-            LEFT JOIN ratings r ON r.photo_id=p.id
-            WHERE p.user_id=$1 AND p.is_deleted=0
-            GROUP BY p.id
-            ORDER BY COUNT(r.id) DESC, AVG(r.value) DESC NULLS LAST, p.id DESC
+            WITH stats AS (
+                SELECT
+                    ph.id,
+                    ph.user_id,
+                    ph.file_id,
+                    ph.title,
+                    ph.day_key,
+                    ph.is_deleted,
+                    ph.created_at,
+                    COUNT(r.id)::int AS ratings_count,
+                    COALESCE(SUM(r.value), 0)::float AS ratings_sum,
+                    AVG(r.value)::float AS avg_rating
+                FROM photos ph
+                LEFT JOIN ratings r ON r.photo_id = ph.id
+                WHERE ph.user_id=$1
+                  AND ph.moderation_status='active'
+                GROUP BY ph.id
+            )
+            SELECT
+                s.*,
+                CASE
+                    WHEN s.ratings_count > 0
+                        THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
+                    ELSE NULL
+                END::float AS bayes_score
+            FROM stats s
+            ORDER BY
+                (bayes_score IS NULL) ASC,
+                bayes_score DESC,
+                ratings_count DESC,
+                created_at ASC,
+                id ASC
             LIMIT 1
             """,
-            int(user_id)
+            int(user_id),
+            int(prior),
+            float(global_mean),
         )
+
     return dict(row) if row else None
 
 

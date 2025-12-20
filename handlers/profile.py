@@ -124,8 +124,7 @@ async def build_profile_view(user: dict):
     # Реальная статистика по фото
     total_photos = "—"
     avg_rating_text = "—"
-    popular_photo_title = "—"
-    popular_photo_metric = "—"
+    popular_photo_line = "—"
     weekly_top_position = "—"
 
     user_id = user.get("id")
@@ -140,35 +139,67 @@ async def build_profile_view(user: dict):
         except Exception:
             total_photos = "—"
 
-        # Средняя оценка и количество оценок
+        # Средняя оценка и количество оценок (умная/байесовская)
         try:
-            summary = await get_user_rating_summary(user_id)
-            avg = summary.get("avg_rating")
-            cnt = summary.get("ratings_count") or 0
-            if avg is not None and cnt > 0:
-                avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-                avg_rating_text = f"{avg_str} ({cnt} оценок)"
-            elif cnt > 0:
-                avg_rating_text = f"{cnt} оценок"
-            else:
+            summary = await get_user_rating_summary(user_id) or {}
+
+            cnt = int(summary.get("ratings_received") or 0)
+            avg_raw = summary.get("avg_received")
+            bayes_raw = summary.get("bayes_received")
+
+            avg_val = float(avg_raw) if avg_raw is not None else None
+            bayes_val = float(bayes_raw) if bayes_raw is not None else None
+
+            if cnt <= 0:
                 avg_rating_text = "—"
+            else:
+                # Prefer smart score; also show raw average as context
+                if bayes_val is not None:
+                    bayes_str = f"{bayes_val:.2f}".rstrip("0").rstrip(".")
+                    if avg_val is not None:
+                        avg_str = f"{avg_val:.2f}".rstrip("0").rstrip(".")
+                        avg_rating_text = f"{bayes_str}★ (умная), {cnt} оценок\nсыр.: {avg_str}★"
+                    else:
+                        avg_rating_text = f"{bayes_str}★ (умная), {cnt} оценок"
+                elif avg_val is not None:
+                    avg_str = f"{avg_val:.2f}".rstrip("0").rstrip(".")
+                    avg_rating_text = f"{avg_str}★, {cnt} оценок"
+                else:
+                    avg_rating_text = f"{cnt} оценок"
         except Exception:
             avg_rating_text = "—"
 
-        # Самое популярное фото
+        # Самое популярное фото (по умному скору)
         try:
             popular = await get_most_popular_photo_for_user(user_id)
             if popular:
-                popular_photo_title = html.escape(str(popular.get("title") or "Без названия"), quote=False)
-                ratings_count = popular.get("ratings_count") or 0
-                avg_pop = popular.get("avg_rating")
-                if avg_pop is not None:
-                    avg_str = f"{float(avg_pop):.2f}".rstrip("0").rstrip(".")
-                    popular_photo_metric = f"{avg_str}★, {ratings_count} оценок"
-                else:
-                    popular_photo_metric = f"{ratings_count} оценок"
+                title = html.escape(str(popular.get("title") or "Без названия"), quote=False)
+                is_deleted = bool(popular.get("is_deleted") or 0)
+                if is_deleted:
+                    title = f"{title} (архив)"
+
+                ratings_count = int(popular.get("ratings_count") or 0)
+                avg_pop_raw = popular.get("avg_rating")
+                bayes_pop_raw = popular.get("bayes_score")
+
+                avg_pop = float(avg_pop_raw) if avg_pop_raw is not None else None
+                bayes_pop = float(bayes_pop_raw) if bayes_pop_raw is not None else None
+
+                metric_parts: list[str] = []
+                if bayes_pop is not None:
+                    metric_parts.append(f"{f'{bayes_pop:.2f}'.rstrip('0').rstrip('.')}★ (умная)")
+                elif avg_pop is not None:
+                    metric_parts.append(f"{f'{avg_pop:.2f}'.rstrip('0').rstrip('.')}★")
+
+                if ratings_count > 0:
+                    metric_parts.append(f"{ratings_count} оценок")
+
+                metric = ", ".join(metric_parts) if metric_parts else "—"
+                popular_photo_line = f"{title} ({metric})"
+            else:
+                popular_photo_line = "—"
         except Exception:
-            pass
+            popular_photo_line = "—"
 
         # Позиция в топе недели
         try:
@@ -284,20 +315,21 @@ async def build_profile_view(user: dict):
 
         text_lines.append(f"🔗 Ссылка: {display_link}")
 
-    # Описание
+    # Описание (свернутое)
+    bio_raw = html.escape(str(user.get("bio") or "—"), quote=False)
     text_lines.extend([
         "",
-        "📝 <b>Описание:</b>",
-        html.escape(str(user.get("bio") or "—"), quote=False),
+        "📝 <b>Описание</b>",
+        f"<blockquote expandable>{bio_raw}</blockquote>",
         "",
     ])
 
-    # --- "Свернутая" статистика через spoiler ---
+    # --- "Свернутая" статистика  ---
     stats_lines = [
         f"Всего загрузил: {total_photos}",
         f"Дней в боте: {days_in_bot}",
         f"Средняя оценка: {avg_rating_text}",
-        f"Самое популярное фото: {popular_photo_title} ({popular_photo_metric})",
+        f"Самое популярное фото: {popular_photo_line}",
     ]
 
     # --- Статистика как цитата ---
