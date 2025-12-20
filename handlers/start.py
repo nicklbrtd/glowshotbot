@@ -16,9 +16,17 @@ from keyboards.common import build_main_menu
 router = Router()
 
 REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
-# TODO: заполняй вручную — если пусто, премиум-блок не показывается
-PREMIUM_WEEKLY_UPDATES: list[str] = [
-    "🆕 Улучшена статистика в профиле (умный скор, больше метрик)",
+
+# Рандом-строки для рекламного блока (вторая строка)
+AD_LINES: list[str] = [
+    "Хочешь халявный премиум? приглашай друзей и получай премиум на 2 дня",
+    "Оценивай больше — чаще попадаешь в топы 🏁",
+    "Публикуй сильный кадр — и проси друзей оценить через ссылку 🔗⭐️",
+]
+
+# Новости (ручной список, показываем первые 1–5)
+NEWS_ITEMS: list[str] = [
+    "20.12.25: Теперь тудым сюдым и тд",
 ]
 
 
@@ -84,17 +92,45 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
 
     safe_name = html.escape(str(name), quote=False)
 
-    # Статы (внутри сворачиваемой цитаты)
-    active_count_text = "—"
-    can_change_text = "—"
-    active_rating_text = "—"
+    # Пол (для "оценил/оценила") — пытаемся угадать по полю в профиле
+    gender_val = None
+    if user:
+        for k in (
+            "gender",
+            "sex",
+            "profile_gender",
+            "gender_code",
+            "gender_value",
+        ):
+            try:
+                v = user.get(k)
+            except Exception:
+                v = None
+            if v is not None:
+                gender_val = v
+                break
+
+    gender_s = str(gender_val).strip().lower() if gender_val is not None else ""
+
+    def _is_female(s: str) -> bool:
+        return s in {"f", "female", "woman", "girl", "ж", "жен", "женский", "♀"} or "жен" in s
+
+    def _is_male(s: str) -> bool:
+        return s in {"m", "male", "man", "boy", "м", "муж", "мужской", "♂"} or "муж" in s
+
+    if _is_female(gender_s):
+        rated_verb = "оценила"
+    elif _is_male(gender_s):
+        rated_verb = "оценил"
+    else:
+        rated_verb = "оценил(а)"
+
     can_rate_text = "—"
+    rated_by_me_text = "—"
 
     try:
-        # Берём пул из database.py (он у тебя уже есть)
         p = db._assert_pool()  # type: ignore[attr-defined]
 
-        # Внутренний id пользователя (если есть) + tg_id (на случай легаси)
         internal_id = None
         if user:
             try:
@@ -102,70 +138,20 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
             except Exception:
                 internal_id = None
 
+        # user_id в фотках/оценках мог быть и внутренним id, и tg_id (легаси)
         candidate_user_ids: list[int] = []
         if internal_id is not None:
             candidate_user_ids.append(int(internal_id))
         candidate_user_ids.append(int(tg_id))
 
-        # Лимит активных фото
-        limit_active = 2 if is_premium else 1
+        rater_ids: list[int] = []
+        if internal_id is not None:
+            rater_ids.append(int(internal_id))
+        rater_ids.append(int(tg_id))
 
         async with p.acquire() as conn:
-            # Активных фото
-            try:
-                active_count = await conn.fetchval(
-                    """
-                    SELECT COUNT(*)::int
-                    FROM photos
-                    WHERE user_id = ANY($1::bigint[]) AND is_deleted = 0
-                    """,
-                    candidate_user_ids,
-                )
-                if active_count is None:
-                    active_count = 0
-                active_count_text = str(int(active_count))
-                can_change_text = "можно изменить" if int(active_count) < int(limit_active) else "нельзя изменить"
-            except Exception:
-                pass
-
-            # Рейтинг активной фотки (берём самую свежую активную по id)
-            try:
-                row = await conn.fetchrow(
-                    """
-                    SELECT
-                        ph.id,
-                        COUNT(r.id)::int AS ratings_count,
-                        AVG(r.value)::float AS avg_rating
-                    FROM photos ph
-                    LEFT JOIN ratings r ON r.photo_id = ph.id
-                    WHERE ph.user_id = ANY($1::bigint[]) AND ph.is_deleted = 0
-                    GROUP BY ph.id
-                    ORDER BY ph.id DESC
-                    LIMIT 1
-                    """,
-                    candidate_user_ids,
-                )
-                if row:
-                    cnt = int(row.get("ratings_count") or 0)
-                    avg = row.get("avg_rating")
-                    if cnt > 0 and avg is not None:
-                        avg_f = float(avg)
-                        avg_s = f"{avg_f:.2f}".rstrip("0").rstrip(".")
-                        active_rating_text = avg_s
-                    elif cnt > 0:
-                        active_rating_text = str(cnt)
-                    else:
-                        active_rating_text = "—"
-            except Exception:
-                pass
-
             # Можно оценить: фотки, которые пользователь ещё не оценивал
             try:
-                rater_ids: list[int] = []
-                if internal_id is not None:
-                    rater_ids.append(int(internal_id))
-                rater_ids.append(int(tg_id))
-
                 unrated = await conn.fetchval(
                     """
                     SELECT COUNT(*)::int
@@ -188,43 +174,56 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
             except Exception:
                 pass
 
+            # Ты оценил/оценила: сколько оценок поставил пользователь (всего)
+            try:
+                rated_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)::int
+                    FROM ratings r
+                    WHERE r.user_id = ANY($1::bigint[])
+                    """,
+                    rater_ids,
+                )
+                if rated_count is None:
+                    rated_count = 0
+                rated_by_me_text = str(int(rated_count))
+            except Exception:
+                pass
 
     except Exception:
-        # Если что-то пошло не так — просто оставляем дефолтные "—"
         pass
 
-    stats_lines = [
-        f"Фото: {active_count_text} активная",
-        f"Рейтинг: {active_rating_text}",
-        f"Можно оценить: {can_rate_text}",
-    ]
+    # Ссылка на канал
+    if isinstance(REQUIRED_CHANNEL_ID, str) and REQUIRED_CHANNEL_ID.startswith("@"):
+        channel_link = f"https://t.me/{REQUIRED_CHANNEL_ID.lstrip('@')}"
+    else:
+        channel_link = "https://t.me/nyqcreative"
 
-    stats_block = "\n".join(stats_lines)
+    title_prefix = "💎 " if is_premium else ""
 
     lines: list[str] = []
-    greet_prefix = "💎 " if is_premium else ""
-    lines.append(f"{greet_prefix}Привет, {safe_name}")
-    lines.append(stats_block)
+    lines.append(f"{title_prefix}🦒 GlowShot — Photography")
+    lines.append(f"Имя: {safe_name}")
+    lines.append("")
 
-    # Рекламный блок — только не премиум, и всегда показываем
-    if not is_premium:
-        promos = [
-            "🆕 Новость: скоро появятся новые итоги и больше топов 🏁",
-            "💎 Хочешь больше возможностей? Премиум скоро станет ещё круче.",
-            "💎 Премиум даёт 2 активные фотки и расширенную статистику.",
-            "💎 Поддержи проект — получи удобные фичи и меньше ограничений.",
-            "💎 Премиум: больше слотов, больше топов, больше кайфа.",
-        ]
-        lines.append("")
-        lines.append("<b>Рекламный блок:</b>")
-        lines.append(random.choice(promos))
+    lines.append(f"Можно оценить: {can_rate_text}")
+    lines.append(f"Ты {rated_verb}: {rated_by_me_text}")
 
-    # Премиум блок — только премиум, и только если есть обновления
-    if is_premium and PREMIUM_WEEKLY_UPDATES:
+    lines.append("")
+    lines.append("📄 <b>Рекламный блок:</b>")
+    lines.append(f"• Подпишись на наш телеграм канал: {channel_link}")
+    # рандомная вторая строка (всегда)
+    if AD_LINES:
+        lines.append(f"• {random.choice(AD_LINES)}")
+
+    if NEWS_ITEMS:
         lines.append("")
-        lines.append("<b>Премиум блок:</b>")
-        for upd in PREMIUM_WEEKLY_UPDATES:
-            lines.append(f"• {html.escape(str(upd), quote=False)}")
+        lines.append("👨‍💻 <b>Новости:</b>")
+        for item in NEWS_ITEMS[:5]:
+            lines.append(f"• {html.escape(str(item), quote=False)}")
+
+    lines.append("")
+    lines.append("Публикуй · Оценивай · Побеждай")
 
     return "\n".join(lines)
 
