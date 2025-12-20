@@ -6,7 +6,8 @@ from __future__ import annotations
 # ==== АДМИНКА: ПОЛЬЗОВАТЕЛИ ==================================
 # =============================================================
 
-from datetime import datetime
+from datetime import datetime, timedelta
+import html
 
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
@@ -25,15 +26,13 @@ from database import (
     get_awards_for_user,
     get_today_photo_for_user,
     get_photo_admin_stats,
+    get_premium_users,
+    set_user_premium_status,
 )
 
 from .common import (
     _ensure_admin,
-    UserAdminStates,
 )
-
-from .common import _ensure_admin
-
 
 router = Router()
 
@@ -61,6 +60,7 @@ async def _edit_user_prompt_or_answer(
                 message_id=msg_id,
                 text=text,
                 reply_markup=reply_markup,
+                parse_mode="HTML",
             )
             return
         except Exception:
@@ -74,6 +74,7 @@ async def _edit_user_prompt_or_answer(
                     chat_id=chat_id,
                     text=text,
                     reply_markup=reply_markup,
+                    parse_mode="HTML",
                 )
                 await state.update_data(
                     user_prompt_chat_id=sent.chat.id,
@@ -85,7 +86,7 @@ async def _edit_user_prompt_or_answer(
 
     # fallback: ответить и запомнить
     try:
-        sent = await message.answer(text, reply_markup=reply_markup)
+        sent = await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
         await state.update_data(
             user_prompt_chat_id=sent.chat.id,
             user_prompt_msg_id=sent.message_id,
@@ -141,15 +142,86 @@ async def _find_user_by_identifier(identifier: str) -> dict | None:
         return None
 
 
+# -------------------- Premium helpers --------------------
+
+def build_premium_menu_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Список", callback_data="admin:premium:list")
+    kb.button(text="➕ Выдать", callback_data="admin:premium:grant")
+    kb.button(text="➖ Убрать", callback_data="admin:premium:revoke")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 2)
+    return kb.as_markup()
+
+
+def _parse_premium_until(raw: str) -> str | None:
+    """days ('30') OR date ('31.12.2025') OR empty => None"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+
+    if s.isdigit():
+        days = int(s)
+        if days <= 0:
+            return None
+        until = datetime.now() + timedelta(days=days)
+        return until.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+
+    try:
+        dt = datetime.strptime(s, "%d.%m.%Y")
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=0)
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
+async def _edit_premium_prompt_or_answer(
+    message: Message,
+    state: FSMContext,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Keep one service message for Premium section to prevent spam."""
+    data = await state.get_data()
+    chat_id = data.get("premium_prompt_chat_id")
+    msg_id = data.get("premium_prompt_msg_id")
+
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+            return
+        except Exception:
+            try:
+                await message.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+
+    try:
+        sent = await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+        await state.update_data(premium_prompt_chat_id=sent.chat.id, premium_prompt_msg_id=sent.message_id)
+    except Exception:
+        pass
+
+
 # =============================================================
 # ==== FSM СТЕЙТЫ (пользователи) ===============================
 # =============================================================
 
 
 class UserAdminStates(StatesGroup):
-    """FSM для раздела «Пользователи»."""
-
     waiting_identifier_for_profile = State()
+
+class PremiumAdminStates(StatesGroup):
+    waiting_identifier_for_grant = State()
+    waiting_premium_until = State()
+    waiting_identifier_for_revoke = State()
+
 
 
 # =============================================================
@@ -181,9 +253,9 @@ async def admin_users_menu(callback: CallbackQuery, state: FSMContext):
     kb.adjust(1)
 
     try:
-        msg = await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        msg = await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
-        msg = await callback.message.answer(text, reply_markup=kb.as_markup())
+        msg = await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     await state.update_data(
         user_prompt_chat_id=msg.chat.id,
@@ -436,7 +508,7 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
         kb.adjust(1, 1)
 
         try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup())
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except Exception:
             await callback.message.answer(text, reply_markup=kb.as_markup())
 
@@ -445,10 +517,10 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
 
     stats = await get_photo_admin_stats(photo["id"])
 
-    title = (photo.get("title") or "Без названия").strip()
-    device_type = (photo.get("device_type") or "").strip()
-    device_info = (photo.get("device_info") or "").strip()
-    description = (photo.get("description") or "").strip()
+    title = html.escape((photo.get("title") or "Без названия").strip(), quote=False)
+    device_type = html.escape((photo.get("device_type") or "").strip(), quote=False)
+    device_info = html.escape((photo.get("device_info") or "").strip(), quote=False)
+    description = html.escape((photo.get("description") or "").strip(), quote=False)
     created_at = photo.get("created_at")
     moderation_status = (photo.get("moderation_status") or "active").strip()
 
@@ -522,6 +594,7 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
             caption=caption,
             reply_markup=kb.as_markup(),
             disable_notification=True,
+            parse_mode="HTML",
         )
 
         await state.update_data(
@@ -660,9 +733,9 @@ async def admin_users_stats(callback: CallbackQuery, state: FSMContext):
     kb.adjust(1, 1)
 
     try:
-        await callback.message.edit_text("\n".join(text_lines), reply_markup=kb.as_markup())
+        await callback.message.edit_text("\n".join(text_lines), reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
-        await callback.message.answer("\n".join(text_lines), reply_markup=kb.as_markup())
+        await callback.message.answer("\n".join(text_lines), reply_markup=kb.as_markup(), parse_mode="HTML")
 
     await callback.answer()
 
@@ -685,3 +758,239 @@ async def admin_users_unban(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "admin:users:limit")
 async def admin_users_limit(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Ограничить доступ — пока заглушка.", show_alert=True)
+
+
+# ===============================================================
+# ============== ПОЛЬЗОВАТЕЛИ: ПРЕМИУМ ==========================
+# ===============================================================
+
+
+@router.callback_query(F.data == "admin:premium")
+async def admin_premium_menu(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    await state.clear()
+
+    text = (
+        "<b>Премиум</b>\n\n"
+        "• 📋 Список — текущие премиум-пользователи\n"
+        "• ➕ Выдать — по @username/ID и сроку\n"
+        "• ➖ Убрать — снять премиум\n"
+    )
+
+    try:
+        msg = await callback.message.edit_text(text, reply_markup=build_premium_menu_kb(), parse_mode="HTML")
+    except Exception:
+        msg = await callback.message.answer(text, reply_markup=build_premium_menu_kb(), parse_mode="HTML")
+
+    await state.update_data(premium_prompt_chat_id=msg.chat.id, premium_prompt_msg_id=msg.message_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:list")
+async def admin_premium_list(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    users = await get_premium_users()
+    if not users:
+        text = "Сейчас нет ни одного премиум-пользователя."
+    else:
+        lines = ["<b>Премиум-пользователи</b>", ""]
+        for u in users[:200]:
+            uname = u.get("username")
+            label = f"@{uname}" if uname else (u.get("name") or "Без имени")
+            label = html.escape(str(label), quote=False)
+
+            until = u.get("premium_until")
+            if until:
+                try:
+                    until_str = datetime.fromisoformat(until).strftime("%d.%m.%Y")
+                    lines.append(f"• {label} — до {until_str}")
+                except Exception:
+                    lines.append(f"• {label} — до {html.escape(str(until), quote=False)}")
+            else:
+                lines.append(f"• {label} — бессрочно")
+
+        text = "\n".join(lines)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:grant")
+async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    await state.clear()
+    await state.set_state(PremiumAdminStates.waiting_identifier_for_grant)
+
+    text = (
+        "➕ <b>Выдать премиум</b>\n\n"
+        "Отправь Telegram ID или @username пользователя.\n"
+        "Пример: <code>123456789</code> или <code>@username</code>."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
+    await callback.answer()
+
+
+@router.message(PremiumAdminStates.waiting_identifier_for_grant, F.text)
+async def admin_premium_grant_get_user(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    ident = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    u = await _find_user_by_identifier(ident)
+    if not u:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔁 Попробовать снова", callback_data="admin:premium:grant")
+        kb.button(text="⬅️ Назад", callback_data="admin:premium")
+        kb.adjust(1)
+        await _edit_premium_prompt_or_answer(message, state, "Пользователь не найден.", kb.as_markup())
+        return
+
+    await state.update_data(pending_premium_user=u)
+    await state.set_state(PremiumAdminStates.waiting_premium_until)
+
+    text = (
+        "💎 <b>Срок премиума</b>\n\n"
+        "Введи срок:\n"
+        "• число дней (например <code>30</code>)\n"
+        "или\n"
+        "• дату окончания <code>31.12.2025</code>\n\n"
+        "Если отправишь пусто — будет бессрочно."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.adjust(1)
+
+    await _edit_premium_prompt_or_answer(message, state, text, kb.as_markup())
+
+
+@router.message(PremiumAdminStates.waiting_premium_until, F.text)
+async def admin_premium_grant_set_until(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    u = data.get("pending_premium_user")
+    if not u or not u.get("tg_id"):
+        await state.clear()
+        await _edit_premium_prompt_or_answer(message, state, "Сессия сбилась. Открой «Премиум» заново.", build_premium_menu_kb())
+        return
+
+    tg_id = int(u["tg_id"])
+    premium_until = _parse_premium_until(raw)
+
+    # ВАЖНО: await, иначе “пишет выдано, но не выдано”
+    await set_user_premium_status(tg_id, True, premium_until=premium_until)
+
+    until_text = "бессрочно"
+    if premium_until:
+        try:
+            until_text = "до " + datetime.fromisoformat(premium_until).strftime("%d.%m.%Y")
+        except Exception:
+            until_text = html.escape(str(premium_until), quote=False)
+
+    label = f"@{u.get('username')}" if u.get("username") else (u.get("name") or "Без имени")
+    label = html.escape(str(label), quote=False)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Список", callback_data="admin:premium:list")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.adjust(1)
+
+    await state.clear()
+    await _edit_premium_prompt_or_answer(message, state, f"✅ Премиум выдан: <b>{label}</b>\nСрок: <b>{until_text}</b>", kb.as_markup())
+
+
+@router.callback_query(F.data == "admin:premium:revoke")
+async def admin_premium_revoke(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    await state.clear()
+    await state.set_state(PremiumAdminStates.waiting_identifier_for_revoke)
+
+    text = (
+        "➖ <b>Снять премиум</b>\n\n"
+        "Отправь Telegram ID или @username пользователя.\n"
+        "Пример: <code>123456789</code> или <code>@username</code>."
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+
+    await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
+    await callback.answer()
+
+
+@router.message(PremiumAdminStates.waiting_identifier_for_revoke, F.text)
+async def admin_premium_revoke_do(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    ident = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    u = await _find_user_by_identifier(ident)
+    if not u or not u.get("tg_id"):
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔁 Попробовать снова", callback_data="admin:premium:revoke")
+        kb.button(text="⬅️ Назад", callback_data="admin:premium")
+        kb.adjust(1)
+        await _edit_premium_prompt_or_answer(message, state, "Пользователь не найден.", kb.as_markup())
+        return
+
+    tg_id = int(u["tg_id"])
+
+    # ВАЖНО: await
+    await set_user_premium_status(tg_id, False, premium_until=None)
+
+    label = f"@{u.get('username')}" if u.get("username") else (u.get("name") or "Без имени")
+    label = html.escape(str(label), quote=False)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="📋 Список", callback_data="admin:premium:list")
+    kb.adjust(1)
+
+    await state.clear()
+    await _edit_premium_prompt_or_answer(message, state, f"✅ Премиум снят: <b>{label}</b>", kb.as_markup())

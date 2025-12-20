@@ -58,7 +58,6 @@ class RoleStates(StatesGroup):
     """FSM для управления ролями."""
     waiting_user_for_add = State()
     waiting_user_for_remove = State()
-    waiting_premium_until = State()  # дни или дата окончания
 
 
 # =============================================================
@@ -114,7 +113,6 @@ def build_roles_menu_kb() -> InlineKeyboardMarkup:
     kb.button(text="🛡 Модераторы", callback_data="admin:roles:moderator")
     kb.button(text="🤝 Помощники", callback_data="admin:roles:helper")
     kb.button(text="👨‍💻 Поддержка", callback_data="admin:roles:support")
-    kb.button(text="💎 Премиум", callback_data="admin:roles:premium")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
     return kb.as_markup()
@@ -258,12 +256,6 @@ ROLE_CONFIG = {
         "get_list": get_support_users,  # -> list[int]
         "set_func": set_user_support_by_tg_id,
     },
-    "premium": {
-        "title": "Премиум",
-        "name_single": "премиум",
-        "get_list": get_premium_users,  # -> list[dict]
-        "set_func": set_user_premium_role_by_tg_id,
-    },
 }
 
 
@@ -285,7 +277,6 @@ async def admin_roles_menu(callback: CallbackQuery, state: FSMContext):
         "• 🛡 Модераторы — следят за контентом и жалобами\n"
         "• 🤝 Помощники — помогают с ручными задачами, тестами и проверками\n"
         "• 👨‍💻 Поддержка — отвечают пользователям в саппорт-боте\n"
-        "• 💎 Премиум — пользователи с платными возможностями\n\n"
         "Выбери роль ниже."
     )
 
@@ -501,7 +492,7 @@ async def roles_add_user(message: Message, state: FSMContext):
 
     # остальные роли
     try:
-        cfg["set_func"](tg_id, True)
+        await cfg["set_func"](tg_id, True)
     except Exception:
         kb = InlineKeyboardBuilder()
         kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
@@ -613,7 +604,7 @@ async def roles_remove_user(message: Message, state: FSMContext):
             set_user_premium_role_by_tg_id(tg_id, False)
             set_user_premium_status(tg_id, False, premium_until=None)
         else:
-            cfg["set_func"](tg_id, False)
+            await cfg["set_func"](tg_id, False)
     except Exception:
         kb = InlineKeyboardBuilder()
         kb.button(text="⬅️ Назад", callback_data=f"admin:roles:{role_code}")
