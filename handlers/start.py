@@ -194,7 +194,7 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
         pass
 
     stats_lines = [
-        f"Фото: {active_count_text} активная ({can_change_text})",
+        f"Фото: {active_count_text} активная",
         f"Рейтинг: {active_rating_text}",
         f"Можно оценить: {can_rate_text}",
     ]
