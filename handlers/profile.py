@@ -1,4 +1,5 @@
 from aiogram import Router, F
+import html
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -81,7 +82,8 @@ async def build_profile_view(user: dict):
     """
     Собирает основной вид профиля с новой структурой и реальными данными.
     """
-    name = user.get("name") or "—"
+    name_raw = user.get("name") or "—"
+    name = html.escape(str(name_raw), quote=False)
     age = user.get("age")
     age_part = f", {age}" if age else ""
 
@@ -152,7 +154,7 @@ async def build_profile_view(user: dict):
         try:
             popular = await get_most_popular_photo_for_user(user_id)
             if popular:
-                popular_photo_title = popular.get("title") or "Без названия"
+                popular_photo_title = html.escape(str(popular.get("title") or "Без названия"), quote=False)
                 ratings_count = popular.get("ratings_count") or 0
                 avg_pop = popular.get("avg_rating")
                 if avg_pop is not None:
@@ -280,7 +282,7 @@ async def build_profile_view(user: dict):
     text_lines.extend([
         "",
         "📝 <b>Описание:</b>",
-        user.get("bio") or "—",
+        html.escape(str(user.get("bio") or "—"), quote=False),
         "",
     ])
 
@@ -292,9 +294,10 @@ async def build_profile_view(user: dict):
         f"Самое популярное фото: {popular_photo_title} ({popular_photo_metric})",
     ]
 
-    stats_text = "\n".join([f"▌ {line}" for line in stats_lines])
-    text_lines.append("📊 <b>Моя статистика</b> (нажми, чтобы раскрыть)")
-    text_lines.append(f'<span class="tg-spoiler">{stats_text}</span>')
+    # --- Статистика как цитата ---
+    stats_body = "\n".join([html.escape(line, quote=False) for line in stats_lines])
+    text_lines.append("📊 <b>Моя статистика</b>")
+    text_lines.append(f"<blockquote expandable>{stats_body}</blockquote>")
 
     # Premium
     text_lines.extend([
