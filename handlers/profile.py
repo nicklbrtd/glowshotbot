@@ -42,6 +42,8 @@ class ProfileEditStates(StatesGroup):
     waiting_new_bio = State()
     waiting_new_channel = State()
     waiting_new_city = State()
+    # legacy: country is derived from city, but keep state to avoid crashes from old callbacks
+    waiting_new_country = State()
 
 
 
@@ -652,7 +654,11 @@ async def profile_set_city(message: Message, state: FSMContext):
 async def profile_edit_country(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
-            await callback.message.edit_text(
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    # Country is derived from city now; manual editing is disabled
+    await callback.message.edit_text(
         "🌍 <b>Страна</b>\n\n"
         "Страна определяется автоматически по городу.\n"
         "Чтобы изменить страну — просто измени город 🏙✨",
@@ -660,18 +666,15 @@ async def profile_edit_country(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
     )
     await callback.answer()
-    return
 
 
 @router.callback_query(F.data == "profile:country:change")
 async def profile_country_change(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(ProfileEditStates.waiting_new_country)
-    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
     await callback.message.edit_text(
         "🌍 <b>Страна</b>\n\n"
-        "Введи страну одним сообщением. Можно с маленькой буквы/опечаткой — я постараюсь распознать.\n\n"
-        "Если хочешь убрать — напиши <code>удалить</code>.",
-        reply_markup=build_back_kb(callback_data="profile:edit_country", text="⬅️ Назад"),
+        "Страна определяется автоматически по городу.\n"
+        "Чтобы изменить страну — просто измени город 🏙✨",
+        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -679,88 +682,35 @@ async def profile_country_change(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "profile:country:delete")
 async def profile_country_delete(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    if user and user.get("id"):
-        await update_user_country(int(user["id"]), None)
-
-    user = await get_user_by_tg_id(callback.from_user.id)
-    await callback.message.edit_text("🌍 Страна удалена.", reply_markup=_build_country_kb(user or {}), parse_mode="HTML")
-    await callback.answer("Готово!")
+    await callback.message.edit_text(
+        "🌍 <b>Страна</b>\n\n"
+        "Страна определяется автоматически по городу.\n"
+        "Чтобы изменить страну — просто измени город 🏙✨",
+        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        parse_mode="HTML",
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "profile:country:toggle")
 async def profile_country_toggle(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    if user and user.get("id"):
-        current = bool(user.get("show_country", 1))
-        await set_user_country_visibility(int(user["id"]), not current)
-
-    user = await get_user_by_tg_id(callback.from_user.id)
-    country = (user.get("country") or "").strip() or "—"
-    show_country = bool(user.get("show_country", 1))
-    vis = "показана" if show_country else "скрыта"
-
-    text = (
+    await callback.message.edit_text(
         "🌍 <b>Страна</b>\n\n"
-        f"Текущая: <b>{country}</b>\n"
-        f"Отображение в профиле: <b>{vis}</b>\n"
+        "Страна определяется автоматически по городу.\n"
+        "Чтобы изменить страну — просто измени город 🏙✨",
+        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        parse_mode="HTML",
     )
-    await callback.message.edit_text(text, reply_markup=_build_country_kb(user), parse_mode="HTML")
-    await callback.answer("Ок!")
+    await callback.answer()
 
 
 @router.message(ProfileEditStates.waiting_new_country, F.text)
 async def profile_set_country(message: Message, state: FSMContext):
-    data = await state.get_data()
-    edit_msg_id = data.get("edit_msg_id")
-    edit_chat_id = data.get("edit_chat_id")
-
-    raw = (message.text or "").strip()
-
-    if raw.lower() in ("удалить", "delete", "remove"):
-        u = await get_user_by_tg_id(message.from_user.id)
-        if u and u.get("id"):
-            await update_user_country(int(u["id"]), None)
-        await state.clear()
-        await message.delete()
-        user = await get_user_by_tg_id(message.from_user.id)
-        text, markup = await build_profile_view(user)
-        await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup, parse_mode="HTML")
-        return
-
-    if has_links_or_usernames(raw) or has_promo_channel_invite(raw) or not raw:
-        await message.delete()
-        return
-
-    # Validate + normalize country (global)
-    is_ok, canonical, _used_geocoder = await validate_place("country", raw)
-    if not is_ok:
-        await message.delete()
-        try:
-            await message.bot.edit_message_text(
-                chat_id=edit_chat_id,
-                message_id=edit_msg_id,
-                text=(
-                    "❌ Не могу найти такую страну.\n\n"
-                    "Попробуй написать точнее, например: <code>Россия</code>, <code>Germany</code>, <code>Italia</code>."
-                ),
-                reply_markup=build_back_kb(callback_data="profile:edit_country", text="⬅️ Назад"),
-                parse_mode="HTML",
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-        return
-
-    u = await get_user_by_tg_id(message.from_user.id)
-    if u and u.get("id"):
-        await update_user_country(int(u["id"]), canonical)
-
     await state.clear()
-    await message.delete()
-    user = await get_user_by_tg_id(message.from_user.id)
-    text, markup = await build_profile_view(user)
-    await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup, parse_mode="HTML")
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 # Handler to set channel link for premium users
