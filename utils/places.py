@@ -12,6 +12,13 @@ _RU_CITY_FIXES = {
     "oryol": "Орёл",
 }
 
+_RU_CITY_TO_COUNTRY = {
+    "орел": "Россия",
+    "орёл": "Россия",
+    "orel": "Россия",
+    "oryol": "Россия",
+}
+
 _RU_COUNTRY_FIXES = {
     "росия": "Россия",
     "россия": "Россия",
@@ -20,6 +27,8 @@ _RU_COUNTRY_FIXES = {
 }
 
 _CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
+
+_CACHE_CC: dict[tuple[str], tuple[float, bool, str, str, bool]] = {}
 _TTL = 60 * 60 * 24 * 7  # 7 дней
 
 # чтобы не долбить Nominatim параллельно
@@ -205,3 +214,98 @@ async def validate_place(kind: str, raw: str) -> tuple[bool, str, bool]:
     ok = best_score >= 0.72
     _CACHE[ck] = (now, ok, canonical)
     return ok, canonical, True
+
+
+# --- New: validate_city_and_country ---
+
+async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
+    """Validate and normalize a city, and also infer the country.
+
+    returns: (ok, canonical_city, canonical_country, used_geocoder)
+
+    If the geocoder is unavailable, returns ok=True with normalized city and empty country
+    (so UX doesn't break and we don't overwrite user's existing country with junk).
+    """
+    raw = _norm_spaces(raw)
+    if not raw:
+        return False, "", "", False
+
+    if len(raw) > 64:
+        return False, "", "", False
+
+    if re.search(r"\d", raw):
+        return False, "", "", False
+
+    if re.search(r"[<>@#$/\\{}\[\]|~`^*=+]", raw):
+        return False, "", "", False
+
+    cmp = _cmp_key(raw)
+
+    # Quick fixes for popular typos
+    if cmp in _RU_CITY_FIXES:
+        city = _RU_CITY_FIXES[cmp]
+        country = _RU_CITY_TO_COUNTRY.get(cmp, "")
+        return True, city, country, False
+
+    now = time.time()
+    ck = (cmp,)
+    if ck in _CACHE_CC:
+        ts, ok, city, country, used_geo = _CACHE_CC[ck]
+        if (now - ts) < _TTL:
+            return ok, city, country, used_geo
+
+    query = _title_case(raw)
+
+    try:
+        results = await _nominatim_search(query, limit=5)
+    except Exception:
+        # API down -> don't block the user, but don't overwrite country
+        _CACHE_CC[ck] = (now, True, query, "", False)
+        return True, query, "", False
+
+    if not results:
+        _CACHE_CC[ck] = (now, False, query, "", True)
+        return False, query, "", True
+
+    best_city = None
+    best_country = None
+    best_score = 0.0
+
+    for pass_no in (1, 2):
+        for r in results:
+            if pass_no == 1 and not _passes_kind_filter("city", r):
+                continue
+
+            addr = r.get("address") or {}
+            cand_city = _best_city(addr)
+            cand_country = _best_country(addr)
+
+            if not cand_city:
+                cand_city = (r.get("display_name") or "").split(",", 1)[0].strip() or None
+
+            if not cand_city:
+                continue
+
+            score = difflib.SequenceMatcher(a=_cmp_key(raw), b=_cmp_key(cand_city)).ratio()
+            if score > best_score:
+                best_score = score
+                best_city = cand_city
+                best_country = cand_country
+
+        if best_city is not None:
+            break
+
+    canonical_city = _title_case(best_city or query)
+    canonical_country = _title_case(best_country or "")
+
+    # Ё / common RU fixes
+    if _cmp_key(canonical_city) == "орел":
+        canonical_city = "Орёл"
+        canonical_country = canonical_country or "Россия"
+
+    if _cmp_key(canonical_country) in ("россия", "росия"):
+        canonical_country = "Россия"
+
+    ok = best_score >= 0.72
+    _CACHE_CC[ck] = (now, ok, canonical_city, canonical_country, True)
+    return ok, canonical_city, canonical_country, True

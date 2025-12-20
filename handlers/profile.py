@@ -32,7 +32,7 @@ from database import (
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
-from utils.places import validate_place
+from utils.places import validate_place, validate_city_and_country
 
 router = Router()
 
@@ -574,6 +574,7 @@ async def profile_set_city(message: Message, state: FSMContext):
         u = await get_user_by_tg_id(message.from_user.id)
         if u and u.get("id"):
             await update_user_city(int(u["id"]), None)
+            await update_user_country(int(u["id"]), None)
         await state.clear()
         await message.delete()
         user = await get_user_by_tg_id(message.from_user.id)
@@ -585,8 +586,8 @@ async def profile_set_city(message: Message, state: FSMContext):
         await message.delete()
         return
 
-    # Validate + normalize city (global, not only RU)
-    is_ok, canonical, _used_geocoder = await validate_place("city", raw)
+    # Validate + normalize city + infer country
+    is_ok, canonical_city, canonical_country, _used_geocoder = await validate_city_and_country(raw)
     if not is_ok:
         await message.delete()
         try:
@@ -608,7 +609,10 @@ async def profile_set_city(message: Message, state: FSMContext):
 
     u = await get_user_by_tg_id(message.from_user.id)
     if u and u.get("id"):
-        await update_user_city(int(u["id"]), canonical)
+        await update_user_city(int(u["id"]), canonical_city)
+        # Auto-update country if we could infer it
+        if canonical_country:
+            await update_user_country(int(u["id"]), canonical_country)
 
     await state.clear()
     await message.delete()
