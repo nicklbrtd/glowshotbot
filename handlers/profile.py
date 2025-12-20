@@ -887,7 +887,9 @@ async def profile_set_name(message: Message, state: FSMContext):
                 raise
         return
 
-    await update_user_name(message.from_user.id, new_name)
+    u = await get_user_by_tg_id(message.from_user.id)
+    if u and u.get("id"):
+        await update_user_name(int(u["id"]), new_name)
     await state.clear()
     await message.delete()
 
@@ -928,7 +930,9 @@ async def profile_set_gender(callback: CallbackQuery):
         "na": "Не важно",
     }
     gender = mapping.get(code, "Не важно")
-    await update_user_gender(callback.from_user.id, gender)
+    u = await get_user_by_tg_id(callback.from_user.id)
+    if u and u.get("id"):
+        await update_user_gender(int(u["id"]), gender)
 
     user = await get_user_by_tg_id(callback.from_user.id)
     text, markup = await build_profile_view(user)
@@ -959,7 +963,9 @@ async def profile_age_clear(callback: CallbackQuery, state: FSMContext):
     edit_msg_id = data.get("edit_msg_id", callback.message.message_id)
     edit_chat_id = data.get("edit_chat_id", callback.message.chat.id)
 
-    await update_user_age(callback.from_user.id, None)
+    u = await get_user_by_tg_id(callback.from_user.id)
+    if u and u.get("id"):
+        await update_user_age(int(u["id"]), None)
     await state.clear()
 
     user = await get_user_by_tg_id(callback.from_user.id)
@@ -1007,7 +1013,9 @@ async def profile_set_age(message: Message, state: FSMContext):
         )
         return
 
-    await update_user_age(message.from_user.id, age)
+    u = await get_user_by_tg_id(message.from_user.id)
+    if u and u.get("id"):
+        await update_user_age(int(u["id"]), age)
     await state.clear()
     await message.delete()
 
@@ -1077,7 +1085,9 @@ async def profile_set_bio(message: Message, state: FSMContext):
                 raise
         return
 
-    await update_user_bio(message.from_user.id, bio)
+    u = await get_user_by_tg_id(message.from_user.id)
+    if u and u.get("id"):
+        await update_user_bio(int(u["id"]), bio)
     await state.clear()
     await message.delete()
 
