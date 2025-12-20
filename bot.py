@@ -23,6 +23,7 @@ from handlers import (
     premium,
     payments,
     referrals,
+    linklike,
 )
 
 
@@ -146,6 +147,7 @@ async def main() -> None:
     dp.update.middleware(ErrorsToDbMiddleware())
 
     # Роутеры
+    dp.include_router(linklike.router)
     dp.include_router(start.router)
     dp.include_router(registration.router)
     dp.include_router(profile.router)

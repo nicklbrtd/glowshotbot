@@ -5,7 +5,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, SkipHandler
 from aiogram.types import InlineKeyboardMarkup
 from utils.time import get_moscow_now
 
@@ -158,6 +158,10 @@ async def cmd_start(message: Message, state: FSMContext):
         parts = message.text.split(maxsplit=1)
         if len(parts) == 2:
             payload = parts[1].strip()
+    # Deep-link "Оценки по ссылке" (/start rate_CODE) is handled in handlers/linklike.py.
+    # If we handle it here, non-registered users won't be able to rate.
+    if payload and payload.startswith("rate_"):
+        raise SkipHandler
     if payload in ("payment_success", "payment_fail"):
         user = await get_user_by_tg_id(message.from_user.id)
 

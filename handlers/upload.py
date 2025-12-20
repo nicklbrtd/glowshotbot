@@ -8,7 +8,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, SkipHandler
 
 from database import (
     get_user_by_tg_id,
@@ -211,6 +211,10 @@ def build_my_photo_caption(photo: dict) -> str:
 
 def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+
+    rows.append([
+        InlineKeyboardButton(text="🔗 Поделиться", callback_data=f"myphoto:share:{photo_id}"),
+    ])
 
     rows.append([
         InlineKeyboardButton(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}:0"),

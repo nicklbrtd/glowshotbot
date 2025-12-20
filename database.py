@@ -158,18 +158,13 @@ async def get_photo_rank_in_day(photo_id: int, day_key: str) -> int | None:
 
 
 async def get_link_ratings_count_for_photo(photo_id: int) -> int:
-    """Placeholder for 'Оценки по ссылке'.
-
-    If a future table exists (e.g. link_ratings), this will start returning real counts.
-    For now, safely returns 0.
-    """
     p = _assert_pool()
-    try:
-        async with p.acquire() as conn:
-            v = await conn.fetchval("SELECT COUNT(*) FROM link_ratings WHERE photo_id=$1", int(photo_id))
-        return int(v or 0)
-    except Exception:
-        return 0
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT COUNT(*) FROM ratings WHERE photo_id=$1 AND source='link'",
+            int(photo_id),
+        )
+    return int(v or 0)
 
 
 async def get_photo_skip_count_for_photo(photo_id: int) -> int:
@@ -470,16 +465,30 @@ async def ensure_schema() -> None:
             );
             """
         )
-
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS photo_share_links (
+                code TEXT PRIMARY KEY,
+                owner_tg_id BIGINT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
 
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_owner ON photo_share_links(owner_tg_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_active ON photo_share_links(is_active);")
 
         # migration: users.city/country + flags (до индексов!)
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_city INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_country INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'feed';")
+        await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source_code TEXT;")
 
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_city ON users(city);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at ON bot_error_logs(created_at);")
@@ -2486,3 +2495,107 @@ async def get_photo_admin_stats(photo_id: int) -> dict:
         "comments_count": comments_count,
     }
 
+
+async def ensure_user_minimal_row(tg_id: int, username: str | None = None) -> dict | None:
+    return await _ensure_user_row(int(tg_id), username=username)
+
+def _make_share_code(n: int = 10) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(random.choice(alphabet) for _ in range(n))
+
+async def get_or_create_share_link_code(owner_tg_id: int) -> str:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT code FROM photo_share_links
+            WHERE owner_tg_id=$1 AND is_active=1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            int(owner_tg_id),
+        )
+    if v:
+        return str(v)
+
+    now = get_moscow_now_iso()
+    for _ in range(10):
+        code = _make_share_code(10)
+        try:
+            async with p.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO photo_share_links (code, owner_tg_id, is_active, created_at) VALUES ($1,$2,1,$3)",
+                    code, int(owner_tg_id), now
+                )
+            return code
+        except Exception:
+            continue
+
+    code = _make_share_code(14)
+    async with p.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO photo_share_links (code, owner_tg_id, is_active, created_at) VALUES ($1,$2,1,$3)",
+            code, int(owner_tg_id), now
+        )
+    return code
+
+async def refresh_share_link_code(owner_tg_id: int) -> str:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE photo_share_links SET is_active=0 WHERE owner_tg_id=$1 AND is_active=1",
+            int(owner_tg_id),
+        )
+    return await get_or_create_share_link_code(owner_tg_id)
+
+async def get_owner_tg_id_by_share_code(code: str) -> int | None:
+    c = (code or "").strip()
+    if not c:
+        return None
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT owner_tg_id FROM photo_share_links WHERE code=$1 AND is_active=1",
+            c,
+        )
+    return int(v) if v is not None else None
+
+async def get_active_photo_for_owner_tg_id(owner_tg_id: int) -> dict | None:
+    owner = await get_user_by_tg_id(int(owner_tg_id))
+    if not owner:
+        return None
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM photos
+            WHERE user_id=$1 AND is_deleted=0 AND moderation_status='active'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            int(owner["id"]),
+        )
+    return dict(row) if row else None
+
+async def add_rating_by_tg_id(*, photo_id: int, rater_tg_id: int, value: int, source: str="feed", source_code: str|None=None) -> bool:
+    if value < 1 or value > 10:
+        return False
+    u = await ensure_user_minimal_row(int(rater_tg_id))
+    if not u:
+        return False
+    p = _assert_pool()
+    try:
+        async with p.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ratings (photo_id, user_id, value, source, source_code, created_at)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                """,
+                int(photo_id), int(u["id"]), int(value),
+                str(source or "feed"),
+                str(source_code) if source_code else None,
+                get_moscow_now_iso(),
+            )
+        return True
+    except asyncpg.exceptions.UniqueViolationError:
+        return False
