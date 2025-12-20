@@ -2419,19 +2419,22 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 WHERE ph.user_id = ANY($1::bigint[])
                 GROUP BY ph.id
             )
-            SELECT
-                s.*,
-                CASE
-                    WHEN s.ratings_count > 0
-                        THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
-                    ELSE NULL
-                END::float AS bayes_score
-            FROM stats s
+            SELECT *
+            FROM (
+                SELECT
+                    s.*,
+                    CASE
+                        WHEN s.ratings_count > 0
+                            THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
+                        ELSE NULL
+                    END::float AS bayes_score
+                FROM stats s
+            ) t
             ORDER BY
-                (bayes_score IS NULL) ASC,
-                bayes_score DESC,
-                ratings_count DESC,
-                id ASC
+                (t.bayes_score IS NULL) ASC,
+                t.bayes_score DESC,
+                t.ratings_count DESC,
+                t.id ASC
             LIMIT 1
         """
 
@@ -2448,19 +2451,22 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 WHERE ph.user_id = ANY($1::bigint[])
                 GROUP BY ph.id
             )
-            SELECT
-                s.*,
-                CASE
-                    WHEN s.ratings_count > 0
-                        THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
-                    ELSE NULL
-                END::float AS bayes_score
-            FROM stats s
+            SELECT *
+            FROM (
+                SELECT
+                    s.*,
+                    CASE
+                        WHEN s.ratings_count > 0
+                            THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
+                        ELSE NULL
+                    END::float AS bayes_score
+                FROM stats s
+            ) t
             ORDER BY
-                (bayes_score IS NULL) ASC,
-                bayes_score DESC,
-                ratings_count DESC,
-                id ASC
+                (t.bayes_score IS NULL) ASC,
+                t.bayes_score DESC,
+                t.ratings_count DESC,
+                t.id ASC
             LIMIT 1
         """
 
