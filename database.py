@@ -2351,25 +2351,17 @@ async def get_user_rating_summary(user_id: int) -> dict:
 async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
     """Return user's best photo for profile.
 
-    Robust version:
-    - Accepts either internal users.id OR Telegram tg_id (callers sometimes mix them)
-    - Matches legacy photos rows where photos.user_id might store either users.id or tg_id
-    - Does NOT filter by moderation_status (so pending/other statuses still show)
-    - Uses Bayesian score if ratings exist; otherwise still returns some photo
-    - Retries with a minimal query if some columns are missing in the schema
-
-    Ranking:
-      1) bayes_score desc (if any)
-      2) ratings_count desc
-      3) id asc
+    - Prefer active photos (is_deleted=0)
+    - If none, fallback to archived
+    - bayes_score is computed in SQL (NOT a real DB column)
+    - Supports legacy where photos.user_id could be users.id or tg_id
     """
     p = _assert_pool()
     prior = _bayes_prior_weight()
 
     async with p.acquire() as conn:
-        global_mean, _global_cnt = await _get_global_rating_mean(conn)
+        global_mean, _ = await _get_global_rating_mean(conn)
 
-        # Resolve internal users.id and tg_id without relying on users.is_deleted
         u = await conn.fetchrow(
             """
             SELECT id, tg_id
@@ -2382,24 +2374,47 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
         if not u:
             return None
 
-        uid = u.get("id")
-        tgid = u.get("tg_id")
+        uid = int(u["id"])
+        tgid = int(u["tg_id"])
+        candidate_user_ids = [uid]
+        if tgid not in candidate_user_ids:
+            candidate_user_ids.append(tgid)
 
-        candidate_ids: list[int] = []
-        try:
-            if uid is not None:
-                candidate_ids.append(int(uid))
-        except Exception:
-            pass
-        try:
-            if tgid is not None:
-                tgid_i = int(tgid)
-                if tgid_i not in candidate_ids:
-                    candidate_ids.append(tgid_i)
-        except Exception:
-            pass
+        async def _pick(where_deleted_sql: str):
+            q = f"""
+                WITH s AS (
+                    SELECT
+                        ph.*,
+                        COUNT(r.id)::int AS ratings_count,
+                        COALESCE(SUM(r.value), 0)::float AS ratings_sum,
+                        AVG(r.value)::float AS avg_rating
+                    FROM photos ph
+                    LEFT JOIN ratings r ON r.photo_id = ph.id
+                    WHERE ph.user_id = ANY($1::bigint[])
+                    {where_deleted_sql}
+                    GROUP BY ph.id
+                )
+                SELECT
+                    s.*,
+                    CASE
+                        WHEN s.ratings_count > 0 THEN
+                            ($2::float * $3::float + s.ratings_sum) / ($2::float + s.ratings_count)
+                        ELSE NULL
+                    END AS bayes_score
+                FROM s
+                ORDER BY bayes_score DESC NULLS LAST, ratings_count DESC, id ASC
+                LIMIT 1
+            """
+            return await conn.fetchrow(q, candidate_user_ids, float(prior), float(global_mean))
 
-        if not candidate_ids:
+        try:
+            row = await _pick("AND ph.is_deleted=0")
+            if row:
+                return dict(row)
+
+            row = await _pick("")
+            return dict(row) if row else None
+        except Exception:
             return None
 
         # First try: full stats (may fail if some columns like created_at/file_id don't exist)

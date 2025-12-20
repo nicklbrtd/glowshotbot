@@ -1,5 +1,6 @@
 import os
 import random
+import html
 from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
@@ -8,18 +9,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import InlineKeyboardMarkup
-from utils.time import get_moscow_now
 
-from database import(
-get_user_by_tg_id, 
-is_user_premium_active, 
-save_pending_referral
-)
+import database as db
 from keyboards.common import build_main_menu
 
 router = Router()
 
 REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
+# TODO: заполняй вручную — если пусто, премиум-блок не показывается
+PREMIUM_WEEKLY_UPDATES: list[str] = []
 
 
 def _get_flag(user, key: str) -> bool:
@@ -69,86 +67,188 @@ def build_subscribe_keyboard() -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
-def build_menu_text(is_premium: bool) -> str:
-    """Формирует текст главного меню с таймером до итогов
-    и небольшим рандомным сообщением.
+async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) -> str:
+    """Формирует текст главного меню (персональный)."""
 
-    Для обычных пользователей — базовая реклама премиума.
-    Для премиум‑пользователей — напоминание о доступных возможностях.
-    """
-    now = get_moscow_now()
+    # Имя
+    name = None
+    if user:
+        try:
+            name = user.get("name") or user.get("first_name")
+        except Exception:
+            name = None
+    if not name:
+        name = "друг"
 
-    results_hour = 7
-    results_minute = 0
+    safe_name = html.escape(str(name), quote=False)
 
-    today_results_time = now.replace(
-        hour=results_hour, minute=results_minute, second=0, microsecond=0
-    )
+    # Статы (внутри сворачиваемой цитаты)
+    active_count_text = "—"
+    can_change_text = "—"
+    active_rating_text = "—"
+    can_rate_text = "—"
+    online_text = "—"
+
+    try:
+        # Берём пул из database.py (он у тебя уже есть)
+        p = db._assert_pool()  # type: ignore[attr-defined]
+
+        # Внутренний id пользователя (если есть) + tg_id (на случай легаси)
+        internal_id = None
+        if user:
+            try:
+                internal_id = int(user.get("id"))
+            except Exception:
+                internal_id = None
+
+        candidate_user_ids: list[int] = []
+        if internal_id is not None:
+            candidate_user_ids.append(int(internal_id))
+        candidate_user_ids.append(int(tg_id))
+
+        # Лимит активных фото
+        limit_active = 2 if is_premium else 1
+
+        async with p.acquire() as conn:
+            # Активных фото
+            try:
+                active_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)::int
+                    FROM photos
+                    WHERE user_id = ANY($1::bigint[]) AND is_deleted = 0
+                    """,
+                    candidate_user_ids,
+                )
+                if active_count is None:
+                    active_count = 0
+                active_count_text = str(int(active_count))
+                can_change_text = "можно изменить" if int(active_count) < int(limit_active) else "нельзя изменить"
+            except Exception:
+                pass
+
+            # Рейтинг активной фотки (берём самую свежую активную по id)
+            try:
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        ph.id,
+                        COUNT(r.id)::int AS ratings_count,
+                        AVG(r.value)::float AS avg_rating
+                    FROM photos ph
+                    LEFT JOIN ratings r ON r.photo_id = ph.id
+                    WHERE ph.user_id = ANY($1::bigint[]) AND ph.is_deleted = 0
+                    GROUP BY ph.id
+                    ORDER BY ph.id DESC
+                    LIMIT 1
+                    """,
+                    candidate_user_ids,
+                )
+                if row:
+                    cnt = int(row.get("ratings_count") or 0)
+                    avg = row.get("avg_rating")
+                    if cnt > 0 and avg is not None:
+                        avg_f = float(avg)
+                        avg_s = f"{avg_f:.2f}".rstrip("0").rstrip(".")
+                        active_rating_text = avg_s
+                    elif cnt > 0:
+                        active_rating_text = str(cnt)
+                    else:
+                        active_rating_text = "—"
+            except Exception:
+                pass
+
+            # Можно оценить: фотки, которые пользователь ещё не оценивал
+            try:
+                rater_ids: list[int] = []
+                if internal_id is not None:
+                    rater_ids.append(int(internal_id))
+                rater_ids.append(int(tg_id))
+
+                unrated = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)::int
+                    FROM photos ph
+                    WHERE ph.is_deleted = 0
+                      AND ph.user_id <> ALL($1::bigint[])
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM ratings r
+                        WHERE r.photo_id = ph.id
+                          AND r.user_id = ANY($2::bigint[])
+                      )
+                    """,
+                    candidate_user_ids,
+                    rater_ids,
+                )
+                if unrated is None:
+                    unrated = 0
+                can_rate_text = str(int(unrated))
+            except Exception:
+                pass
+
+            # Онлайн: пробуем несколько распространённых колонок last_active*
+            try:
+                # Порядок важен: пробуем самые вероятные имена
+                candidates = [
+                    "last_active_at",
+                    "last_seen_at",
+                    "last_activity_at",
+                    "last_seen",
+                ]
+                online = None
+                for col in candidates:
+                    try:
+                        online = await conn.fetchval(
+                            f"SELECT COUNT(*)::int FROM users WHERE {col} > (NOW() - INTERVAL '5 minutes')",
+                        )
+                        if online is not None:
+                            break
+                    except Exception:
+                        continue
+
+                if online is not None:
+                    online_text = str(int(online))
+            except Exception:
+                pass
+
+    except Exception:
+        # Если что-то пошло не так — просто оставляем дефолтные "—"
+        pass
+
+    stats_lines = [
+        f"Фото: {active_count_text} активная ({can_change_text})",
+        f"Рейтинг: {active_rating_text}",
+        f"Можно оценить: {can_rate_text}",
+        f"Онлайн: {online_text}",
+    ]
+
+    # Сворачиваемая цитата
+    stats_block = "<blockquote expandable>" + "\n".join(stats_lines) + "</blockquote>"
 
     lines: list[str] = []
-
-    lines.append("<b>GlowShot</b> — бот для любителей фотографии.")
+    lines.append(f"Привет, {safe_name} 👋")
     lines.append("")
+    lines.append(stats_block)
 
-    if now < today_results_time:
-        # До ближайших итогов — в 07:00 по МСК
-        delta = today_results_time - now
-        total_seconds = int(delta.total_seconds())
-        hours_left = total_seconds // 3600
-        minutes_left = (total_seconds % 3600) // 60
-
-        parts: list[str] = []
-        if hours_left > 0:
-            parts.append(f"{hours_left} ч")
-        if minutes_left > 0:
-            parts.append(f"{minutes_left} мин")
-
-        if parts:
-            left_str = " ".join(parts)
-        else:
-            left_str = "меньше минуты"
-
-        lines.append(
-            "Итоги дня подводятся каждый день в <b>07:00 по МСК</b>."
-        )
-        lines.append(f"До ближайших итогов осталось: <b>{left_str}</b>.")
-    else:
-        # Итоги за прошлый день уже есть — подталкиваем посмотреть
-        lines.append("Итоги дня уже подведены — загляни в раздел «Итоги дня» 👇")
-        lines.append(
-            "Следующие итоги будут завтра в <b>07:00 по МСК</b>."
-        )
-
-    lines.append("")
-    lines.append(
-        "Выкладывай, Оценивай и Побеждай.\n"
-        "<b>Группа:</b> @groupofglowshot"
-    )
-
-    # Рекламные блоки
-    non_premium_promos = [
-        "Премиум пока на стадии <b>разработки</b>, но скоро будет доступен!",
-        "С премиум будет можно <b>добавить ссылку на свой телеграм‑канал в профиль!</b>",
-        "С премиум будет можно <b>добавлять две фотографии, а не одну!</b>",
-        "С премиум будет можно <b>оставлять приватные комментарии к фотографиям!</b>",
-        "С премиум будет можно <b>видеть расширенную статистику</b> по своим фотографиям!",
-        "С премиум у вас будет показываться 💎 другим людям!",
-        "Премиум уже доступен, но пока в <b>тестовом режиме:(</b>",
-    ]
-
-    premium_promos = [
-        "У тебя активен <b>GlowShot Премиум</b> - ты крут!",
-        "Ты в GlowShot Премиум: можно добавить ссылку на канал в профиль.",
-    ]
-
-    promos_for_user = premium_promos if is_premium else non_premium_promos
-
-    # Примерно в 1/3 случаев показываем промо
-    if promos_for_user and random.random() < 0.33:
+    # Рекламный блок — только не премиум, и всегда показываем
+    if not is_premium:
+        promos = [
+            "💎 Хочешь больше возможностей? Премиум скоро станет ещё круче.",
+            "💎 Премиум даёт 2 активные фотки и расширенную статистику.",
+            "💎 Поддержи проект — получи удобные фичи и меньше ограничений.",
+            "💎 Премиум: больше слотов, больше топов, больше кайфа.",
+        ]
         lines.append("")
-        lines.append(random.choice(promos_for_user))
+        lines.append("<b>Рекламный блок:</b>")
+        lines.append(random.choice(promos))
 
-    lines.append("")
+    # Премиум блок — только премиум, и только если есть обновления
+    if is_premium and PREMIUM_WEEKLY_UPDATES:
+        lines.append("")
+        lines.append("<b>Премиум блок:</b>")
+        for upd in PREMIUM_WEEKLY_UPDATES:
+            lines.append(f"• {html.escape(str(upd), quote=False)}")
 
     return "\n".join(lines)
 
@@ -164,9 +264,9 @@ async def cmd_start(message: Message, state: FSMContext):
     if payload and payload.startswith("rate_"):
         raise SkipHandler
     if payload in ("payment_success", "payment_fail"):
-        user = await get_user_by_tg_id(message.from_user.id)
+        user = await db.get_user_by_tg_id(message.from_user.id)
 
-        is_premium = await is_user_premium_active(message.from_user.id)
+        is_premium = await db.is_user_premium_active(message.from_user.id)
 
         if payload == "payment_success":
             if is_premium:
@@ -196,7 +296,7 @@ async def cmd_start(message: Message, state: FSMContext):
             is_admin = False
             is_moderator = False
 
-        menu_text = build_menu_text(is_premium=is_premium) + "\n\n" + payment_note
+        menu_text = (await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium)) + "\n\n" + payment_note
         reply_kb = build_main_menu(
             is_admin=is_admin,
             is_moderator=is_moderator,
@@ -233,7 +333,7 @@ async def cmd_start(message: Message, state: FSMContext):
             pass
         return
 
-    user = await get_user_by_tg_id(message.from_user.id)
+    user = await db.get_user_by_tg_id(message.from_user.id)
 
     if user is None:
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
@@ -241,7 +341,7 @@ async def cmd_start(message: Message, state: FSMContext):
             ref_code = payload[4:].strip()
             if ref_code:
                 try:
-                    await save_pending_referral(message.from_user.id, ref_code)
+                    await db.save_pending_referral(message.from_user.id, ref_code)
                 except Exception:
                     pass
 
@@ -269,19 +369,20 @@ async def cmd_start(message: Message, state: FSMContext):
         # флаги ролей
         is_admin = _get_flag(user, "is_admin")
         is_moderator = _get_flag(user, "is_moderator")
-        is_premium = await is_user_premium_active(message.from_user.id)
+        is_premium = await db.is_user_premium_active(message.from_user.id)
 
         chat_id = message.chat.id
         data = await state.get_data()
         menu_msg_id = data.get("menu_msg_id")
 
         sent_message = None
+        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium)
 
         if menu_msg_id:
             # Пытаемся отредактировать уже существующее сообщение меню
             try:
                 await message.bot.edit_message_text(
-                    build_menu_text(is_premium=is_premium),
+                    menu_text,
                     chat_id=chat_id,
                     message_id=menu_msg_id,
                     reply_markup=build_main_menu(
@@ -293,7 +394,7 @@ async def cmd_start(message: Message, state: FSMContext):
             except TelegramBadRequest:
                 # Если редактирование не удалось (сообщение удалено/устарело) — отправляем новое
                 sent_message = await message.answer(
-                    build_menu_text(is_premium=is_premium),
+                    menu_text,
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
@@ -304,7 +405,7 @@ async def cmd_start(message: Message, state: FSMContext):
         else:
             # Меню ещё ни разу не показывалось — отправляем новое сообщение
             sent_message = await message.answer(
-                build_menu_text(is_premium=is_premium),
+                menu_text,
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
@@ -337,14 +438,14 @@ async def subscription_check(callback: CallbackQuery):
 
     if await is_user_subscribed(callback.bot, user_id):
         # достаём пользователя и флаги ролей
-        user = await get_user_by_tg_id(user_id)
+        user = await db.get_user_by_tg_id(user_id)
         is_admin = _get_flag(user, "is_admin")
         is_moderator = _get_flag(user, "is_moderator")
-        is_premium = await is_user_premium_active(user_id)
-
+        is_premium = await db.is_user_premium_active(user_id)
+        menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium)
         try:
             await callback.message.edit_text(
-                build_menu_text(is_premium=is_premium),
+                menu_text,
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
@@ -355,7 +456,7 @@ async def subscription_check(callback: CallbackQuery):
             try:
                 await callback.message.bot.send_message(
                     chat_id=callback.message.chat.id,
-                    text=build_menu_text(is_premium=is_premium),
+                    text=menu_text,
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
@@ -365,7 +466,7 @@ async def subscription_check(callback: CallbackQuery):
                 )
             except Exception:
                 await callback.message.answer(
-                    build_menu_text(is_premium=is_premium),
+                    menu_text,
                     reply_markup=build_main_menu(
                         is_admin=is_admin,
                         is_moderator=is_moderator,
@@ -392,17 +493,18 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     photo_msg_id = data.get("myphoto_photo_msg_id")
 
-    user = await get_user_by_tg_id(callback.from_user.id)
+    user = await db.get_user_by_tg_id(callback.from_user.id)
     is_admin = _get_flag(user, "is_admin")
     is_moderator = _get_flag(user, "is_moderator")
-    is_premium = await is_user_premium_active(callback.from_user.id)
+    is_premium = await db.is_user_premium_active(callback.from_user.id)
 
     menu_msg_id = None
 
+    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium)
     # 1. Пытаемся превратить текущее сообщение в меню
     try:
         await callback.message.edit_text(
-            build_menu_text(is_premium=is_premium),
+            menu_text,
             reply_markup=build_main_menu(
                 is_admin=is_admin,
                 is_moderator=is_moderator,
@@ -415,7 +517,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         try:
             sent = await callback.message.bot.send_message(
                 chat_id=chat_id,
-                text=build_menu_text(is_premium=is_premium),
+                text=menu_text,
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,
@@ -425,7 +527,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
             )
         except Exception:
             sent = await callback.message.answer(
-                build_menu_text(is_premium=is_premium),
+                menu_text,
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
                     is_moderator=is_moderator,

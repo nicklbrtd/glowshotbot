@@ -190,7 +190,7 @@ async def build_profile_view(user: dict):
 
                 metric_parts: list[str] = []
                 if bayes_pop is not None:
-                    metric_parts.append(f"{f'{bayes_pop:.2f}'.rstrip('0').rstrip('.')}★ (умная)")
+                    metric_parts.append(f"{f'{bayes_pop:.2f}'.rstrip('0').rstrip('.')}★")
                 elif avg_pop is not None:
                     metric_parts.append(f"{f'{avg_pop:.2f}'.rstrip('0').rstrip('.')}★")
 

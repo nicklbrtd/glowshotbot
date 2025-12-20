@@ -16,7 +16,8 @@ def build_main_menu(
     # Базовые пользовательские кнопки
     kb.button(text="📸 Моя фотография", callback_data="myphoto:open")
     kb.button(text="🔥 Оценивать", callback_data="rate:start")
-    kb.button(text="🏁 Итоги", callback_data="results:menu")
+
+    # kb.button(text="🏁 Итоги", callback_data="results:menu") #
     kb.button(text="👤 Профиль", callback_data="profile:open")
 
     if is_moderator:
@@ -25,7 +26,7 @@ def build_main_menu(
     if is_admin:
         kb.button(text="⚙️ Админ-панель", callback_data="admin:menu")
 
-    kb.adjust(2, 2, 2)
+    kb.adjust(2, 1, 2)
 
     return kb.as_markup()
 
