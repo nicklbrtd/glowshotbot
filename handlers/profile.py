@@ -203,8 +203,9 @@ async def build_profile_view(user: dict):
                 popular_photo_line = f"{title} ({metric})"
             else:
                 popular_photo_line = "—"
-        except Exception:
+        except Exception as e:
             popular_photo_line = "—"
+            print("POPULAR PHOTO ERROR:", repr(e))
 
         # Позиция в топе недели
         try:
