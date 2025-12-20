@@ -2375,6 +2375,20 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
         if resolved_user_id is None:
             return None
 
+        # Some legacy rows may have photos.user_id saved as tg_id instead of internal users.id.
+        resolved_tg_id = await conn.fetchval(
+            "SELECT tg_id FROM users WHERE id=$1",
+            int(resolved_user_id),
+        )
+        candidate_ids: list[int] = [int(resolved_user_id)]
+        if resolved_tg_id is not None:
+            try:
+                tgid_i = int(resolved_tg_id)
+                if tgid_i not in candidate_ids:
+                    candidate_ids.append(tgid_i)
+            except Exception:
+                pass
+
         row = await conn.fetchrow(
             """
             WITH stats AS (
@@ -2390,7 +2404,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     AVG(r.value)::float AS avg_rating
                 FROM photos ph
                 LEFT JOIN ratings r ON r.photo_id = ph.id
-                WHERE ph.user_id=$1
+                WHERE ph.user_id = ANY($1::int[])
                 GROUP BY ph.id
             )
             SELECT
@@ -2409,7 +2423,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 id ASC
             LIMIT 1
             """,
-            int(resolved_user_id),
+            candidate_ids,
             int(prior),
             float(global_mean),
         )

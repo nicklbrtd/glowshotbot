@@ -168,6 +168,13 @@ async def build_profile_view(user: dict):
         # Самое популярное фото (по умному скору)
         try:
             popular = await get_most_popular_photo_for_user(user_id)
+            # Fallback: some legacy rows or callers may require tg_id matching
+            if not popular and tg_id:
+                try:
+                    popular = await get_most_popular_photo_for_user(int(tg_id))
+                except Exception:
+                    popular = None
+
             if popular:
                 title = html.escape(str(popular.get("title") or "Без названия"), quote=False)
                 is_deleted = bool(popular.get("is_deleted") or 0)
@@ -189,8 +196,10 @@ async def build_profile_view(user: dict):
 
                 if ratings_count > 0:
                     metric_parts.append(f"{ratings_count} оценок")
+                else:
+                    metric_parts.append("пока нет оценок")
 
-                metric = ", ".join(metric_parts) if metric_parts else "—"
+                metric = ", ".join(metric_parts) if metric_parts else "пока нет оценок"
                 popular_photo_line = f"{title} ({metric})"
             else:
                 popular_photo_line = "—"
