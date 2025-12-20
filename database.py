@@ -2351,51 +2351,63 @@ async def get_user_rating_summary(user_id: int) -> dict:
 async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
     """Return user's best photo for profile.
 
-    - Accepts either internal users.id OR Telegram tg_id (callers sometimes mix them).
-    - Includes soft-deleted photos (profile is career-wide).
-    - Does NOT filter by moderation_status (pending/other would otherwise disappear).
-    - Uses Bayesian score if ratings exist; otherwise still returns some photo.
+    Robust version:
+    - Accepts either internal users.id OR Telegram tg_id (callers sometimes mix them)
+    - Matches legacy photos rows where photos.user_id might store either users.id or tg_id
+    - Does NOT filter by moderation_status (so pending/other statuses still show)
+    - Uses Bayesian score if ratings exist; otherwise still returns some photo
+    - Retries with a minimal query if some columns are missing in the schema
+
+    Ranking:
+      1) bayes_score desc (if any)
+      2) ratings_count desc
+      3) id asc
     """
     p = _assert_pool()
     prior = _bayes_prior_weight()
 
     async with p.acquire() as conn:
-        global_mean, _ = await _get_global_rating_mean(conn)
+        global_mean, _global_cnt = await _get_global_rating_mean(conn)
 
-        # Resolve to internal users.id (support accidental tg_id input)
-        resolved_user_id = await conn.fetchval(
-            "SELECT id FROM users WHERE id=$1 AND is_deleted=0",
+        # Resolve internal users.id and tg_id without relying on users.is_deleted
+        u = await conn.fetchrow(
+            """
+            SELECT id, tg_id
+            FROM users
+            WHERE id=$1 OR tg_id=$1
+            LIMIT 1
+            """,
             int(user_id),
         )
-        if resolved_user_id is None:
-            resolved_user_id = await conn.fetchval(
-                "SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0",
-                int(user_id),
-            )
-        if resolved_user_id is None:
+        if not u:
             return None
 
-        # Some legacy rows may have photos.user_id saved as tg_id instead of internal users.id.
-        resolved_tg_id = await conn.fetchval(
-            "SELECT tg_id FROM users WHERE id=$1",
-            int(resolved_user_id),
-        )
-        candidate_ids: list[int] = [int(resolved_user_id)]
-        if resolved_tg_id is not None:
-            try:
-                tgid_i = int(resolved_tg_id)
+        uid = u.get("id")
+        tgid = u.get("tg_id")
+
+        candidate_ids: list[int] = []
+        try:
+            if uid is not None:
+                candidate_ids.append(int(uid))
+        except Exception:
+            pass
+        try:
+            if tgid is not None:
+                tgid_i = int(tgid)
                 if tgid_i not in candidate_ids:
                     candidate_ids.append(tgid_i)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-        row = await conn.fetchrow(
-            """
+        if not candidate_ids:
+            return None
+
+        # First try: full stats (may fail if some columns like created_at/file_id don't exist)
+        sql_full = """
             WITH stats AS (
                 SELECT
                     ph.id,
                     ph.user_id,
-                    ph.file_id,
                     ph.title,
                     ph.is_deleted,
                     ph.created_at,
@@ -2404,7 +2416,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     AVG(r.value)::float AS avg_rating
                 FROM photos ph
                 LEFT JOIN ratings r ON r.photo_id = ph.id
-                WHERE ph.user_id = ANY($1::int[])
+                WHERE ph.user_id = ANY($1::bigint[])
                 GROUP BY ph.id
             )
             SELECT
@@ -2419,16 +2431,68 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 (bayes_score IS NULL) ASC,
                 bayes_score DESC,
                 ratings_count DESC,
-                created_at ASC,
                 id ASC
             LIMIT 1
-            """,
-            candidate_ids,
-            int(prior),
-            float(global_mean),
-        )
+        """
 
-    return dict(row) if row else None
+        sql_min = """
+            WITH stats AS (
+                SELECT
+                    ph.id,
+                    ph.user_id,
+                    COUNT(r.id)::int AS ratings_count,
+                    COALESCE(SUM(r.value), 0)::float AS ratings_sum,
+                    AVG(r.value)::float AS avg_rating
+                FROM photos ph
+                LEFT JOIN ratings r ON r.photo_id = ph.id
+                WHERE ph.user_id = ANY($1::bigint[])
+                GROUP BY ph.id
+            )
+            SELECT
+                s.*,
+                CASE
+                    WHEN s.ratings_count > 0
+                        THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
+                    ELSE NULL
+                END::float AS bayes_score
+            FROM stats s
+            ORDER BY
+                (bayes_score IS NULL) ASC,
+                bayes_score DESC,
+                ratings_count DESC,
+                id ASC
+            LIMIT 1
+        """
+
+        try:
+            row = await conn.fetchrow(sql_full, candidate_ids, int(prior), float(global_mean))
+        except Exception:
+            row = await conn.fetchrow(sql_min, candidate_ids, int(prior), float(global_mean))
+
+        if not row:
+            return None
+
+        result = dict(row)
+
+        # If the minimal query was used, try to enrich with title/is_deleted/created_at if those columns exist.
+        if "title" not in result or "is_deleted" not in result or "created_at" not in result:
+            try:
+                ph = await conn.fetchrow(
+                    "SELECT title, is_deleted, created_at FROM photos WHERE id=$1 LIMIT 1",
+                    int(result["id"]),
+                )
+                if ph:
+                    if "title" not in result:
+                        result["title"] = ph.get("title")
+                    if "is_deleted" not in result:
+                        result["is_deleted"] = ph.get("is_deleted")
+                    if "created_at" not in result:
+                        result["created_at"] = ph.get("created_at")
+            except Exception:
+                # Ignore enrichment errors; profile can fallback to defaults.
+                pass
+
+        return result
 
 
 async def get_weekly_rank_for_user(user_id: int) -> int | None:
