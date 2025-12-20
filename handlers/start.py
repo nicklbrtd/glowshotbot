@@ -113,10 +113,20 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
     gender_s = str(gender_val).strip().lower() if gender_val is not None else ""
 
     def _is_female(s: str) -> bool:
-        return s in {"f", "female", "woman", "girl", "ж", "жен", "женский", "♀"} or "жен" in s
+        # supports: "Девушка", "женщина", etc.
+        return (
+            s in {"f", "female", "woman", "girl", "ж", "жен", "женский", "♀", "девушка", "женщина"}
+            or "жен" in s
+            or "дев" in s
+        )
 
     def _is_male(s: str) -> bool:
-        return s in {"m", "male", "man", "boy", "м", "муж", "мужской", "♂"} or "муж" in s
+        # supports: "Парень", "мужчина", etc.
+        return (
+            s in {"m", "male", "man", "boy", "м", "муж", "мужской", "♂", "парень", "мужчина"}
+            or "муж" in s
+            or "пар" in s
+        )
 
     if _is_female(gender_s):
         rated_verb = "оценила"
