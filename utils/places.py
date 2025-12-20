@@ -81,7 +81,45 @@ _COMMON_COUNTRIES = {
     "оаэ",
     "uae",
     "united arab emirates",
+    "russia",
+    "spain",
+    "france",
+    "italy",
+    "germany",
+    "portugal",
+    "poland",
+    "ukraine",
+    "belarus",
+    "kazakhstan",
+    "united states",
+    "united states of america",
 }
+
+# Disambiguation for famous cities when user types only the city in Latin letters.
+# Example: "Madrid" can match "Madrid, Iowa, USA"; we prefer the world-famous one.
+_FAMOUS_CITY_DEFAULT_COUNTRY = {
+    "madrid": "Spain",
+    "paris": "France",
+    "rome": "Italy",
+    "lisbon": "Portugal",
+    "london": "United Kingdom",
+    "barcelona": "Spain",
+    "valencia": "Spain",
+    "seville": "Spain",
+    "berlin": "Germany",
+    "vienna": "Austria",
+    "prague": "Czechia",
+    "warsaw": "Poland",
+    "budapest": "Hungary",
+}
+
+
+def _is_latin_city_token(s: str) -> bool:
+    s = _norm_spaces(s)
+    if not s:
+        return False
+    # Accept only basic latin letters and dashes/spaces
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z\-\s]*", s))
 
 
 def _looks_like_country(text: str) -> bool:
@@ -369,6 +407,12 @@ async def validate_city_and_country(raw: str) -> tuple[bool, str, str, bool]:
         if len(tokens) >= 2 and _looks_like_country(tokens[0]):
             country_hint = tokens[0]
             city_hint = " ".join(tokens[1:])
+
+    # If user typed only a famous city in Latin letters, add a country hint to avoid US small-town matches.
+    if not country_hint and len(city_hint.split()) == 1 and _is_latin_city_token(city_hint):
+        k = _cmp_key(city_hint)
+        if k in _FAMOUS_CITY_DEFAULT_COUNTRY:
+            country_hint = _FAMOUS_CITY_DEFAULT_COUNTRY[k]
 
     cmp_city = _cmp_key(city_hint)
     cmp_country_hint = _cmp_key(country_hint) if country_hint else ""
