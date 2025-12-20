@@ -60,52 +60,6 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def _format_time_until_next_upload() -> str:
-    now = datetime.now()
-
-    # Время, когда открывается окно загрузки нового кадра: 21:15.
-    today_upload_start = now.replace(hour=21, minute=15, second=0, microsecond=0)
-
-    if now >= today_upload_start:
-        # Формально уже наступило время новой загрузки — показываем, что ждать почти не нужно.
-        return "совсем скоро"
-
-    delta = today_upload_start - now
-    total_seconds = int(delta.total_seconds())
-    if total_seconds <= 60:
-        return "через минуту"
-
-    total_minutes = total_seconds // 60
-    hours = total_minutes // 60
-    minutes = total_minutes % 60
-
-    parts: list[str] = []
-    if hours > 0:
-        parts.append(f"{hours} {_plural_ru(hours, 'час', 'часа', 'часов')}")
-    if minutes > 0:
-        parts.append(f"{minutes} {_plural_ru(minutes, 'минута', 'минуты', 'минут')}")
-
-    if not parts:
-        return "совсем скоро"
-
-    return "через " + " ".join(parts)
-
-
-def _build_my_results_kb(idx: int, total: int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-
-    row: list[InlineKeyboardButton] = []
-    if idx > 0:
-        row.append(InlineKeyboardButton(text="⬅️", callback_data=f"myresults:{idx-1}"))
-    row.append(InlineKeyboardButton(text=f"{idx+1}/{total}", callback_data="noop"))
-    if idx < total - 1:
-        row.append(InlineKeyboardButton(text="➡️", callback_data=f"myresults:{idx+1}"))
-
-    kb.row(*row)
-    kb.row(InlineKeyboardButton(text="⬅️ В профиль", callback_data="menu:profile"))
-    return kb.as_markup()
-
-
 @router.callback_query(F.data.startswith("myresults:"))
 async def profile_my_results(callback: CallbackQuery):
     """Temporary stub: user said they will change the logic for "Мои итоги" later."""
@@ -273,7 +227,7 @@ async def build_profile_view(user: dict):
             pass
 
     text_lines = [
-        "👤<b>Твой профиль</b>",
+        f"👤<b>Твой профиль</b>{premium_badge}",
         f"Имя: {name}{age_part} лет" if age else f"Имя: {name}",
         f"Пол: {gender_icon}",
     ]
@@ -338,11 +292,9 @@ async def build_profile_view(user: dict):
         f"Самое популярное фото: {popular_photo_title} ({popular_photo_metric})",
     ]
 
-    stats_block = (
-        "📊 <b>Моя статистика</b>\n"
-        f"<blockquote><span class=\>{'\n'.join(stats_lines)}</span></blockquote>"
-    )
-    text_lines.append(stats_block)
+    stats_text = "\n".join([f"▌ {line}" for line in stats_lines])
+    text_lines.append("📊 <b>Моя статистика</b> (нажми, чтобы раскрыть)")
+    text_lines.append(f'<span class="tg-spoiler">{stats_text}</span>')
 
     # Premium
     text_lines.extend([
