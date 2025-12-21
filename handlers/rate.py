@@ -117,33 +117,15 @@ BOT_INVITE_LINK = "https://t.me/glowshotbot"
 
 def build_no_photos_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура, когда фотографии для оценивания закончились."""
+    share_url = f"https://t.me/share/url?url={BOT_INVITE_LINK}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🤝 Пригласить друга", callback_data="rate:invite")],
+            [InlineKeyboardButton(text="📤 Отправить ссылку", url=share_url)],
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back")],
         ]
     )
 
 
-def build_invite_friend_keyboard() -> InlineKeyboardMarkup:
-    """Экран приглашения: кнопка шаринга + назад."""
-    share_text = (
-        "Хочешь больше фоток для оценивания? Пригласи 1–2 друзей — лента будет живее 📸✨\n\n"
-        f"Ссылка на бота: {BOT_INVITE_LINK}"
-    )
-    share_url = (
-        "https://t.me/share/url?url="
-        f"{BOT_INVITE_LINK}"
-        "&text="
-        + share_text.replace(" ", "%20").replace("\n", "%0A")
-    )
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=share_url)],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:invite_back")],
-        ]
-    )
 
 
 
@@ -152,14 +134,11 @@ def build_no_photos_text() -> str:
         "Фотографии на сегодня закончились 😭\n\n"
         "Но есть решение: хочешь больше фоток для оценивания — зови друзей. "
         "Чем больше людей, тем живее лента 🦒\n\n"
-        f"Вот ссылка на бота:\n{BOT_INVITE_LINK}\n\n"
+        f"Вот ссылка на бота:\n<code>{BOT_INVITE_LINK}</code>\n\n"
         "Либо воспользуйся своей реферальной ссылкой: /ref"
     )
 
 
-def build_invite_friend_text() -> str:
-    # На экране приглашения используем тот же текст, чтобы не было разнобоя
-    return build_no_photos_text()
 
 
 # Специальная подпись для раздела оценивания
@@ -1329,48 +1308,6 @@ async def comment_seen(callback: CallbackQuery) -> None:
         pass
 
 
-# --- Экран приглашения друга и возврат назад, когда фото закончились ---
-@router.callback_query(F.data == "rate:invite")
-async def rate_invite_friend(callback: CallbackQuery) -> None:
-    """Экран с приглашением друга, когда лента оценивания пустая."""
-    text = build_invite_friend_text()
-    kb = build_invite_friend_keyboard()
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        # Если не получилось отредактировать — просто отправляем новым сообщением
-        try:
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb,
-                disable_notification=True,
-            )
-        except Exception:
-            pass
-
-    await callback.answer()
-
-
-@router.callback_query(F.data == "rate:invite_back")
-async def rate_invite_back(callback: CallbackQuery) -> None:
-    """Назад с экрана приглашения."""
-    text = build_no_photos_text()
-    kb = build_no_photos_keyboard()
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        pass
-
-    await callback.answer()
 @router.callback_query(F.data.startswith("rate:award:"))
 async def rate_award(callback: CallbackQuery, state: FSMContext) -> None:
     """
