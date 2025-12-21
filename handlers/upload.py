@@ -18,7 +18,6 @@ from database import (
     mark_photo_deleted,
     get_photo_by_id,
     get_photo_stats,
-    get_comments_for_photo,
     get_daily_top_photos,
     add_weekly_candidate,
     is_photo_in_weekly,

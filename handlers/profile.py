@@ -28,11 +28,10 @@ from database import (
     update_user_city,
     update_user_country,
     set_user_city_visibility,
-    set_user_country_visibility,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
-from utils.places import validate_place, validate_city_and_country, validate_city_and_country_full
+from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 
 router = Router()

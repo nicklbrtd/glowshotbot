@@ -11,7 +11,6 @@ from aiogram.fsm.context import FSMContext
 from database import (
     get_user_by_tg_id,
     is_moderator_by_tg_id,
-    set_user_moderator_by_tg_id,
     get_photo_by_id,
     mark_photo_deleted,
     set_photo_moderation_status,

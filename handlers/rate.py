@@ -5,7 +5,7 @@ from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboar
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
-from keyboards.common import build_back_to_menu_kb, build_back_kb, build_viewed_kb
+from keyboards.common import build_back_to_menu_kb, build_viewed_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.moderation import (
     get_report_reasons,
@@ -108,6 +108,51 @@ def build_referral_thanks_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Спасибо!", callback_data="ref:thanks")]
         ]
+    )
+
+
+# --- Дополнительные клавиатуры и тексты для приглашения друзей и окончания фотографий ---
+BOT_INVITE_LINK = "https://t.me/glowshotbot"
+
+
+def build_no_photos_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура, когда фотографии для оценивания закончились."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🤝 Пригласить друга", callback_data="rate:invite")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back")],
+        ]
+    )
+
+
+def build_invite_friend_keyboard() -> InlineKeyboardMarkup:
+    """Экран приглашения: кнопка шаринга + назад."""
+    share_text = (
+        "Хочешь больше фоток для оценивания? Пригласи 1–2 друзей — лента будет живее 📸✨\n\n"
+        f"Ссылка на бота: {BOT_INVITE_LINK}"
+    )
+    share_url = (
+        "https://t.me/share/url?url="
+        f"{BOT_INVITE_LINK}"
+        "&text="
+        + share_text.replace(" ", "%20").replace("\n", "%0A")
+    )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=share_url)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:invite_back")],
+        ]
+    )
+
+
+def build_invite_friend_text() -> str:
+    return (
+        "Фотографии на сегодня закончились 😭\n\n"
+        "Но есть решение: хочешь больше фоток для оценивания — зови друзей. "
+        "Чем больше людей, тем живее лента ✨\n\n"
+        f"Вот ссылка на бота: <code>{BOT_INVITE_LINK}</code>\n"
+        "(можешь просто нажать на кнопку ниже и отправить друзьям)"
     )
 
 
@@ -223,7 +268,7 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
 
     #### Нет фотографий для оценивания
     if photo is None:
-        kb = build_back_to_menu_kb()
+        kb = build_no_photos_keyboard()
         text = "На сегодня фотографии для оценивания закончились.\n\nЗагляни позже ✨"
 
         try:
@@ -1276,6 +1321,50 @@ async def comment_seen(callback: CallbackQuery) -> None:
     except TelegramBadRequest:
         # Если callback-query уже протухла — тоже просто игнорируем.
         pass
+
+
+# --- Экран приглашения друга и возврат назад, когда фото закончились ---
+@router.callback_query(F.data == "rate:invite")
+async def rate_invite_friend(callback: CallbackQuery) -> None:
+    """Экран с приглашением друга, когда лента оценивания пустая."""
+    text = build_invite_friend_text()
+    kb = build_invite_friend_keyboard()
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        # Если не получилось отредактировать — просто отправляем новым сообщением
+        try:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb,
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rate:invite_back")
+async def rate_invite_back(callback: CallbackQuery) -> None:
+    """Назад с экрана приглашения."""
+    text = "На сегодня фотографии для оценивания закончились.\n\nЗагляни позже ✨"
+    kb = build_no_photos_keyboard()
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+
+    await callback.answer()
 @router.callback_query(F.data.startswith("rate:award:"))
 async def rate_award(callback: CallbackQuery, state: FSMContext) -> None:
     """
