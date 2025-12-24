@@ -472,15 +472,17 @@ async def ensure_schema() -> None:
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS payments (
-              id BIGSERIAL PRIMARY KEY,
-              tg_id BIGINT NOT NULL,
-              provider TEXT,
-              amount_rub INTEGER,
-              amount_stars INTEGER,
-              period_code TEXT,
-              inv_id TEXT,
-              status TEXT NOT NULL DEFAULT 'success',
-              created_at TEXT NOT NULL
+                id BIGSERIAL PRIMARY KEY,
+                tg_id BIGINT NOT NULL,
+                provider TEXT,
+                amount_rub INTEGER,
+                amount_stars INTEGER,
+                period_code TEXT,
+                inv_id TEXT,
+                order_id TEXT,
+                payment_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
             );
             """
         )
@@ -591,6 +593,10 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_updated_at TEXT;")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'feed';")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source_code TEXT;")
+        # ---- payments migrations (TBank) ----
+        await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id TEXT;")
+        await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_id TEXT;")
+        await conn.execute("ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'pending';")
 
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_city ON users(city);")
@@ -605,6 +611,11 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_id ON ratings(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_photo_id ON comments(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_photo_id ON photo_reports(photo_id);")
+
+        # Идемпотентность: один order_id/payment_id на провайдера
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_order_id ON payments(provider, order_id);")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_payment_id ON payments(provider, payment_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);")
 
 # -------------------- helpers --------------------
 
@@ -1622,18 +1633,152 @@ async def clear_bot_error_logs() -> None:
     async with p.acquire() as conn:
         await conn.execute("DELETE FROM bot_error_logs")
 
-async def log_successful_payment(tg_id: int, provider: str = "unknown",
-                                 amount_rub: int | None = None, amount_stars: int | None = None,
-                                 period_code: str | None = None, inv_id: str | None = None) -> None:
+async def log_successful_payment(
+    tg_id: int,
+    provider: str = "unknown",
+    amount_rub: int | None = None,
+    amount_stars: int | None = None,
+    period_code: str | None = None,
+    inv_id: str | None = None,
+    *,
+    status: str = "success",
+    order_id: str | None = None,
+    payment_id: str | None = None,
+) -> None:
+    """Generic payment logger.
+    Legacy: inv_id. TBank: order_id + payment_id.
+    """
     p = _assert_pool()
     async with p.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO payments (tg_id, provider, amount_rub, amount_stars, period_code, inv_id, status, created_at)
-            VALUES ($1,$2,$3,$4,$5,$6,'success',$7)
+            INSERT INTO payments (
+              tg_id, provider, amount_rub, amount_stars, period_code, inv_id, order_id, payment_id, status, created_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             """,
-            int(tg_id), str(provider), amount_rub, amount_stars, period_code, inv_id, get_moscow_now_iso()
+            int(tg_id),
+            str(provider),
+            amount_rub,
+            amount_stars,
+            period_code,
+            inv_id,
+            order_id,
+            payment_id,
+            str(status),
+            get_moscow_now_iso(),
         )
+
+
+async def create_pending_tbank_payment(
+    *,
+    tg_id: int,
+    period_code: str,
+    amount_rub: int,
+    order_id: str,
+) -> None:
+    """Логируем pending до редиректа на оплату."""
+    p = _assert_pool()
+    await _ensure_user_row(int(tg_id))
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO payments (tg_id, provider, amount_rub, period_code, order_id, status, created_at)
+            VALUES ($1,'tbank',$2,$3,$4,'pending',$5)
+            ON CONFLICT (provider, order_id) DO NOTHING
+            """,
+            int(tg_id),
+            int(amount_rub),
+            str(period_code),
+            str(order_id),
+            get_moscow_now_iso(),
+        )
+
+
+def _plan_to_days(plan: str) -> int:
+    p = (plan or "").strip().lower()
+    if p in {"w", "week", "7d", "7"}:
+        return 7
+    if p in {"m", "month", "30d", "30"}:
+        return 30
+    if p in {"q", "3m", "3month", "90d", "90"}:
+        return 90
+    return 30
+
+
+async def apply_tbank_payment_confirmed(
+    *,
+    tg_id: int,
+    plan: str,
+    order_id: str,
+    payment_id: str,
+    amount_rub: int | None = None,
+) -> bool:
+    """Идемпотентно: помечаем платеж success и продлеваем премиум 1 раз.
+    True = сейчас активировали/продлили, False = уже было обработано.
+    """
+    p = _assert_pool()
+    await _ensure_user_row(int(tg_id))
+
+    days = _plan_to_days(plan)
+    now_iso = get_moscow_now_iso()
+
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            already = await conn.fetchval(
+                """
+                SELECT 1
+                FROM payments
+                WHERE provider='tbank'
+                  AND order_id=$1
+                  AND status='success'
+                LIMIT 1
+                """,
+                str(order_id),
+            )
+            if already:
+                return False
+
+            # если pending не успели создать — создадим
+            await conn.execute(
+                """
+                INSERT INTO payments (tg_id, provider, amount_rub, period_code, order_id, payment_id, status, created_at)
+                VALUES ($1,'tbank',$2,$3,$4,$5,'pending',$6)
+                ON CONFLICT (provider, order_id) DO NOTHING
+                """,
+                int(tg_id),
+                int(amount_rub) if amount_rub is not None else None,
+                str(plan),
+                str(order_id),
+                str(payment_id),
+                now_iso,
+            )
+
+            # отмечаем успех
+            await conn.execute(
+                """
+                UPDATE payments
+                SET status='success',
+                    payment_id=COALESCE($2, payment_id),
+                    amount_rub=COALESCE($3, amount_rub)
+                WHERE provider='tbank' AND order_id=$1
+                """,
+                str(order_id),
+                str(payment_id) if payment_id else None,
+                int(amount_rub) if amount_rub is not None else None,
+            )
+
+            # продление премиума
+            user_id = await conn.fetchval(
+                "SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0 LIMIT 1",
+                int(tg_id),
+            )
+            if not user_id:
+                return False
+
+            await _add_premium_days(conn, int(user_id), days=int(days))
+
+    return True
 
 
 async def get_payments_count() -> int:
