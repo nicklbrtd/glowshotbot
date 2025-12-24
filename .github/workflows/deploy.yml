@@ -32,9 +32,11 @@ jobs:
             echo "➡️ Перезапускаю сервисы..."
             sudo systemctl restart glowshot-bot
             sudo systemctl restart glowshot-support
+            sudo systemctl restart tbank-webhook
 
             echo "➡️ Проверяю статус..."
             sudo systemctl status glowshot-bot --no-pager || true
             sudo systemctl status glowshot-support --no-pager || true
+            sudo systemctl status tbank-webhook --no-pager || true
 
             echo "🎉 Деплой успешно завершён!"
