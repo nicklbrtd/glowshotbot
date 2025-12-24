@@ -27,3 +27,6 @@ MANUAL_BANK_HINT = os.getenv("MANUAL_BANK_HINT", "").strip() or "Любой ба
 
 # Optional support contact shown in instructions
 MANUAL_CONTACT = os.getenv("MANUAL_CONTACT", "").strip() or os.getenv("SUPPORT_URL", "") or "@your_username"
+
+TB_PASSWORD = os.getenv("TB_PASSWORD", "")
+TB_TERMINAL_KEY = os.getenv("TB_TERMINAL_KEY", "")
