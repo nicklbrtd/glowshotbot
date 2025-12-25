@@ -108,12 +108,27 @@ async def tbank_notify(req: Request):
     except Exception:
         return Response(content="bad json", media_type="text/plain", status_code=400)
 
+    # Debug: log incoming payload safely (do not leak secrets)
+    try:
+        safe = dict(body)
+        for k in ("Token", "PAN", "RebillId", "CardId", "ExpDate"):
+            if k in safe:
+                safe[k] = "***"
+        log.info("tbank notify body=%s", safe)
+    except Exception:
+        # never break webhook due to logging
+        pass
+
     # Optional: ensure the notification belongs to our terminal
-    if str(body.get("TerminalKey", "")).strip() != tb_terminal:
+    got_terminal = str(body.get("TerminalKey", "")).strip()
+    if got_terminal != tb_terminal:
+        log.warning("tbank notify bad terminal: got=%s", got_terminal)
         return Response(content="bad terminal", media_type="text/plain", status_code=400)
 
     token = body.get("Token")
-    if not token or calc_token(body, tb_password) != str(token):
+    computed = calc_token(body, tb_password)
+    if not token or computed != str(token):
+        log.warning("tbank notify bad token (mismatch)")
         return Response(content="bad token", media_type="text/plain", status_code=400)
 
     status = str(body.get("Status", ""))
