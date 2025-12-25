@@ -99,12 +99,14 @@ async def tbank_create_payment_link(*, tg_id: int, period_code: str, amount_rub:
 
     payload = {
         "TerminalKey": TB_TERMINAL_KEY,
-        "Amount": int(amount_rub) * 100,  # kopecks
+        "Amount": int(amount_rub) * 100,
         "OrderId": order_id,
         "Description": f"GlowShot Premium ({period_code})",
         "SuccessURL": TB_SUCCESS_URL,
         "FailURL": TB_FAIL_URL,
-        # You can add Receipt here later if you подключишь онлайн-кассу
+
+        "NotificationURL": "https://littlebrthood1.fvds.ru/tbank/notify",
+        "PayType": "O",
     }
     payload["Token"] = _tbank_token(payload, TB_PASSWORD)
 
