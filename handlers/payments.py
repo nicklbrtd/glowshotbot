@@ -1,4 +1,7 @@
 from datetime import datetime, timedelta
+import os
+import hashlib
+import aiohttp
 
 from aiogram import Router, F
 from aiogram.types import (
@@ -6,6 +9,8 @@ from aiogram.types import (
     LabeledPrice,
     PreCheckoutQuery,
     Message,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
 )
 from keyboards.common import build_viewed_kb
 from config import (
@@ -53,6 +58,69 @@ TARIFFS = {
         "description": "Доступ ко всем премиум-функциям на 90 дней.",
     },
 }
+
+# --- TBank (link payments) ---
+TB_INIT_URL = os.getenv("TB_INIT_URL", "https://securepay.tinkoff.ru/v2/Init").strip()
+TB_TERMINAL_KEY = os.getenv("TB_TERMINAL_KEY", "").strip()
+TB_PASSWORD = os.getenv("TB_PASSWORD", "").strip()
+TB_SUCCESS_URL = os.getenv("TB_SUCCESS_URL", "https://littlebrthood1.fvds.ru/pay/success").strip()
+TB_FAIL_URL = os.getenv("TB_FAIL_URL", "https://littlebrthood1.fvds.ru/pay/fail").strip()
+
+
+def _tbank_token(payload: dict, password: str) -> str:
+    data = {}
+    for k, v in payload.items():
+        if k == "Token":
+            continue
+        if isinstance(v, (dict, list)):
+            continue
+        data[str(k)] = "" if v is None else str(v)
+    data["Password"] = password
+    s = "".join(data[k] for k in sorted(data.keys()))
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _period_to_plan(period_code: str) -> str:
+    # must match webhook parser: GS_<tgid>_<plan>_<ts>
+    return {
+        "7d": "w",
+        "30d": "m",
+        "90d": "q",
+    }.get(period_code, "m")
+
+
+async def tbank_create_payment_link(*, tg_id: int, period_code: str, amount_rub: int) -> str:
+    """Create a hosted payment link in TBank and return PaymentURL."""
+    if not TB_TERMINAL_KEY or not TB_PASSWORD:
+        raise RuntimeError("TBank keys are not configured")
+
+    plan = _period_to_plan(period_code)
+    order_id = f"GS_{tg_id}_{plan}_{int(time.time())}"
+
+    payload = {
+        "TerminalKey": TB_TERMINAL_KEY,
+        "Amount": int(amount_rub) * 100,  # kopecks
+        "OrderId": order_id,
+        "Description": f"GlowShot Premium ({period_code})",
+        "SuccessURL": TB_SUCCESS_URL,
+        "FailURL": TB_FAIL_URL,
+        # You can add Receipt here later if you подключишь онлайн-кассу
+    }
+    payload["Token"] = _tbank_token(payload, TB_PASSWORD)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(TB_INIT_URL, json=payload, timeout=20) as resp:
+            data = await resp.json(content_type=None)
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Bad TBank response: {data}")
+
+    if data.get("Success") is True and data.get("PaymentURL"):
+        return str(data["PaymentURL"])
+
+    # Sometimes error fields are: Message/Details/ErrorCode
+    msg = data.get("Message") or data.get("Details") or str(data)
+    raise RuntimeError(f"TBank Init failed: {msg}")
 
 # --- Новый flow для премиум-панели и тарифов ---
 
@@ -102,14 +170,20 @@ async def premium_choose_method(callback: CallbackQuery):
         callback_data=f"premium:order:stars:{period_code}",
     )
 
-    if MANUAL_RUB_ENABLED:
+    # TBank link payment (карта/СБП на странице Т-Банка)
+    if TB_TERMINAL_KEY and TB_PASSWORD:
+        kb.button(
+            text=f"{rub_price} ₽ — Оплатить по ссылке (Т‑Банк)",
+            callback_data=f"premium:tbank:{period_code}",
+        )
+    elif MANUAL_RUB_ENABLED:
         kb.button(
             text=f"{rub_price} ₽ — Перевод на карту",
             callback_data=f"premium:manual_rub:{period_code}",
         )
     else:
         kb.button(
-            text=f"{rub_price} ₽ — Перевод на карту (скоро)",
+            text=f"{rub_price} ₽ — Оплата рублями (скоро)",
             callback_data="premium:rub:disabled",
         )
 
@@ -124,13 +198,48 @@ async def premium_choose_method(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()
 
+@router.callback_query(F.data.startswith("premium:tbank:"))
+async def premium_tbank_link(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректный тариф.", show_alert=True)
+        return
 
-@router.callback_query(F.data == "premium:rub:disabled")
-async def premium_rub_disabled(callback: CallbackQuery):
-    await callback.answer(
-        "Оплата рублями сейчас отключена. Пока доступна оплата Telegram Stars ⭐️",
-        show_alert=True,
+    _, _, period_code = parts
+    tariff = TARIFFS.get(period_code)
+    if not tariff:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    rub_price = int(tariff["price_rub"])
+
+    try:
+        payment_url = await tbank_create_payment_link(
+            tg_id=int(callback.from_user.id),
+            period_code=str(period_code),
+            amount_rub=rub_price,
+        )
+    except Exception as e:
+        await callback.answer(f"Не удалось создать ссылку оплаты: {e}", show_alert=True)
+        return
+
+    text = (
+        "💳 <b>Оплата через Т‑Банк</b>\n\n"
+        f"Тариф: <b>{tariff['title']}</b>\n"
+        f"Сумма: <b>{rub_price} ₽</b>\n\n"
+        "Нажми кнопку ниже — откроется страница оплаты (карта/СБП).\n"
+        "После успешной оплаты премиум <b>включится автоматически</b> в течение минуты."
     )
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Открыть оплату", url=payment_url)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"premium:plan:{period_code}")],
+        ]
+    )
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
 
 
 @router.callback_query(
