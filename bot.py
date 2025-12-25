@@ -1,14 +1,84 @@
 import asyncio
 import traceback
+from datetime import datetime
 from typing import Callable, Dict, Any, Awaitable
 
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import TelegramObject, Update
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+from utils.time import get_moscow_now
 
 from config import BOT_TOKEN
-from database import init_db, log_bot_error
+from database import (
+    init_db,
+    log_bot_error,
+    get_users_with_premium_expiring_tomorrow,
+    mark_premium_expiry_reminder_sent,
+)
+def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔁 Продлить подписку", callback_data="premium:plans")],
+            [InlineKeyboardButton(text="✖️ Отмена", callback_data="premium:reminder:dismiss")],
+        ]
+    )
+
+
+async def premium_expiry_reminder_loop(bot: Bot) -> None:
+    """Раз в час проверяем, у кого премиум заканчивается завтра, и шлём уведомление 1 раз."""
+    while True:
+        try:
+            offset = 0
+            batch = 2000
+
+            while True:
+                users = await get_users_with_premium_expiring_tomorrow(limit=batch, offset=offset)
+                if not users:
+                    break
+
+                for u in users:
+                    tg_id = int(u["tg_id"])
+                    premium_until = str(u["premium_until"])
+
+                    should_send = await mark_premium_expiry_reminder_sent(tg_id, premium_until)
+                    if not should_send:
+                        continue
+
+                    # красивый формат даты
+                    human = premium_until
+                    try:
+                        dt = datetime.fromisoformat(premium_until)
+                        human = dt.strftime("%d.%m.%Y")
+                    except Exception:
+                        pass
+
+                    text = (
+                        "⏳ <b>Премиум заканчивается завтра</b>\n\n"
+                        f"Подписка активна до <b>{human}</b>.\n"
+                        "Продлить сейчас?"
+                    )
+
+                    try:
+                        await bot.send_message(
+                            chat_id=tg_id,
+                            text=text,
+                            reply_markup=_premium_expiry_reminder_kb(),
+                            disable_notification=True,
+                        )
+                    except Exception:
+                        # пользователь мог заблокировать бота/удалить чат и т.п.
+                        pass
+
+                offset += batch
+
+        except Exception:
+            # не валим polling из-за фонового задания
+            pass
+
+        await asyncio.sleep(3600)
 
 from handlers.legal_center import router as help_center_router
 from handlers.admin import router as admin_router
@@ -141,6 +211,10 @@ async def main() -> None:
         BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    # фоновая проверка: напоминания о скором окончании премиума
+    asyncio.create_task(premium_expiry_reminder_loop(bot))
+
     dp = Dispatcher()
 
     # Логирование ошибок в БД

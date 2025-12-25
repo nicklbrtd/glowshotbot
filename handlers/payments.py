@@ -68,6 +68,16 @@ TB_FAIL_URL = os.getenv("TB_FAIL_URL", "https://littlebrthood1.fvds.ru/pay/fail"
 TB_NOTIFICATION_URL = os.getenv("TB_NOTIFICATION_URL", "https://littlebrthood1.fvds.ru/tbank/notify").strip()
 
 
+# --- Premium Expiry Reminder keyboard ---
+
+def build_premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔁 Продлить подписку", callback_data="premium:plans")
+    kb.button(text="✖️ Отмена", callback_data="premium:reminder:dismiss")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def _tbank_token(payload: dict, password: str) -> str:
     data = {}
     for k, v in payload.items():
@@ -499,4 +509,18 @@ async def premium_success_read(callback: CallbackQuery):
         except Exception:
             pass
 
+    await callback.answer()
+
+
+# --- Premium expiry reminder dismiss handler ---
+
+@router.callback_query(F.data == "premium:reminder:dismiss")
+async def premium_reminder_dismiss(callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
     await callback.answer()

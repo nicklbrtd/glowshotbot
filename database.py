@@ -569,6 +569,18 @@ async def ensure_schema() -> None:
             );
             """
         )
+
+        # напоминания о скором окончании премиума (дедуп по tg_id + premium_until)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS premium_expiry_reminders (
+              tg_id BIGINT NOT NULL,
+              premium_until TEXT NOT NULL,
+              sent_at TEXT NOT NULL,
+              PRIMARY KEY (tg_id, premium_until)
+            );
+            """
+        )
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS photo_share_links (
@@ -604,6 +616,8 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at ON bot_error_logs(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_news_created_at ON premium_news(created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_expiry_reminders_sent_at ON premium_expiry_reminders(sent_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_expiry_reminders_tg_id ON premium_expiry_reminders(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_tg_user_id ON bot_error_logs(tg_user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_user_id ON photos(user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_day_key ON photos(day_key);")
@@ -1082,6 +1096,79 @@ async def is_user_premium_active(tg_id: int) -> bool:
         return datetime.fromisoformat(until) > get_moscow_now()
     except Exception:
         return True
+
+
+# --- Premium expiry reminders ---
+
+async def get_users_with_premium_expiring_tomorrow(limit: int = 2000, offset: int = 0) -> list[dict]:
+    """Пользователи, у которых premium_until приходится на завтрашний день (по Москве).
+
+    Возвращает список: {"tg_id": int, "premium_until": str}
+    limit/offset нужны, чтобы можно было безопасно обходить большую базу батчами.
+    """
+    p = _assert_pool()
+
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT tg_id, premium_until
+            FROM users
+            WHERE is_deleted=0
+              AND is_premium=1
+              AND premium_until IS NOT NULL
+            ORDER BY tg_id
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
+            int(limit),
+        )
+
+    now = get_moscow_now()
+    tomorrow = (now + timedelta(days=1)).date()
+
+    res: list[dict] = []
+    for r in rows:
+        until_iso = r["premium_until"]
+        if not until_iso:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(until_iso))
+        except Exception:
+            continue
+
+        # если уже истёк — пропускаем
+        if dt <= now:
+            continue
+
+        if dt.date() == tomorrow:
+            res.append({"tg_id": int(r["tg_id"]), "premium_until": str(until_iso)})
+
+    return res
+
+
+async def mark_premium_expiry_reminder_sent(tg_id: int, premium_until: str) -> bool:
+    """Идемпотентно отмечаем, что напоминание отправлено.
+
+    True = только что отметили (значит можно отправлять)
+    False = уже было отправлено раньше
+    """
+    p = _assert_pool()
+    now_iso = get_moscow_now_iso()
+
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO premium_expiry_reminders (tg_id, premium_until, sent_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (tg_id, premium_until) DO NOTHING
+            RETURNING tg_id
+            """,
+            int(tg_id),
+            str(premium_until),
+            now_iso,
+        )
+
+    return row is not None
 
 
 # -------------------- awards --------------------
