@@ -51,7 +51,7 @@ TARIFFS = {
     },
     "90d": {
         "days": 90,
-        "price_rub": 1,
+        "price_rub": 569,
         "price_stars": 500,
         "title": "GlowShot Premium — 90 дней",
         "label": "Премиум на 90 дней",

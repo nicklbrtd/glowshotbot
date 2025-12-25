@@ -190,15 +190,15 @@ async def tbank_notify(req: Request):
             amount_rub=amount_rub,
         )
         if changed:
-            log.info("tbank confirmed -> premium extended: tg_id=%s plan=%s order_id=%s", tgid, plan, order_id)
-            await _tg_send_message(
-                int(tgid),
-                (
-                    "✅ <b>Оплата подтверждена!</b>\n"
-                    f"Премиум активирован/продлён: <b>{_plan_to_human(plan)}</b>.\n\n"
-                    "Вернись в бота — меню обновится автоматически."
-                ),
+            log.info(
+                "tbank confirmed -> premium extended: tg_id=%s plan=%s order_id=%s",
+                tgid,
+                plan,
+                order_id,
             )
+            # IMPORTANT: do not send a separate Telegram message here.
+            # The bot itself will show a single success screen/menu when the user returns,
+            # otherwise we get duplicated messages in chat.
         else:
             log.info("tbank confirmed -> already processed: order_id=%s", order_id)
         return Response(content="OK", media_type="text/plain", status_code=200)
