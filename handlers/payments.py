@@ -35,7 +35,7 @@ router = Router(name="payments")
 TARIFFS = {
     "7d": {
         "days": 7,
-        "price_rub": 79,
+        "price_rub": 1,
         "price_stars": 70,
         "title": "GlowShot Premium — 7 дней",
         "label": "Премиум на 7 дней",

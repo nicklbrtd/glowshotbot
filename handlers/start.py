@@ -287,12 +287,22 @@ async def cmd_start(message: Message, state: FSMContext):
             is_admin = False
             is_moderator = False
 
-        menu_text = (await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium)) + "\n\n" + payment_note
+        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium)
         reply_kb = build_main_menu(
             is_admin=is_admin,
             is_moderator=is_moderator,
             is_premium=is_premium,
         )
+
+        # Отправляем статус оплаты отдельным сообщением (не мешаем меню)
+        try:
+            await message.answer(
+                payment_note,
+                disable_notification=True,
+                link_preview_options=NO_PREVIEW,
+            )
+        except Exception:
+            pass
 
         edited = False
         if menu_msg_id:
