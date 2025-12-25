@@ -173,4 +173,4 @@ async def tbank_notify(req: Request):
     except Exception:
         # If DB apply fails, return 500 so TBank retries the notification
         log.exception("tbank confirmed -> failed to apply payment: order_id=%s", order_id)
-        return Response(content="internal error", media_type="text/plain", status_code=500e)
+        return Response(content="internal error", media_type="text/plain", status_code=500)
