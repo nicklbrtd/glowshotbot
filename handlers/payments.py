@@ -65,6 +65,7 @@ TB_TERMINAL_KEY = os.getenv("TB_TERMINAL_KEY", "").strip()
 TB_PASSWORD = os.getenv("TB_PASSWORD", "").strip()
 TB_SUCCESS_URL = os.getenv("TB_SUCCESS_URL", "https://littlebrthood1.fvds.ru/pay/success").strip()
 TB_FAIL_URL = os.getenv("TB_FAIL_URL", "https://littlebrthood1.fvds.ru/pay/fail").strip()
+TB_NOTIFICATION_URL = os.getenv("TB_NOTIFICATION_URL", "https://littlebrthood1.fvds.ru/tbank/notify").strip()
 
 
 def _tbank_token(payload: dict, password: str) -> str:
@@ -104,8 +105,7 @@ async def tbank_create_payment_link(*, tg_id: int, period_code: str, amount_rub:
         "Description": f"GlowShot Premium ({period_code})",
         "SuccessURL": TB_SUCCESS_URL,
         "FailURL": TB_FAIL_URL,
-
-        "NotificationURL": "https://littlebrthood1.fvds.ru/tbank/notify",
+        "NotificationURL": TB_NOTIFICATION_URL,
         "PayType": "O",
     }
     payload["Token"] = _tbank_token(payload, TB_PASSWORD)

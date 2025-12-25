@@ -5,6 +5,8 @@ from typing import Optional, Tuple
 
 from fastapi import FastAPI, Request, Response
 
+import aiohttp
+
 from database import init_db, apply_tbank_payment_confirmed
 
 app = FastAPI()
@@ -21,6 +23,41 @@ async def _startup():
 
 def _env(name: str) -> str:
     return (os.getenv(name, "") or "").strip()
+
+
+# --- Telegram notification helpers ---
+async def _tg_send_message(tg_id: int, text: str) -> None:
+    """Send a one-off Telegram message from the bot (webhook runs without aiogram)."""
+    token = _env("BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN") or _env("TG_BOT_TOKEN")
+    if not token:
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": int(tg_id),
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=10) as resp:
+                # ignore failures (user may have blocked the bot etc.)
+                await resp.read()
+    except Exception:
+        return
+
+
+def _plan_to_human(plan: str) -> str:
+    p = (plan or "").strip().lower()
+    if p == "w":
+        return "Неделя"
+    if p == "m":
+        return "Месяц"
+    if p == "q":
+        return "3 месяца"
+    return p
 
 
 def calc_token(body: dict, password: str) -> str:
@@ -122,10 +159,18 @@ async def tbank_notify(req: Request):
         )
         if changed:
             log.info("tbank confirmed -> premium extended: tg_id=%s plan=%s order_id=%s", tgid, plan, order_id)
+            await _tg_send_message(
+                int(tgid),
+                (
+                    "✅ <b>Оплата подтверждена!</b>\n"
+                    f"Премиум активирован/продлён: <b>{_plan_to_human(plan)}</b>.\n\n"
+                    "Вернись в бота — меню обновится автоматически."
+                ),
+            )
         else:
             log.info("tbank confirmed -> already processed: order_id=%s", order_id)
         return Response(content="OK", media_type="text/plain", status_code=200)
     except Exception:
         # If DB apply fails, return 500 so TBank retries the notification
         log.exception("tbank confirmed -> failed to apply payment: order_id=%s", order_id)
-        return Response(content="internal error", media_type="text/plain", status_code=500)
+        return Response(content="internal error", media_type="text/plain", status_code=500e)
