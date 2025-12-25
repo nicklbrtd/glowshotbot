@@ -173,7 +173,7 @@ async def premium_choose_method(callback: CallbackQuery):
     # TBank link payment (карта/СБП на странице Т-Банка)
     if TB_TERMINAL_KEY and TB_PASSWORD:
         kb.button(
-            text=f"{rub_price} ₽ — Оплатить по ссылке (Т‑Банк)",
+            text=f"{rub_price} ₽ — Оплатить картой/СБП",
             callback_data=f"premium:tbank:{period_code}",
         )
     elif MANUAL_RUB_ENABLED:
@@ -183,7 +183,7 @@ async def premium_choose_method(callback: CallbackQuery):
         )
     else:
         kb.button(
-            text=f"{rub_price} ₽ — Оплата рублями (скоро)",
+            text=f"{rub_price} ₽ — Оплата рублями",
             callback_data="premium:rub:disabled",
         )
 
