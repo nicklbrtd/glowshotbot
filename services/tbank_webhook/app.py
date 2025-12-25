@@ -61,16 +61,33 @@ def _plan_to_human(plan: str) -> str:
 
 
 def calc_token(body: dict, password: str) -> str:
-    data = {}
+    """Calculate TBank/Tinkoff Token for notifications.
+
+    Notes:
+    - Token itself is excluded
+    - Nested objects (dict/list) are excluded
+    - Booleans must be lower-case "true"/"false" (Python would stringify as "True"/"False" otherwise)
+    - Comparison should be case-insensitive in case the provider returns upper-case hex
+    """
+    data: dict[str, str] = {}
+
     for k, v in body.items():
         if k == "Token":
             continue
         # вложенные объекты не участвуют
         if isinstance(v, (dict, list)):
             continue
-        data[str(k)] = "" if v is None else str(v)
+
+        if v is None:
+            data[str(k)] = ""
+        elif isinstance(v, bool):
+            data[str(k)] = "true" if v else "false"
+        else:
+            data[str(k)] = str(v)
 
     data["Password"] = password
+
+    # Sort keys lexicographically and concat VALUES only
     s = "".join(data[k] for k in sorted(data.keys()))
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -127,7 +144,7 @@ async def tbank_notify(req: Request):
 
     token = body.get("Token")
     computed = calc_token(body, tb_password)
-    if not token or computed != str(token):
+    if (not token) or (computed.lower() != str(token).lower()):
         log.warning("tbank notify bad token (mismatch)")
         return Response(content="bad token", media_type="text/plain", status_code=400)
 
