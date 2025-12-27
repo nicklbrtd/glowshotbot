@@ -1,12 +1,13 @@
 from aiogram import Router, F
 import html
 import os
+import traceback
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from datetime import datetime, timedelta
+from datetime import datetime
 from handlers.streak import load_streak_status_dict, render_streak_text_from_dict, build_streak_kb_from_dict
 
 from database import (
@@ -32,7 +33,6 @@ from database import (
     set_user_city_visibility,
     streak_get_status_by_tg_id,
     streak_toggle_notify_by_tg_id,
-    streak_rollover_if_needed_by_tg_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -1581,10 +1581,19 @@ async def profile_streak_open(callback: CallbackQuery):
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 raise
-    except Exception:
+    except Exception as e:
+        err_name = type(e).__name__
+        err_text = str(e)[:180]
+        print("[PROFILE_STREAK_ERROR]", err_name, err_text)
+        print(traceback.format_exc())
+
         # если что-то совсем жёстко упало — не зависаем
         await callback.message.edit_text(
-            "🔥 <b>Streak</b>\n\nПока не могу загрузить статус. Попробуй ещё раз через минуту.",
+            "🔥 <b>Streak</b>\n\n"
+            "Не получилось загрузить статус streak 😭\n"
+            f"Ошибка: <code>{html.escape(err_name)}: {html.escape(err_text)}</code>\n\n"
+            "Обычно это либо косяк в БД/миграции streak, либо таймаут соединения. "
+            "Скинь этот код из ошибки в логи — и я починю.",
             reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ В профиль"),
             parse_mode="HTML",
         )
