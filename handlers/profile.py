@@ -1349,23 +1349,151 @@ async def profile_awards_menu(callback: CallbackQuery):
     await callback.answer()
 
 
+# ============================ Settings ============================
+
+
+def _build_settings_kb(*, streak_notify_enabled: bool, streak_available: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+
+    # Likes/comments toggles are planned; keep UI but explain when tapped
+    kb.button(text="❤️ Лайки: скоро", callback_data="profile:settings:likes_soon")
+    kb.button(text="💬 Комменты: скоро", callback_data="profile:settings:comments_soon")
+
+    label = "🔔 Streak-напоминания: ВКЛ" if streak_notify_enabled else "🔕 Streak-напоминания: ВЫКЛ"
+    kb.button(text=label, callback_data="profile:settings:toggle_streak_notify")
+
+    if not streak_available:
+        kb.button(text="ℹ️ Как включить streak", callback_data="profile:settings:streak_help")
+
+    kb.button(text="⬅️ В профиль", callback_data="menu:profile")
+    kb.adjust(2, 1, 1, 1)
+    return kb.as_markup()
+
+
+def _render_settings_text(*, streak_notify_enabled: bool, streak_available: bool, streak: int, best: int) -> str:
+    lines: list[str] = []
+    lines.append("⚙️ <b>Настройки</b>")
+    lines.append("")
+
+    lines.append("<b>Уведомления</b>")
+    lines.append("❤️ Лайки — скоро")
+    lines.append("💬 Комменты — скоро")
+
+    if streak_available:
+        lines.append("")
+        lines.append("<b>Streak</b>")
+        lines.append(f"Текущая серия: <b>{streak}</b> (best: <b>{best}</b>)")
+        lines.append(f"Streak-напоминания: <b>{'вкл' if streak_notify_enabled else 'выкл'}</b>")
+        lines.append("Напоминания приходят только если streak уже начинался.")
+    else:
+        lines.append("")
+        lines.append("<b>Streak</b>")
+        lines.append("Сейчас streak ещё не начинался.")
+        lines.append("Зажги огонёк (оценка/загрузка/коммент), и тогда появятся напоминания.")
+
+    lines.append("")
+    lines.append("Дальше сюда добавим ещё больше переключателей 💅")
+
+    return "\n".join(lines)
+
+
+async def _load_settings_state(tg_id: int) -> tuple[bool, bool, int, int]:
+    """Returns: (streak_notify_enabled, streak_available, streak, best)"""
+    try:
+        status = await streak_get_status_by_tg_id(int(tg_id))
+    except Exception:
+        status = {}
+
+    streak = int(status.get("streak") or 0)
+    best = int(status.get("best_streak") or 0)
+    last = (status.get("last_completed_day") or "").strip()
+
+    # streak is considered "available" if it has ever started
+    streak_available = bool(best > 0 or streak > 0 or last)
+
+    notify_enabled = bool(status.get("notify_enabled")) if status else True
+
+    # If streak never started, force notify to look disabled in UI (even if stored true)
+    if not streak_available:
+        notify_enabled = False
+
+    return notify_enabled, streak_available, streak, best
+
+
 @router.callback_query(F.data == "profile:settings")
 async def profile_settings_menu(callback: CallbackQuery):
-    """
-    Раздел настроек (пока заглушка для уведомлений).
-    """
-    text = (
-        "⚙️ <b>Настройки</b>\n\n"
-        "Скоро здесь появятся удобные переключатели:\n"
-        "• вкл/выкл уведомления о лайках ❤️\n"
-        "• вкл/выкл уведомления о комментариях 💬\n"
+    tg_id = callback.from_user.id
+
+    notify_enabled, streak_available, streak, best = await _load_settings_state(int(tg_id))
+
+    text = _render_settings_text(
+        streak_notify_enabled=notify_enabled,
+        streak_available=streak_available,
+        streak=streak,
+        best=best,
     )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+    kb = _build_settings_kb(
+        streak_notify_enabled=notify_enabled,
+        streak_available=streak_available,
     )
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
+
+@router.callback_query(F.data == "profile:settings:toggle_streak_notify")
+async def profile_settings_toggle_streak_notify(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+
+    notify_enabled, streak_available, streak, best = await _load_settings_state(int(tg_id))
+
+    if not streak_available:
+        await callback.answer(
+            "Сначала начни streak: оцени фото / загрузи фото / оставь коммент 🔥",
+            show_alert=True,
+        )
+        return
+
+    try:
+        await streak_toggle_notify_by_tg_id(int(tg_id))
+    except Exception:
+        pass
+
+    notify_enabled, streak_available, streak, best = await _load_settings_state(int(tg_id))
+
+    text = _render_settings_text(
+        streak_notify_enabled=notify_enabled,
+        streak_available=streak_available,
+        streak=streak,
+        best=best,
+    )
+
+    kb = _build_settings_kb(
+        streak_notify_enabled=notify_enabled,
+        streak_available=streak_available,
+    )
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer("Ок")
+
+
+@router.callback_query(F.data == "profile:settings:streak_help")
+async def profile_settings_streak_help(callback: CallbackQuery):
+    await callback.answer(
+        "Чтобы появился streak: сделай любое действие — ⭐ оценка, 📸 загрузка, 💬 коммент. Потом тут включишь напоминания.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data == "profile:settings:likes_soon")
+async def profile_settings_likes_soon(callback: CallbackQuery):
+    await callback.answer("Лайк-уведомления скоро добавим 😈", show_alert=True)
+
+
+@router.callback_query(F.data == "profile:settings:comments_soon")
+async def profile_settings_comments_soon(callback: CallbackQuery):
+    await callback.answer("Уведомления о комментах скоро добавим 😈", show_alert=True)
 
 
 @router.callback_query(F.data == "profile:premium_benefits")
@@ -1433,12 +1561,9 @@ async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
 
 
 def _build_streak_settings_kb(status: dict) -> InlineKeyboardMarkup:
-    enabled = bool(status.get("notify_enabled"))
-    label = "🔔 Уведомления: ВКЛ" if enabled else "🔕 Уведомления: ВЫКЛ"
-
     kb = InlineKeyboardBuilder()
     kb.button(text="🔥 Обновить", callback_data="profile:streak")
-    kb.button(text=label, callback_data="profile:streak:toggle_notify")
+    kb.button(text="⚙️ Настройки уведомлений", callback_data="profile:settings")
     kb.button(text="⬅️ В профиль", callback_data="menu:profile")
     kb.adjust(1)
     return kb.as_markup()
@@ -1505,31 +1630,6 @@ async def profile_streak_open(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:streak:toggle_notify")
 async def profile_streak_toggle_notify(callback: CallbackQuery):
-    tg_id = callback.from_user.id
-    try:
-        await streak_toggle_notify_by_tg_id(int(tg_id))
-    except Exception:
-        pass
-
-    try:
-        status = await streak_get_status_by_tg_id(int(tg_id))
-    except Exception:
-        status = {
-            "streak": 0,
-            "best_streak": 0,
-            "freeze_tokens": 0,
-            "rated_today": 0,
-            "commented_today": 0,
-            "uploaded_today": 0,
-            "goal_done_today": False,
-            "notify_enabled": True,
-            "notify_hour": 21,
-            "notify_minute": 0,
-        }
-
-    await callback.message.edit_text(
-        _render_streak_settings(status),
-        reply_markup=_build_streak_settings_kb(status),
-        parse_mode="HTML",
-    )
-    await callback.answer("Ок")
+    await callback.answer("Перенёс(ла) в ⚙️ Настройки 😈", show_alert=True)
+    callback.data = "profile:settings"
+    await profile_settings_menu(callback)
