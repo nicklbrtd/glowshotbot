@@ -267,6 +267,66 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
     }
 
 
+async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
+    """Daily rollover for streak counters.
+
+    Safe to call often (on /start, menu open, etc).
+    """
+    await streak_ensure_user_row(int(tg_id))
+
+    today = get_moscow_today_key()
+    yesterday = get_moscow_yesterday_key()
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tg_id, streak, freeze_tokens, last_completed_day "
+            "FROM user_streak WHERE tg_id=$1 LIMIT 1",
+            int(tg_id),
+        )
+
+        if not row:
+            return await streak_get_status_by_tg_id(int(tg_id))
+
+        last_completed = (row["last_completed_day"] or "").strip()
+        cur_streak = int(row["streak"] or 0)
+        freeze = int(row["freeze_tokens"] or 0)
+
+        # Already completed today -> nothing to rollover
+        if last_completed == today:
+            return await streak_get_status_by_tg_id(int(tg_id))
+
+        # New day: reset daily action flags
+        await conn.execute(
+            "UPDATE user_streak "
+            "SET rated_today=0, commented_today=0, uploaded_today=0, goal_done_today=FALSE, updated_at=$2 "
+            "WHERE tg_id=$1",
+            int(tg_id),
+            get_moscow_now_iso(),
+        )
+
+        # Missed day: if last completion wasn't yesterday
+        if cur_streak > 0 and last_completed and last_completed != yesterday:
+            if freeze > 0:
+                await conn.execute(
+                    "UPDATE user_streak "
+                    "SET freeze_tokens=GREATEST(freeze_tokens-1,0), updated_at=$2 "
+                    "WHERE tg_id=$1",
+                    int(tg_id),
+                    get_moscow_now_iso(),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE user_streak "
+                    "SET streak=0, updated_at=$2 "
+                    "WHERE tg_id=$1",
+                    int(tg_id),
+                    get_moscow_now_iso(),
+                )
+
+    return await streak_get_status_by_tg_id(int(tg_id))
+
+
 async def count_today_photos_for_user(user_id: int, *, include_deleted: bool = False) -> int:
     """How many photos the user uploaded today (Moscow day_key)."""
     p = _assert_pool()
