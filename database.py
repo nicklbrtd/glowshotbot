@@ -152,6 +152,22 @@ async def streak_get_status_by_tg_id(tg_id: int) -> dict:
     }
 
 
+async def streak_toggle_notify_by_tg_id(tg_id: int) -> bool:
+    """Toggle streak reminder notifications for the user.
+
+    Returns the new value (True = enabled).
+    """
+    await streak_ensure_user_row(int(tg_id))
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "UPDATE user_streak SET notify_enabled = 1 - COALESCE(notify_enabled, 1), updated_at=$2 WHERE tg_id=$1 RETURNING notify_enabled",
+            int(tg_id),
+            get_moscow_now_iso(),
+        )
+    return bool(int(v or 0))
+
+
 async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
     await streak_ensure_user_row(int(tg_id))
     p = _assert_pool()
