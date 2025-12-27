@@ -1,7 +1,7 @@
 from aiogram import Router, F
 import traceback
 from datetime import date
-from utils.time import get_moscow_today_key
+from utils.time import get_moscow_today
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -43,6 +43,12 @@ from database import (
 from html import escape
 
 router = Router()
+
+def _moscow_day_key() -> str:
+    try:
+        return get_moscow_today().isoformat()
+    except Exception:
+        return str(get_moscow_today())
 
 
 class RateStates(StatesGroup):
@@ -1103,7 +1109,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
                 if author_tg:
                     prefs = await get_notify_settings_by_tg_id(int(author_tg))
                     if bool(prefs.get("likes_enabled", True)):
-                        await increment_likes_daily_for_tg_id(int(author_tg), get_moscow_today_key(), 1)
+                        await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
     except Exception:
         pass
     # Рефералька: проверяем, не пора ли выдать бонусы
@@ -1255,7 +1261,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                 if author_tg:
                     prefs = await get_notify_settings_by_tg_id(int(author_tg))
                     if bool(prefs.get("likes_enabled", True)):
-                        await increment_likes_daily_for_tg_id(int(author_tg), get_moscow_today_key(), 1)
+                        await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
     except Exception:
         pass
     # Рефералка: проверяем, не пора ли выдать бонусы
