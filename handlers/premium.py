@@ -11,8 +11,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database import get_user_premium_status, is_user_premium_active
 
-# Import shared tariffs from the single source of truth
-from handlers.payments import TARIFFS
 
 router = Router(name="premium")
 
@@ -110,29 +108,6 @@ async def profile_premium_menu(callback: CallbackQuery):
         kb.adjust(1)
 
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
-    await callback.answer()
-
-
-@router.callback_query(F.data == "premium:plans")
-async def premium_plans_shortcut(callback: CallbackQuery):
-    """Safety shortcut.
-
-    The real handler for `premium:plans` is in `handlers/payments.py`.
-    If routing order changes and this one triggers, we simply re-send the same callback
-    data so the user can proceed.
-    """
-    # Build a minimal plans screen using shared TARIFFS
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Неделя 70 ⭐️ / 79 ₽", callback_data="premium:plan:7d")
-    kb.button(text="Месяц 230 ⭐️ / 239 ₽", callback_data="premium:plan:30d")
-    kb.button(text="3 месяца 500 ⭐️ / 569 ₽", callback_data="premium:plan:90d")
-    kb.button(text="⬅️ Назад", callback_data="profile:premium")
-    kb.adjust(1)
-
-    await callback.message.edit_text(
-        "💎 <b>GlowShot Premium</b>\n\nВыбери период подписки:",
-        reply_markup=kb.as_markup(),
-    )
     await callback.answer()
 
 

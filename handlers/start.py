@@ -1,6 +1,7 @@
 import os
 import random
 import html
+from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery, LinkPreviewOptions
@@ -254,6 +255,8 @@ async def cmd_start(message: Message, state: FSMContext):
     # If we handle it here, non-registered users won't be able to rate.
     if payload and payload.startswith("rate_"):
         raise SkipHandler
+
+
     if payload in ("payment_success", "payment_fail"):
         user = await db.get_user_by_tg_id(message.from_user.id)
 

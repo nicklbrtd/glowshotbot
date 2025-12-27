@@ -11,6 +11,7 @@ from aiogram.types import (
     Message,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
 )
 from keyboards.common import build_viewed_kb
 from config import (
@@ -31,6 +32,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import time
 
 router = Router(name="payments")
+
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 TARIFFS = {
     "7d": {
@@ -397,14 +400,16 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message):
-    """
-    Обработка успешной оплаты: активируем премиум пользователю.
+    """Обработка успешной оплаты.
+
+    Поддерживает:
+    - premium:stars:<period>
     """
     successful_payment = message.successful_payment
     payload = successful_payment.invoice_payload or ""
-
-    # Ожидаем payload формата 'premium:stars:7d'
     parts = payload.split(":")
+
+    # --- Normal premium flow ---
     if len(parts) != 3 or parts[0] != "premium":
         await message.answer(
             "Оплата получена, но тариф не распознан.\n"
@@ -449,7 +454,6 @@ async def process_successful_payment(message: Message):
         premium_until=premium_until_iso,
     )
 
-
     # Логируем платёж в свою таблицу payments
     try:
         await log_successful_payment(
@@ -466,7 +470,6 @@ async def process_successful_payment(message: Message):
         # Если что-то пойдёт не так, оплата всё равно считается успешной
         pass
 
-
     # Текст чуть-чуть различаем по способу оплаты чисто косметически
     pay_method_line = "Способ оплаты: ⭐ Telegram Stars."
 
@@ -478,20 +481,24 @@ async def process_successful_payment(message: Message):
         "Спасибо, что поддерживаешь проект 💙"
     )
 
-    kb = build_viewed_kb("premium:success_read")
+    # Один аккуратный ответ без попыток редактировать сервисное сообщение оплаты.
+    # Плюс стараемся не плодить лишний мусор: удаляем сообщение об успешной оплате, если Telegram позволит.
 
-    # Пытаемся по максимуму не плодить новые сообщения: сначала пробуем отредактировать
-    # сам инвойс. Если Telegram не даст это сделать — тогда уже отправим новое сообщение.
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💎 Открыть Premium", callback_data="profile:premium")
+    kb.button(text="✖️ Закрыть", callback_data="premium:success_read")
+    kb.adjust(1)
+
+    # Сначала пробуем удалить сервисное сообщение (оно часто и создаёт "лишний" спам)
     try:
-        await message.edit_text(
-            success_text,
-            reply_markup=kb,
-        )
+        await message.delete()
     except Exception:
-        await message.answer(
-            success_text,
-            reply_markup=kb,
-        )
+        pass
+
+    await message.answer(
+        success_text,
+        reply_markup=kb.as_markup(),
+    )
 
 
 @router.callback_query(F.data == "premium:success_read")
