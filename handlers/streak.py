@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
 
 from database import (
     streak_get_status_by_tg_id,
@@ -52,6 +52,76 @@ class StreakStatus:
     notify_enabled: bool
     notify_hour: int
     notify_minute: int
+
+
+# -------------------- Reusable helpers (used by Profile UI too) --------------------
+
+def render_streak_text_from_dict(d: dict) -> str:
+    streak = int(d.get("streak") or 0)
+    best = int(d.get("best_streak") or 0)
+    freeze = int(d.get("freeze_tokens") or 0)
+    last = d.get("last_completed_day") or "—"
+
+    goal_done = bool(d.get("goal_done_today"))
+    goal_line = "✅ Дневная цель выполнена" if goal_done else "❌ Дневная цель НЕ выполнена"
+
+    rated_today = int(d.get("rated_today") or 0)
+    commented_today = int(d.get("commented_today") or 0)
+    uploaded_today = int(d.get("uploaded_today") or 0)
+
+    need_rate = max(0, DAILY_GOAL_RATE_COUNT - rated_today)
+    need_comm = max(0, DAILY_GOAL_COMMENT_COUNT - commented_today)
+    need_upl = max(0, DAILY_GOAL_UPLOAD_COUNT - uploaded_today)
+
+    how = (
+        "Сделай ЛЮБОЕ из этого сегодня:\n"
+        f"• 📸 загрузить фото: осталось {need_upl}\n"
+        f"• ⭐ оценить фото: осталось {need_rate}\n"
+        f"• 💬 оставить коммент: осталось {need_comm}\n"
+    )
+
+    notify_enabled = bool(d.get("notify_enabled"))
+    nh = int(d.get("notify_hour") or 21)
+    nm = int(d.get("notify_minute") or 0)
+
+    return (
+        "🔥 <b>GlowShot Streak</b>\n\n"
+        f"Текущая серия: <b>{streak}</b>\n"
+        f"Лучшая серия: <b>{best}</b>\n"
+        f"Freeze: <b>{freeze}</b> 🧊\n"
+        f"Последний день с огоньком: <b>{last}</b>\n\n"
+        f"{goal_line}\n\n"
+        f"Сегодня: ⭐ {rated_today}/{DAILY_GOAL_RATE_COUNT} | "
+        f"💬 {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | "
+        f"📸 {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}\n\n"
+        f"{how}\n"
+        f"⏳ Грейс после полуночи: <b>{GRACE_HOURS}ч</b>\n"
+        f"🔔 Уведомления: <b>{'вкл' if notify_enabled else 'выкл'}</b> ({nh:02d}:{nm:02d})\n"
+    )
+
+
+def build_streak_kb_from_dict(
+    d: dict,
+    *,
+    refresh_cb: str,
+    toggle_notify_cb: str,
+    back_cb: str | None = None,
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔥 Обновить", callback_data=refresh_cb)
+    kb.button(
+        text=("🔔 Уведомления: ВКЛ" if bool(d.get("notify_enabled")) else "🔕 Уведомления: ВЫКЛ"),
+        callback_data=toggle_notify_cb,
+    )
+    if back_cb:
+        kb.button(text="⬅️ Назад", callback_data=back_cb)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def load_streak_status_dict(tg_id: int) -> dict:
+    await streak_rollover_if_needed_by_tg_id(int(tg_id))
+    return await streak_get_status_by_tg_id(int(tg_id))
 
 
 def _kb_streak(status: StreakStatus):
