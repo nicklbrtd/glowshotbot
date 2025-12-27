@@ -28,6 +28,8 @@ from database import (
     update_user_city,
     update_user_country,
     set_user_city_visibility,
+    streak_get_status_by_tg_id,
+    streak_toggle_notify_by_tg_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -127,6 +129,21 @@ async def build_profile_view(user: dict):
 
     user_id = user.get("id")
     tg_id = user.get("tg_id")
+
+    # Streak badge (optional)
+    streak_badge = ""
+    streak_short_line = ""
+    if tg_id:
+        try:
+            s = await streak_get_status_by_tg_id(int(tg_id))
+            cur_streak = int(s.get("streak") or 0)
+            best_streak = int(s.get("best_streak") or 0)
+            if cur_streak > 0:
+                streak_badge = f" 🔥{cur_streak}"
+            streak_short_line = f"🔥 Streak: {cur_streak} (best {best_streak})"
+        except Exception:
+            streak_badge = ""
+            streak_short_line = ""
 
     # Rank (cached)
     rank_label = None
@@ -278,7 +295,7 @@ async def build_profile_view(user: dict):
             pass
 
     text_lines = [
-        f"👤<b>Твой профиль</b>{premium_badge}",
+        f"👤<b>Твой профиль</b>{premium_badge}{streak_badge}",
         f"Имя: {name}{age_part} лет" if age else f"Имя: {name}",
         f"🏷 Ранг: {rank_label}" if rank_label else "🏷 Ранг: 🟢 Начинающий",
         f"Пол: {gender_icon}",
@@ -342,6 +359,7 @@ async def build_profile_view(user: dict):
     stats_lines = [
         f"Всего загрузил: {total_photos}",
         f"Дней в боте: {days_in_bot}",
+        streak_short_line or "🔥 Streak: —",
         f"Средняя оценка: {avg_rating_text}",
         f"Самое популярное фото: {popular_photo_line}",
     ]
@@ -367,12 +385,13 @@ async def build_profile_view(user: dict):
     kb.button(text="🏅 Итоги", callback_data="myresults:0")
     kb.button(text="✏️ Редактировать профиль", callback_data="profile:edit")
     kb.button(text="⚙️ Настройки", callback_data="profile:settings")
+    kb.button(text="🔥 Streak", callback_data="profile:streak")
 
     premium_button_text = "💎 Оформить премиум" if not premium_active else "💎 Мой премиум"
     kb.button(text=premium_button_text, callback_data="profile:premium")
 
     kb.button(text="⬅️ В меню", callback_data="menu:back")
-    kb.adjust(2, 2, 1, 1)
+    kb.adjust(2, 2, 2, 1, 1)
     return text, kb.as_markup()
 
 
@@ -1408,3 +1427,109 @@ async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
         reply_markup=kb.as_markup(),
     )
     await callback.answer("Аккаунт удалён.")
+
+
+# ============================ Streak settings (profile) ============================
+
+
+def _build_streak_settings_kb(status: dict) -> InlineKeyboardMarkup:
+    enabled = bool(status.get("notify_enabled"))
+    label = "🔔 Уведомления: ВКЛ" if enabled else "🔕 Уведомления: ВЫКЛ"
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔥 Обновить", callback_data="profile:streak")
+    kb.button(text=label, callback_data="profile:streak:toggle_notify")
+    kb.button(text="⬅️ В профиль", callback_data="menu:profile")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _render_streak_settings(status: dict) -> str:
+    cur = int(status.get("streak") or 0)
+    best = int(status.get("best_streak") or 0)
+    freeze = int(status.get("freeze_tokens") or 0)
+
+    rated = int(status.get("rated_today") or 0)
+    commented = int(status.get("commented_today") or 0)
+    uploaded = int(status.get("uploaded_today") or 0)
+    done = bool(status.get("goal_done_today"))
+
+    goal_line = "✅ цель на сегодня выполнена" if done else "❌ цель на сегодня не выполнена"
+
+    hour = int(status.get("notify_hour") or 21)
+    minute = int(status.get("notify_minute") or 0)
+    notif = "вкл" if bool(status.get("notify_enabled")) else "выкл"
+
+    return (
+        "🔥 <b>Streak</b>\n\n"
+        f"Серия: <b>{cur}</b> (best: <b>{best}</b>)\n"
+        f"Freeze: <b>{freeze}</b> 🧊\n\n"
+        f"Сегодня: ⭐ {rated} | 💬 {commented} | 📸 {uploaded}\n"
+        f"{goal_line}\n\n"
+        "Как зажечь огонёк сегодня (любое одно):\n"
+        "• ⭐ оцени фото\n"
+        "• 📸 загрузи фото\n"
+        "• 💬 оставь коммент\n\n"
+        f"Уведомления: <b>{notif}</b> ({hour:02d}:{minute:02d})\n"
+        "\n"
+        "Если хочешь подробнее — команда /streak."
+    )
+
+
+@router.callback_query(F.data == "profile:streak")
+async def profile_streak_open(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    try:
+        status = await streak_get_status_by_tg_id(int(tg_id))
+    except Exception:
+        status = {
+            "streak": 0,
+            "best_streak": 0,
+            "freeze_tokens": 0,
+            "rated_today": 0,
+            "commented_today": 0,
+            "uploaded_today": 0,
+            "goal_done_today": False,
+            "notify_enabled": True,
+            "notify_hour": 21,
+            "notify_minute": 0,
+        }
+
+    await callback.message.edit_text(
+        _render_streak_settings(status),
+        reply_markup=_build_streak_settings_kb(status),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:streak:toggle_notify")
+async def profile_streak_toggle_notify(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    try:
+        await streak_toggle_notify_by_tg_id(int(tg_id))
+    except Exception:
+        pass
+
+    try:
+        status = await streak_get_status_by_tg_id(int(tg_id))
+    except Exception:
+        status = {
+            "streak": 0,
+            "best_streak": 0,
+            "freeze_tokens": 0,
+            "rated_today": 0,
+            "commented_today": 0,
+            "uploaded_today": 0,
+            "goal_done_today": False,
+            "notify_enabled": True,
+            "notify_hour": 21,
+            "notify_minute": 0,
+        }
+
+    await callback.message.edit_text(
+        _render_streak_settings(status),
+        reply_markup=_build_streak_settings_kb(status),
+        parse_mode="HTML",
+    )
+    await callback.answer("Ок")

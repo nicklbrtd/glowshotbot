@@ -70,6 +70,185 @@ def _today_key() -> str:
         return d.isoformat()
     except Exception:
         return str(d)
+    
+
+# -------------------- streak (🔥) API --------------------
+
+_STREAK_DAILY_RATINGS = int(os.getenv("STREAK_DAILY_RATINGS", "3"))
+_STREAK_DAILY_COMMENTS = int(os.getenv("STREAK_DAILY_COMMENTS", "1"))
+_STREAK_DAILY_UPLOADS = int(os.getenv("STREAK_DAILY_UPLOADS", "1"))
+_STREAK_GRACE_HOURS = int(os.getenv("STREAK_GRACE_HOURS", "6"))
+_STREAK_MAX_NUDGES_PER_DAY = int(os.getenv("STREAK_MAX_NUDGES_PER_DAY", "2"))
+
+
+def _streak_target_day_key(now_dt: datetime) -> str:
+    """During grace window after midnight attribute actions to yesterday."""
+    try:
+        grace_time = datetime(now_dt.year, now_dt.month, now_dt.day, _STREAK_GRACE_HOURS, 0, 0).time()
+        if now_dt.time() < grace_time:
+            return (now_dt.date() - timedelta(days=1)).isoformat()
+        return now_dt.date().isoformat()
+    except Exception:
+        return _today_key()
+
+
+def _streak_goal_done(rated: int, commented: int, uploaded: int) -> bool:
+    return (
+        uploaded >= _STREAK_DAILY_UPLOADS
+        or rated >= _STREAK_DAILY_RATINGS
+        or commented >= _STREAK_DAILY_COMMENTS
+    )
+
+
+async def streak_ensure_user_row(tg_id: int) -> None:
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_streak (tg_id, created_at, updated_at)
+            VALUES ($1,$2,$2)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id), now
+        )
+
+
+async def streak_get_status_by_tg_id(tg_id: int) -> dict:
+    await streak_ensure_user_row(int(tg_id))
+    now_dt = get_moscow_now()
+    today_key = now_dt.date().isoformat()
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        u = await conn.fetchrow("SELECT * FROM user_streak WHERE tg_id=$1", int(tg_id))
+        await conn.execute(
+            """
+            INSERT INTO streak_daily (tg_id, day_key)
+            VALUES ($1,$2)
+            ON CONFLICT (tg_id, day_key) DO NOTHING
+            """,
+            int(tg_id), str(today_key)
+        )
+        d = await conn.fetchrow(
+            "SELECT * FROM streak_daily WHERE tg_id=$1 AND day_key=$2",
+            int(tg_id), str(today_key)
+        )
+
+    return {
+        "tg_id": int(tg_id),
+        "today_key": str(today_key),
+        "streak": int(u["streak"] or 0) if u else 0,
+        "best_streak": int(u["best_streak"] or 0) if u else 0,
+        "freeze_tokens": int(u["freeze_tokens"] or 0) if u else 0,
+        "last_completed_day": str(u["last_completed_day"]) if u and u["last_completed_day"] else None,
+        "notify_enabled": bool(int(u["notify_enabled"] or 0)) if u else True,
+        "notify_hour": int(u["notify_hour"] or 21) if u else 21,
+        "notify_minute": int(u["notify_minute"] or 0) if u else 0,
+        "rated_today": int(d["rated_count"] or 0) if d else 0,
+        "commented_today": int(d["comment_count"] or 0) if d else 0,
+        "uploaded_today": int(d["upload_count"] or 0) if d else 0,
+        "goal_done_today": bool(int(d["goal_done"] or 0)) if d else False,
+    }
+
+
+async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
+    await streak_ensure_user_row(int(tg_id))
+    p = _assert_pool()
+
+    now_dt = get_moscow_now()
+    now_iso = get_moscow_now_iso()
+    day_key = _streak_target_day_key(now_dt)
+
+    async with p.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO streak_actions (tg_id, action, created_at) VALUES ($1,$2,$3)",
+            int(tg_id), str(action), now_iso
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO streak_daily (tg_id, day_key)
+            VALUES ($1,$2)
+            ON CONFLICT (tg_id, day_key) DO NOTHING
+            """,
+            int(tg_id), str(day_key)
+        )
+
+        d = await conn.fetchrow(
+            "SELECT * FROM streak_daily WHERE tg_id=$1 AND day_key=$2",
+            int(tg_id), str(day_key)
+        )
+
+        rated = int(d["rated_count"] or 0) if d else 0
+        comm = int(d["comment_count"] or 0) if d else 0
+        upl = int(d["upload_count"] or 0) if d else 0
+        goal_before = bool(int(d["goal_done"] or 0)) if d else False
+
+        if action == "rate":
+            rated += 1
+        elif action == "comment":
+            comm += 1
+        elif action == "upload":
+            upl += 1
+
+        goal_after = _streak_goal_done(rated, comm, upl)
+
+        await conn.execute(
+            """
+            UPDATE streak_daily
+            SET rated_count=$3, comment_count=$4, upload_count=$5, goal_done=$6
+            WHERE tg_id=$1 AND day_key=$2
+            """,
+            int(tg_id), str(day_key),
+            int(rated), int(comm), int(upl),
+            1 if goal_after else 0
+        )
+
+        streak_changed = False
+
+        if (not goal_before) and goal_after:
+            u = await conn.fetchrow("SELECT * FROM user_streak WHERE tg_id=$1", int(tg_id))
+            streak = int(u["streak"] or 0) if u else 0
+            best = int(u["best_streak"] or 0) if u else 0
+            last_completed = str(u["last_completed_day"]) if u and u["last_completed_day"] else None
+
+            if last_completed != str(day_key):
+                if last_completed is None:
+                    new_streak = 1
+                else:
+                    try:
+                        last_d = datetime.fromisoformat(last_completed).date()
+                        cur_d = datetime.fromisoformat(str(day_key)).date()
+                        delta = (cur_d - last_d).days
+                    except Exception:
+                        delta = 999
+                    new_streak = (streak + 1) if delta == 1 else 1
+
+                new_best = max(best, int(new_streak))
+                await conn.execute(
+                    """
+                    UPDATE user_streak
+                    SET streak=$2, best_streak=$3, last_completed_day=$4, updated_at=$5
+                    WHERE tg_id=$1
+                    """,
+                    int(tg_id), int(new_streak), int(new_best), str(day_key), now_iso
+                )
+                streak_changed = True
+
+        u2 = await conn.fetchrow("SELECT * FROM user_streak WHERE tg_id=$1", int(tg_id))
+
+    return {
+        "day_key": str(day_key),
+        "rated": int(rated),
+        "commented": int(comm),
+        "uploaded": int(upl),
+        "goal_done_now": bool(goal_after),
+        "streak_changed": bool(streak_changed),
+        "streak": int(u2["streak"] or 0) if u2 else 0,
+        "best": int(u2["best_streak"] or 0) if u2 else 0,
+        "freeze": int(u2["freeze_tokens"] or 0) if u2 else 0,
+    }
 
 
 async def count_today_photos_for_user(user_id: int, *, include_deleted: bool = False) -> int:
@@ -591,6 +770,54 @@ async def ensure_schema() -> None:
             );
             """
         )
+        # -------------------- streak (🔥) --------------------
+        # We store streaks by Telegram user id (tg_id) because many flows are tg_id-first.
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_streak (
+              tg_id BIGINT PRIMARY KEY,
+              streak INTEGER NOT NULL DEFAULT 0,
+              best_streak INTEGER NOT NULL DEFAULT 0,
+              freeze_tokens INTEGER NOT NULL DEFAULT 0,
+              last_completed_day TEXT,
+
+              notify_enabled INTEGER NOT NULL DEFAULT 1,
+              notify_hour INTEGER NOT NULL DEFAULT 21,
+              notify_minute INTEGER NOT NULL DEFAULT 0,
+
+              last_nudge_day TEXT,
+              nudge_count INTEGER NOT NULL DEFAULT 0,
+
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS streak_daily (
+              tg_id BIGINT NOT NULL,
+              day_key TEXT NOT NULL,
+              rated_count INTEGER NOT NULL DEFAULT 0,
+              comment_count INTEGER NOT NULL DEFAULT 0,
+              upload_count INTEGER NOT NULL DEFAULT 0,
+              goal_done INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (tg_id, day_key)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS streak_actions (
+              id BIGSERIAL PRIMARY KEY,
+              tg_id BIGINT NOT NULL,
+              action TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            """
+        )
 
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_owner ON photo_share_links(owner_tg_id);")
@@ -625,6 +852,9 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_id ON ratings(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_photo_id ON comments(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_photo_id ON photo_reports(photo_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_streak_updated_at ON user_streak(updated_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_tg_id ON streak_actions(tg_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_created_at ON streak_actions(created_at);")
 
         # Идемпотентность: один order_id/payment_id на провайдера
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_order_id ON payments(provider, order_id);")

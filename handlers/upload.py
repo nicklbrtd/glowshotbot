@@ -30,14 +30,15 @@ from database import (
     count_today_photos_for_user,
     get_comment_counts_for_photo,
     get_photo_ratings_stats,
-	count_super_ratings_for_photo,
+    count_super_ratings_for_photo,
     count_comments_for_photo,
-	count_active_users,
-	count_photo_reports_for_photo,
-	get_photo_rank_in_day,
-	get_link_ratings_count_for_photo,
-	get_photo_skip_count_for_photo,
+    count_active_users,
+    count_photo_reports_for_photo,
+    get_photo_rank_in_day,
+    get_link_ratings_count_for_photo,
+    get_photo_skip_count_for_photo,
     get_comments_for_photo_sorted,
+    streak_record_action_by_tg_id,
 )
 from utils.time import get_moscow_now
 
@@ -1258,10 +1259,7 @@ async def myphoto_skip_description(callback: CallbackQuery, state: FSMContext):
 async def myphoto_got_description(message: Message, state: FSMContext):
     await message.delete()
     await message.answer("Описание сейчас добавляется позже — через карточку фотографии.")
-# === ОБРАБОТКА ВЫБОРА ТИПА УСТРОЙСТВА ===
 
-
-# ====== DELETE PHOTO HANDLER PATCH ======
 
 # Patch the delete handler to show correct post-delete UI
 
@@ -1766,6 +1764,19 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     upload_msg_id = data.get("upload_msg_id")
     upload_chat_id = data.get("upload_chat_id")
 
+    # Basic guards (do not crash on broken state)
+    if not user_id or not file_id or not title:
+        await bot.send_message(
+            chat_id=upload_chat_id or fallback_chat_id,
+            text="Сессия загрузки сбилась. Открой «Моя фотография» и попробуй загрузить заново.",
+            disable_notification=True,
+        )
+        try:
+            await state.clear()
+        except Exception:
+            pass
+        return
+
     # Save photo in DB, handle unique violation
     try:
         photo_id = await create_today_photo(
@@ -1773,6 +1784,15 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             file_id=file_id,
             title=title,
         )
+
+        # 🔥 streak: successful upload counts as activity
+        try:
+            tg_id = int(event.from_user.id)
+            await streak_record_action_by_tg_id(tg_id, "upload")
+        except Exception:
+            # Never break upload flow because of streak
+            pass
+
     except UniqueViolationError:
         await bot.send_message(
             chat_id=upload_chat_id or fallback_chat_id,

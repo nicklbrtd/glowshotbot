@@ -94,6 +94,7 @@ from handlers import (
     payments,
     referrals,
     linklike,
+    streak,
 )
 
 
@@ -234,6 +235,7 @@ async def main() -> None:
     dp.include_router(payments.router)
     dp.include_router(referrals.router)
     dp.include_router(help_center_router)
+    dp.include_router(streak.router)
 
     print("🤖 GlowShot запущен")
 

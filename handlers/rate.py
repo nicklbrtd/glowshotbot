@@ -32,6 +32,7 @@ from database import (
     get_awards_for_user,
     link_and_reward_referral_if_needed,
     log_bot_error,
+    streak_record_action_by_tg_id,
 )
 from html import escape
 
@@ -126,9 +127,6 @@ def build_no_photos_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-
-
-
 def build_no_photos_text() -> str:
     return (
         "Фотографии на сегодня закончились 😭\n\n"
@@ -137,8 +135,6 @@ def build_no_photos_text() -> str:
         f"Вот ссылка на бота:\n<code>{BOT_INVITE_LINK}</code>\n\n"
         "Либо воспользуйся своей реферальной ссылкой: /ref"
     )
-
-
 
 
 # Специальная подпись для раздела оценивания
@@ -1039,6 +1035,11 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     await add_rating(user["id"], photo_id, value)
     # И помечаем её как супер-оценку (+5 баллов в статистике)
     await set_super_rating(user["id"], photo_id)
+    # 🔥 streak: любая оценка считается активностью
+    try:
+        await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
+    except Exception:
+        pass
 
     # Рефералька: проверяем, не пора ли выдать бонусы
     try:
@@ -1170,6 +1171,11 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
     await add_rating(user["id"], photo_id, value)
+    # 🔥 streak: любая оценка считается активностью
+    try:
+        await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
+    except Exception:
+        pass
 
     # Рефералка: проверяем, не пора ли выдать бонусы
     try:
