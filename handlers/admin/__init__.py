@@ -15,6 +15,7 @@ from .users import router as users_router
 from .roles import router as roles_router
 from .logs import router as logs_router
 from .broadcast import router as broadcast_router
+from .awards import router as awards_router
 # settings.py может быть пустым/в процессе — подключаем мягко
 try:
     from .settings import router as settings_router
@@ -30,5 +31,6 @@ router.include_router(users_router)
 router.include_router(roles_router)
 router.include_router(logs_router)
 router.include_router(broadcast_router)
+router.include_router(awards_router)
 if settings_router is not None:
     router.include_router(settings_router)
