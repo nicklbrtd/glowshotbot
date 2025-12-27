@@ -70,7 +70,122 @@ def _today_key() -> str:
         return d.isoformat()
     except Exception:
         return str(d)
-    
+# -------------------- Notifications settings (likes/comments) --------------------
+
+async def _ensure_notify_tables(conn: asyncpg.Connection) -> None:
+    """Create notification tables if they don't exist (safe for Postgres)."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_notify_settings (
+            tg_id BIGINT PRIMARY KEY,
+            likes_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            comments_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notify_likes_daily (
+            tg_id BIGINT NOT NULL,
+            day_key TEXT NOT NULL,
+            likes_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tg_id, day_key)
+        );
+        """
+    )
+
+
+async def get_notify_settings_by_tg_id(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_notify_settings (tg_id)
+            VALUES ($1)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id),
+        )
+        row = await conn.fetchrow(
+            "SELECT tg_id, likes_enabled, comments_enabled FROM user_notify_settings WHERE tg_id=$1",
+            int(tg_id),
+        )
+        if not row:
+            return {"tg_id": int(tg_id), "likes_enabled": True, "comments_enabled": True}
+        return dict(row)
+
+
+async def toggle_likes_notify_by_tg_id(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_notify_settings (tg_id)
+            VALUES ($1)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id),
+        )
+        await conn.execute(
+            """
+            UPDATE user_notify_settings
+            SET likes_enabled = NOT likes_enabled,
+                updated_at = NOW()
+            WHERE tg_id=$1
+            """,
+            int(tg_id),
+        )
+
+    return await get_notify_settings_by_tg_id(int(tg_id))
+
+
+async def toggle_comments_notify_by_tg_id(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_notify_settings (tg_id)
+            VALUES ($1)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id),
+        )
+        await conn.execute(
+            """
+            UPDATE user_notify_settings
+            SET comments_enabled = NOT comments_enabled,
+                updated_at = NOW()
+            WHERE tg_id=$1
+            """,
+            int(tg_id),
+        )
+
+    return await get_notify_settings_by_tg_id(int(tg_id))
+
+
+async def increment_likes_daily_for_tg_id(tg_id: int, day_key: str, delta: int = 1) -> None:
+    """Accumulate likes for daily summary notifications."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO notify_likes_daily (tg_id, day_key, likes_count)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (tg_id, day_key)
+            DO UPDATE SET likes_count = notify_likes_daily.likes_count + EXCLUDED.likes_count,
+                          updated_at = NOW()
+            """,
+            int(tg_id),
+            str(day_key),
+            int(delta),
+        )
 
 # -------------------- streak (🔥) API --------------------
 
@@ -890,7 +1005,29 @@ async def ensure_schema() -> None:
             );
             """
         )
-        # -------------------- streak (🔥) --------------------
+        # -------------------- notifications (likes/comments) --------------------
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_notify_settings (
+                tg_id BIGINT PRIMARY KEY,
+                likes_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                comments_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notify_likes_daily (
+                tg_id BIGINT NOT NULL,
+                day_key TEXT NOT NULL,
+                likes_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (tg_id, day_key)
+            );
+            """
+        )
         # We store streaks by Telegram user id (tg_id) because many flows are tg_id-first.
         await conn.execute(
             """
@@ -3755,3 +3892,120 @@ async def get_or_create_share_link_code(owner_tg_id: int) -> str:
         )
     return code
 
+
+# -------------------- Notifications settings (likes/comments) --------------------
+
+async def _ensure_notify_tables(conn) -> None:
+    """Create notification tables if they don't exist (safe for Postgres)."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_notify_settings (
+            tg_id BIGINT PRIMARY KEY,
+            likes_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            comments_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notify_likes_daily (
+            tg_id BIGINT NOT NULL,
+            day_key TEXT NOT NULL,
+            likes_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tg_id, day_key)
+        );
+        """
+    )
+
+
+async def get_notify_settings_by_tg_id(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_notify_settings (tg_id)
+            VALUES ($1)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id),
+        )
+        row = await conn.fetchrow(
+            "SELECT tg_id, likes_enabled, comments_enabled FROM user_notify_settings WHERE tg_id=$1",
+            int(tg_id),
+        )
+        if not row:
+            return {"tg_id": int(tg_id), "likes_enabled": True, "comments_enabled": True}
+        return dict(row)
+
+
+async def toggle_likes_notify_by_tg_id(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_notify_settings (tg_id)
+            VALUES ($1)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id),
+        )
+        await conn.execute(
+            """
+            UPDATE user_notify_settings
+            SET likes_enabled = NOT likes_enabled,
+                updated_at = NOW()
+            WHERE tg_id=$1
+            """,
+            int(tg_id),
+        )
+
+    return await get_notify_settings_by_tg_id(int(tg_id))
+
+
+async def toggle_comments_notify_by_tg_id(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_notify_settings (tg_id)
+            VALUES ($1)
+            ON CONFLICT (tg_id) DO NOTHING
+            """,
+            int(tg_id),
+        )
+        await conn.execute(
+            """
+            UPDATE user_notify_settings
+            SET comments_enabled = NOT comments_enabled,
+                updated_at = NOW()
+            WHERE tg_id=$1
+            """,
+            int(tg_id),
+        )
+
+    return await get_notify_settings_by_tg_id(int(tg_id))
+
+
+async def increment_likes_daily_for_tg_id(tg_id: int, day_key: str, delta: int = 1) -> None:
+    """Accumulate likes for daily summary notifications."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_notify_tables(conn)
+        await conn.execute(
+            """
+            INSERT INTO notify_likes_daily (tg_id, day_key, likes_count)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (tg_id, day_key)
+            DO UPDATE SET likes_count = notify_likes_daily.likes_count + EXCLUDED.likes_count,
+                          updated_at = NOW()
+            """,
+            int(tg_id),
+            str(day_key),
+            int(delta),
+        )

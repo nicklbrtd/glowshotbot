@@ -1,7 +1,7 @@
 from aiogram import Router, F
 import traceback
 from datetime import date
-
+from utils.time import get_moscow_today_key
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -37,6 +37,8 @@ from database import (
     log_bot_error,
     streak_record_action_by_tg_id,
     streak_get_status_by_tg_id,
+    get_notify_settings_by_tg_id,
+    increment_likes_daily_for_tg_id,
 )
 from html import escape
 
@@ -653,7 +655,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
     # await state.update_data(comment_text=text)  # removed per instructions
     await message.delete()
 
-       # --- Save comment immediately (so it is visible in upload/my photo) ---
+    # --- Save comment immediately (so it is visible in upload/my photo) ---
     user_for_rate = await get_user_by_tg_id(message.from_user.id)
     saved = False
     save_error: Exception | None = None
@@ -718,20 +720,26 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 author = None
 
             if author is not None and author.get("tg_id"):
-                mode_label = "публичный" if is_public else "анонимный"
                 try:
-                    await message.bot.send_message(
-                        chat_id=int(author["tg_id"]),
-                        text=(
-                            f"🔔 <b>Новый {mode_label} комментарий к вашей фотографии</b>\n"
-                            f"Текст: {text}"
-                        ),
-                        reply_markup=build_comment_notification_keyboard(),
-                        parse_mode="HTML",
-                        disable_notification=True,
-                    )
+                    prefs = await get_notify_settings_by_tg_id(int(author["tg_id"]))
                 except Exception:
-                    pass
+                    prefs = {"comments_enabled": True}
+
+                if bool(prefs.get("comments_enabled", True)):
+                    mode_label = "публичный" if is_public else "анонимный"
+                    try:
+                        await message.bot.send_message(
+                            chat_id=int(author["tg_id"]),
+                            text=(
+                                f"🔔 <b>Новый {mode_label} комментарий к вашей фотографии</b>\n"
+                                f"Текст: {text}"
+                            ),
+                            reply_markup=build_comment_notification_keyboard(),
+                            parse_mode="HTML",
+                            disable_notification=True,
+                        )
+                    except Exception:
+                        pass
 
     # --- Success: return the user to the rating UI and exit the comment state ---
     is_premium_rater = False
@@ -1084,7 +1092,20 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
         await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
     except Exception:
         pass
-
+        # notifications: accumulate likes for daily summary (best-effort)
+    try:
+        photo_row = await get_photo_by_id(int(photo_id))
+        if photo_row:
+            author_user_id = photo_row.get("user_id")
+            if author_user_id and int(author_user_id) != int(user["id"]):
+                author = await get_user_by_id(int(author_user_id))
+                author_tg = (author or {}).get("tg_id")
+                if author_tg:
+                    prefs = await get_notify_settings_by_tg_id(int(author_tg))
+                    if bool(prefs.get("likes_enabled", True)):
+                        await increment_likes_daily_for_tg_id(int(author_tg), get_moscow_today_key(), 1)
+    except Exception:
+        pass
     # Рефералька: проверяем, не пора ли выдать бонусы
     try:
         rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
@@ -1221,6 +1242,20 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     # streak: rating counts as daily activity
     try:
         await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
+    except Exception:
+        pass
+        # notifications: accumulate likes for daily summary (best-effort)
+    try:
+        photo_row = await get_photo_by_id(int(photo_id))
+        if photo_row:
+            author_user_id = photo_row.get("user_id")
+            if author_user_id and int(author_user_id) != int(user["id"]):
+                author = await get_user_by_id(int(author_user_id))
+                author_tg = (author or {}).get("tg_id")
+                if author_tg:
+                    prefs = await get_notify_settings_by_tg_id(int(author_tg))
+                    if bool(prefs.get("likes_enabled", True)):
+                        await increment_likes_daily_for_tg_id(int(author_tg), get_moscow_today_key(), 1)
     except Exception:
         pass
     # Рефералка: проверяем, не пора ли выдать бонусы
