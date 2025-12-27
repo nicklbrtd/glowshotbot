@@ -267,6 +267,29 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
     }
 
 
+async def streak_add_freeze_by_tg_id(tg_id: int, amount: int = 1) -> int:
+    """Add freeze tokens to a user's streak. Returns new freeze_tokens."""
+    if amount <= 0:
+        status = await streak_get_status_by_tg_id(int(tg_id))
+        return int(status.get("freeze_tokens") or 0)
+
+    await streak_ensure_user_row(int(tg_id))
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "UPDATE user_streak "
+            "SET freeze_tokens = COALESCE(freeze_tokens, 0) + $2, updated_at=$3 "
+            "WHERE tg_id=$1 "
+            "RETURNING freeze_tokens",
+            int(tg_id),
+            int(amount),
+            get_moscow_now_iso(),
+        )
+
+    return int(v or 0)
+
+
 async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
     """Daily rollover for streak counters.
 
