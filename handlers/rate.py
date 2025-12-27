@@ -1079,7 +1079,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     await add_rating(user["id"], photo_id, value)
     # И помечаем её как супер-оценку (+5 баллов в статистике)
     await set_super_rating(user["id"], photo_id)
-    # 🔥 streak: любая оценка считается активностью
+    # streak: rating counts as daily activity
     try:
         await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
     except Exception:
@@ -1218,12 +1218,11 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
     await add_rating(user["id"], photo_id, value)
-    # 🔥 streak: любая оценка считается активностью
+    # streak: rating counts as daily activity
     try:
         await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
     except Exception:
         pass
-
     # Рефералка: проверяем, не пора ли выдать бонусы
     try:
         rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])

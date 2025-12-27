@@ -1,5 +1,6 @@
 from aiogram import Router, F
 import html
+import os
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -30,6 +31,7 @@ from database import (
     set_user_city_visibility,
     streak_get_status_by_tg_id,
     streak_toggle_notify_by_tg_id,
+    streak_rollover_if_needed_by_tg_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -66,6 +68,74 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     return many
 
 
+# -------------------- Streak (Profile UI) --------------------
+DAILY_GOAL_RATE_COUNT = int(os.getenv("STREAK_DAILY_RATINGS", "3"))
+DAILY_GOAL_COMMENT_COUNT = int(os.getenv("STREAK_DAILY_COMMENTS", "1"))
+DAILY_GOAL_UPLOAD_COUNT = int(os.getenv("STREAK_DAILY_UPLOADS", "1"))
+GRACE_HOURS = int(os.getenv("STREAK_GRACE_HOURS", "6"))
+
+
+def _kb_profile_streak(status: dict) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+
+    notify_enabled = bool(status.get("notify_enabled"))
+    kb.button(text="🔥 Обновить", callback_data="profile:streak:refresh")
+    kb.button(
+        text=("🔔 Уведомления: ВКЛ" if notify_enabled else "🔕 Уведомления: ВЫКЛ"),
+        callback_data="profile:streak:toggle_notify",
+    )
+    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _render_profile_streak(status: dict) -> str:
+    streak = int(status.get("streak") or 0)
+    best = int(status.get("best_streak") or 0)
+    freeze = int(status.get("freeze_tokens") or 0)
+    last = status.get("last_completed_day") or "—"
+
+    goal_done = bool(status.get("goal_done_today"))
+    goal_line = "✅ Дневная цель выполнена" if goal_done else "❌ Дневная цель НЕ выполнена"
+
+    rated_today = int(status.get("rated_today") or 0)
+    commented_today = int(status.get("commented_today") or 0)
+    uploaded_today = int(status.get("uploaded_today") or 0)
+
+    need_rate = max(0, DAILY_GOAL_RATE_COUNT - rated_today)
+    need_comm = max(0, DAILY_GOAL_COMMENT_COUNT - commented_today)
+    need_upl = max(0, DAILY_GOAL_UPLOAD_COUNT - uploaded_today)
+
+    how = (
+        "Сделай ЛЮБОЕ из этого сегодня:\n"
+        f"• 📸 загрузить фото: осталось {need_upl}\n"
+        f"• ⭐ оценить фото: осталось {need_rate}\n"
+        f"• 💬 оставить коммент: осталось {need_comm}\n"
+    )
+
+    notify_enabled = bool(status.get("notify_enabled"))
+    nh = int(status.get("notify_hour") or 21)
+    nm = int(status.get("notify_minute") or 0)
+
+    return (
+        "🔥 <b>GlowShot Streak</b>\n\n"
+        f"Текущая серия: <b>{streak}</b>\n"
+        f"Лучшая серия: <b>{best}</b>\n"
+        f"Freeze: <b>{freeze}</b> 🧊\n"
+        f"Последний день с огоньком: <b>{last}</b>\n\n"
+        f"{goal_line}\n\n"
+        f"Сегодня: ⭐ {rated_today}/{DAILY_GOAL_RATE_COUNT} | "
+        f"💬 {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | "
+        f"📸 {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}\n\n"
+        f"{how}\n"
+        f"⏳ Грейс после полуночи: <b>{GRACE_HOURS}ч</b>\n"
+        f"🔔 Уведомления: <b>{'вкл' if notify_enabled else 'выкл'}</b> ({nh:02d}:{nm:02d})\n"
+    )
+
+
+async def _load_profile_streak_status(tg_id: int) -> dict:
+    await streak_rollover_if_needed_by_tg_id(int(tg_id))
+    return await streak_get_status_by_tg_id(int(tg_id))
 
 
 @router.callback_query(F.data.startswith("myresults:"))
@@ -1603,33 +1673,62 @@ def _render_streak_settings(status: dict) -> str:
 
 @router.callback_query(F.data == "profile:streak")
 async def profile_streak_open(callback: CallbackQuery):
-    tg_id = callback.from_user.id
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    tg_id = user.get("tg_id") or callback.from_user.id
+
     try:
-        status = await streak_get_status_by_tg_id(int(tg_id))
+        status = await _load_profile_streak_status(int(tg_id))
     except Exception:
         status = {
             "streak": 0,
             "best_streak": 0,
             "freeze_tokens": 0,
+            "last_completed_day": None,
+            "goal_done_today": False,
             "rated_today": 0,
             "commented_today": 0,
             "uploaded_today": 0,
-            "goal_done_today": False,
-            "notify_enabled": True,
+            "notify_enabled": False,
             "notify_hour": 21,
             "notify_minute": 0,
         }
 
+    text = _render_profile_streak(status)
+    kb = _kb_profile_streak(status)
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:streak:refresh")
+async def profile_streak_refresh(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    tg_id = (user or {}).get("tg_id") or callback.from_user.id
+
+    status = await _load_profile_streak_status(int(tg_id))
     await callback.message.edit_text(
-        _render_streak_settings(status),
-        reply_markup=_build_streak_settings_kb(status),
+        _render_profile_streak(status),
+        reply_markup=_kb_profile_streak(status),
         parse_mode="HTML",
     )
-    await callback.answer()
+    await callback.answer("Обновил 🔥")
 
 
 @router.callback_query(F.data == "profile:streak:toggle_notify")
 async def profile_streak_toggle_notify(callback: CallbackQuery):
-    await callback.answer("Перенёс(ла) в ⚙️ Настройки 😈", show_alert=True)
-    callback.data = "profile:settings"
-    await profile_settings_menu(callback)
+    user = await get_user_by_tg_id(callback.from_user.id)
+    tg_id = (user or {}).get("tg_id") or callback.from_user.id
+
+    await streak_toggle_notify_by_tg_id(int(tg_id))
+    status = await _load_profile_streak_status(int(tg_id))
+
+    await callback.message.edit_text(
+        _render_profile_streak(status),
+        reply_markup=_kb_profile_streak(status),
+        parse_mode="HTML",
+    )
+    await callback.answer("Ок")
