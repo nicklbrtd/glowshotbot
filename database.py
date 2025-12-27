@@ -274,8 +274,10 @@ async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
     """
     await streak_ensure_user_row(int(tg_id))
 
-    today = get_moscow_today_key()
-    yesterday = get_moscow_yesterday_key()
+    # day keys are stored as Moscow date ISO strings (YYYY-MM-DD)
+    now_dt = get_moscow_now()
+    today = now_dt.date().isoformat()
+    yesterday = (now_dt.date() - timedelta(days=1)).isoformat()
 
     p = _assert_pool()
     async with p.acquire() as conn:
