@@ -1,11 +1,14 @@
 from aiogram import Router, F
 import traceback
+from datetime import date
+
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
-from keyboards.common import build_back_to_menu_kb, build_viewed_kb
+from keyboards.common import build_viewed_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.moderation import (
     get_report_reasons,
@@ -33,6 +36,7 @@ from database import (
     link_and_reward_referral_if_needed,
     log_bot_error,
     streak_record_action_by_tg_id,
+    streak_get_status_by_tg_id,
 )
 from html import escape
 
@@ -44,53 +48,33 @@ class RateStates(StatesGroup):
     waiting_report_text = State()
 
 
-def build_rate_keyboard(photo_id: int, is_premium: bool = False) -> InlineKeyboardMarkup:
-    row1 = [
-        InlineKeyboardButton(
-            text=str(i), callback_data=f"rate:score:{photo_id}:{i}"
-        )
-        for i in range(1, 6)
-    ]
-    row2 = [
-        InlineKeyboardButton(
-            text=str(i), callback_data=f"rate:score:{photo_id}:{i}"
-        )
-        for i in range(6, 11)
-    ]
-    row3 = [
-        InlineKeyboardButton(
-            text="💬 Комментарий", callback_data=f"rate:comment:{photo_id}"
-        ),
-        InlineKeyboardButton(
-            text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"
-        ),
-        InlineKeyboardButton(
-            text="⏭ Скип", callback_data=f"rate:skip:{photo_id}"
-        ),
-    ]
+def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
 
-    rows = [row1, row2, row3]
+    # 1..10 (две строки по 5)
+    for i in range(1, 11):
+        kb.button(text=str(i), callback_data=f"rate:score:{photo_id}:{i}")
+    kb.adjust(5, 5)
 
-    if is_premium:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="💥 Супер-оценка",
-                    callback_data=f"rate:super:{photo_id}",
-                ),
-                InlineKeyboardButton(
-                    text="🏆 Ачивка",
-                    callback_data=f"rate:award:{photo_id}",
-                ),
-            ]
-        )
-
-    rows.append(
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back")]
+    # 💬 + 🚫
+    kb.row(
+        InlineKeyboardButton(text="💬 Написать", callback_data=f"rate:comment:{photo_id}"),
+        InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"),
     )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    # premium extras
+    if is_premium:
+        kb.row(
+            InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
+            InlineKeyboardButton(text="🏆 Ачивка", callback_data=f"rate:award:{photo_id}"),
+            InlineKeyboardButton(
+                text=("🕵️ Скрыть" if show_details else "🕵️ Еще"),
+                callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
+            ),
+        )
 
+    kb.row(InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"))
+    return kb.as_markup()
 
 
 def build_comment_notification_keyboard() -> InlineKeyboardMarkup:
@@ -138,91 +122,135 @@ def build_no_photos_text() -> str:
 
 
 # Специальная подпись для раздела оценивания
-def build_rate_caption(photo: dict) -> str:
-    """
-    Подпись для раздела оценивания.
+async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool = False) -> str:
+    """Шаблон:
+    💎 «Название» • 🔥N дней
+    ••• 🏆 Бета-тестер бота ••• (если имеется)
+    🔗 Ссылка: @xxx (если имеется)
 
-    Формат:
-    (фото)
-    💎 "Название" моноширным • 📷 устройство — если автор с премиумом, иначе без 💎
-    🔗Ссылка: @channel (если есть и автор премиум)
-    <b>📝Описание:</b> текст описания (если есть)
+    (описание свернутой цитатой)
 
-    Имя автора здесь не показываем.
+    Premium (по кнопке 🕵️ Еще) — тоже цитатой:
+    <blockquote>
+    📊 Статистика:
+    Рейтинг:
+    Кол-во 6-10:
+    Кол-во 1-5:
+    </blockquote>
     """
+
+    def quote(text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return ""
+        return f"<blockquote>{escape(text)}</blockquote>"
+
     title = (photo.get("title") or "").strip() or "Без названия"
-    device_info = (photo.get("device_info") or photo.get("device_type") or "").strip() or "устройство не указано"
+
+    # author tg_id
+    author_tg_id = None
+    try:
+        author_user_id = int(photo.get("user_id") or 0)
+    except Exception:
+        author_user_id = 0
+
+    if author_user_id:
+        try:
+            author = await get_user_by_id(author_user_id)
+        except Exception:
+            author = None
+        if author and author.get("tg_id"):
+            try:
+                author_tg_id = int(author.get("tg_id"))
+            except Exception:
+                author_tg_id = None
+
+        # если нет link в photo — попробуем подтянуть
+        if author and not photo.get("user_tg_channel_link"):
+            if author.get("tg_channel_link"):
+                photo["user_tg_channel_link"] = author.get("tg_channel_link")
+
+    streak_days = 0
+    if author_tg_id:
+        try:
+            st = await streak_get_status_by_tg_id(int(author_tg_id))
+            streak_days = int(st.get("streak") or 0)
+        except Exception:
+            streak_days = 0
+
+    lines: list[str] = []
+    lines.append(f"💎 «{escape(title)}» • 🔥<b>{streak_days}</b> дней")
+
+    # beta tester line
+    if bool(photo.get("has_beta_award")):
+        lines.append("••• 🏆 <b>Бета-тестер бота</b> •••")
+
+    # link line (если имеется)
+    raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
+    if raw_link:
+        display = raw_link
+        if raw_link.startswith("https://t.me/") or raw_link.startswith("http://t.me/"):
+            username = raw_link.split("t.me/", 1)[1].strip("/").strip()
+            if username:
+                display = "@" + username
+        elif raw_link.startswith("@"):
+            display = raw_link
+        elif "t.me/" in raw_link:
+            username = raw_link.split("t.me/", 1)[1].strip("/").strip()
+            if username:
+                display = "@" + username
+        lines.append(f"🔗 Ссылка: {escape(display)}")
+
+    # description as collapsed quote
     description = (photo.get("description") or "").strip()
-
-    # Экранируем текст для HTML-подписи
-    safe_title = escape(title)
-    safe_device = escape(device_info)
-    safe_description = escape(description) if description else ""
-
-    is_premium_author = bool(photo.get("user_is_premium"))
-    has_beta_award = bool(photo.get("has_beta_award"))
-
-    # Первая строка: название моноширным + устройство со смайликом
-    device_part = f"📷 {safe_device}"
-    first_line = f"<code>\"{safe_title}\"</code> • {device_part}"
-    if is_premium_author:
-        first_line = f"💎 {first_line}"
-
-    # Строим строки подписи в нужном порядке
-    lines: list[str] = [
-        first_line,
-    ]
-
-    # Ссылка на канал/аккаунт показывается только,
-    # если автор премиум И ссылка реально указана
-    raw_link = photo.get("user_tg_channel_link") or photo.get("tg_channel_link")
-    href = None
-    display = None
-
-    if is_premium_author and raw_link:
-        link = raw_link.strip()
-
-        # Вариант 1: https://t.me/username или http://t.me/username
-        if link.startswith("https://t.me/") or link.startswith("http://t.me/"):
-            username = link.split("t.me/", 1)[1].strip("/")
-            if username:
-                href = f"https://t.me/{username}"
-                display = f"@{username}"
-
-        # Вариант 2: @username
-        elif link.startswith("@"):
-            username = link[1:].strip()
-            if username:
-                href = f"https://t.me/{username}"
-                display = f"@{username}"
-
-        # Вариант 3: t.me/username где-то внутри (без протокола)
-        elif "t.me/" in link:
-            username = link.split("t.me/", 1)[1].strip("/")
-            if username:
-                href = f"https://t.me/{username}"
-                display = f"@{username}"
-
-        # Фоллбек — показываем как есть
-        else:
-            href = link
-            display = link
-
-    # Если есть корректная ссылка — добавляем её второй строкой
-    if href and display:
-        lines.append(f"🔗Ссылка: <a href=\"{href}\">{display}</a>")
-
-    # Описание, если есть (идёт после ссылки или сразу после первой строки),
-    # всегда отделяем пустой строкой от заголовка/ссылки.
-    if safe_description:
+    if description:
         lines.append("")
-        lines.append(f"<b>📝Описание:</b> {safe_description}")
+        lines.append(quote(description))
 
-    # Если у автора есть главная ачивка «Бета-тестер бота» — показываем её в самом низу
-    if has_beta_award:
-        # Добавляем пустую строку для отступа от описания / ссылки / заголовка
+    # premium details only on demand
+    viewer_is_premium = False
+    try:
+        viewer_is_premium = await is_user_premium_active(int(viewer_tg_id))
+    except Exception:
+        viewer_is_premium = False
+
+    if viewer_is_premium and show_details:
+        rating_str = "—"
+        good_cnt = 0
+        bad_cnt = 0
+
+        # best-effort: эти функции могут отсутствовать — тогда просто покажем нули/прочерки
+        try:
+            from database import get_photo_stats, get_photo_ratings_stats  # type: ignore
+
+            try:
+                ps = await get_photo_stats(int(photo["id"]))
+                v = ps.get("bayes_score")
+                if v is not None:
+                    rating_str = f"{float(v):.2f}".rstrip("0").rstrip(".")
+            except Exception:
+                rating_str = "—"
+
+            try:
+                rs = await get_photo_ratings_stats(int(photo["id"]))
+                good_cnt = int(rs.get("good_count") or 0)
+                bad_cnt = int(rs.get("bad_count") or 0)
+            except Exception:
+                good_cnt = 0
+                bad_cnt = 0
+
+        except Exception:
+            pass
+
+        details = "\n".join([
+            "📊 Статистика:",
+            f"Рейтинг: {rating_str}",
+            f"Кол-во 6–10: {good_cnt}",
+            f"Кол-во 1–5: {bad_cnt}",
+        ])
+
         lines.append("")
-        lines.append("🏆 Бета-тестер бота")
+        lines.append(quote(details))
 
     return "\n".join(lines)
 
@@ -255,10 +283,10 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
         try:
             if message.photo:
                 # Сообщение с фото — меняем только подпись
-                await message.edit_caption(caption=text, reply_markup=kb)
+                await message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
             else:
                 # Обычное текстовое сообщение — меняем текст
-                await message.edit_text(text, reply_markup=kb)
+                await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except Exception:
             # Если не получилось отредактировать — удаляем текущее и отправляем новое
             try:
@@ -271,6 +299,7 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
                     chat_id=message.chat.id,
                     text=text,
                     reply_markup=kb,
+                    parse_mode="HTML",
                     disable_notification=True,
                 )
             except Exception:
@@ -317,12 +346,12 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
     except Exception:
         pass
 
-    caption = build_rate_caption(photo)
-    kb = build_rate_keyboard(photo["id"], is_premium=is_premium)
+    caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=False)
+    kb = build_rate_keyboard(photo["id"], is_premium=is_premium, show_details=False)
     if message.photo:
         try:
             await message.edit_media(
-                media=InputMediaPhoto(media=photo["file_id"], caption=caption),
+                media=InputMediaPhoto(media=photo["file_id"], caption=caption, parse_mode="HTML"),
                 reply_markup=kb,
             )
         except Exception:
@@ -336,6 +365,7 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
                     photo=photo["file_id"],
                     caption=caption,
                     reply_markup=kb,
+                    parse_mode="HTML",
                     disable_notification=True,
                 )
             except Exception:
@@ -351,6 +381,7 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
                 photo=photo["file_id"],
                 caption=caption,
                 reply_markup=kb,
+                parse_mode="HTML",
                 disable_notification=True,
             )
         except Exception:
@@ -420,6 +451,7 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_caption(
         caption="\n".join(caption_lines),
         reply_markup=kb,
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -590,6 +622,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 chat_id=rate_chat_id,
                 message_id=rate_msg_id,
                 caption="Комментарий не может быть пустым.\n\nНапиши текст комментария.",
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
@@ -608,6 +641,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     "а также рекламировать каналы.\n\n"
                     "Напиши комментарий по самой фотографии <b>без контактов</b>."
                 ),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
@@ -664,6 +698,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
             message_id=rate_msg_id,
             caption=err_txt,
             reply_markup=kb,
+            parse_mode="HTML",
         )
         await state.clear()
         return
@@ -692,6 +727,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                             f"Текст: {text}"
                         ),
                         reply_markup=build_comment_notification_keyboard(),
+                        parse_mode="HTML",
                         disable_notification=True,
                     )
                 except Exception:
@@ -710,7 +746,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
             photo_for_caption = await get_photo_by_id(int(photo_id))
 
         if photo_for_caption is not None:
-            base_caption = build_rate_caption(photo_for_caption)
+            base_caption = await build_rate_caption(photo_for_caption, viewer_tg_id=int(message.from_user.id), show_details=False)
             success_caption = "✅ Комментарий отправлен!\n\n" + base_caption
         else:
             success_caption = "✅ Комментарий отправлен!\n\nМожешь поставить оценку этому кадру 👇"
@@ -719,7 +755,8 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
             chat_id=rate_chat_id,
             message_id=rate_msg_id,
             caption=success_caption,
-            reply_markup=build_rate_keyboard(int(photo_id), is_premium=is_premium_rater),
+            reply_markup=build_rate_keyboard(int(photo_id), is_premium=is_premium_rater, show_details=False),
+            parse_mode="HTML",
         )
     except TelegramBadRequest:
         pass
@@ -755,6 +792,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                     "Текст жалобы не может быть пустым.\n\n"
                     "Опиши, что не так с этой фотографией."
                 ),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
@@ -774,6 +812,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                     "а также рекламировать каналы.\n\n"
                     "Опиши словами, что именно не так с этой фотографией <b>без контактов</b>."
                 ),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
@@ -837,6 +876,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             await message.bot.send_message(
                 chat_id=tg_id,
                 text=admin_text,
+                parse_mode="HTML",
             )
         except Exception:
         # Если какому-то модератору не можем доставить сообщение, просто идём дальше
@@ -893,6 +933,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                         photo=photo["file_id"],
                         caption=mod_caption,
                         reply_markup=kb,
+                        parse_mode="HTML",
                     )
                 except Exception:
                     # Если какому-то модератору не можем доставить фото, просто идём дальше
@@ -900,7 +941,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
 
     photo = await get_photo_by_id(photo_id)
     if photo is not None:
-        caption = build_rate_caption(photo)
+        caption = await build_rate_caption(photo, viewer_tg_id=int(message.from_user.id), show_details=False)
 
         is_premium = False
         try:
@@ -910,13 +951,14 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
         except Exception:
             is_premium = False
 
-        kb = build_rate_keyboard(photo_id, is_premium=is_premium)
+        kb = build_rate_keyboard(photo_id, is_premium=is_premium, show_details=False)
         try:
             await message.bot.edit_message_caption(
                 chat_id=report_chat_id,
                 message_id=report_msg_id,
                 caption=caption,
                 reply_markup=kb,
+                parse_mode="HTML",
             )
         except Exception:
             try:
@@ -930,6 +972,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                     photo=photo["file_id"],
                     caption=caption,
                     reply_markup=kb,
+                    parse_mode="HTML",
                     disable_notification=True,
                 )
             except Exception:
@@ -1023,6 +1066,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
                                 chat_id=author_tg_id,
                                 text=notify_text,
                                 reply_markup=build_comment_notification_keyboard(),
+                                parse_mode="HTML",
                             )
                         except Exception:
                             # Если не получилось доставить уведомление автору — просто игнорируем.
@@ -1061,6 +1105,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
                         "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
                     ),
                     reply_markup=build_referral_thanks_keyboard(),
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
@@ -1077,6 +1122,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
                         "Продолжай выкладывать свои кадры и оценивать работы других 💎"
                     ),
                     reply_markup=build_referral_thanks_keyboard(),
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
@@ -1164,6 +1210,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                                 chat_id=author_tg_id,
                                 text=notify_text,
                                 reply_markup=build_comment_notification_keyboard(),
+                                parse_mode="HTML",
                             )
                         except Exception:
                             # Если не получилось доставить уведомление автору — просто игнорируем.
@@ -1197,6 +1244,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                         "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
                     ),
                     reply_markup=build_referral_thanks_keyboard(),
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
@@ -1213,6 +1261,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                         "Продолжай выкладывать свои кадры и оценивать работы других 💎"
                     ),
                     reply_markup=build_referral_thanks_keyboard(),
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
@@ -1223,8 +1272,60 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     # Чистим состояние (комментарий больше не нужен)
     await state.clear()
 
+@router.callback_query(F.data.startswith("rate:more:"))
+async def rate_more_toggle(callback: CallbackQuery) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("Странные параметры.", show_alert=True)
+        return
 
-from datetime import date
+    _, _, pid, flag = parts
+    try:
+        photo_id = int(pid)
+        to_show = bool(int(flag))
+    except Exception:
+        await callback.answer("Странные параметры.", show_alert=True)
+        return
+
+    viewer_is_premium = False
+    try:
+        viewer_is_premium = await is_user_premium_active(int(callback.from_user.id))
+    except Exception:
+        viewer_is_premium = False
+
+    if not viewer_is_premium:
+        await callback.answer("Это доступно только в GlowShot Premium 💎", show_alert=True)
+        return
+
+    try:
+        photo = await get_photo_by_id(photo_id)
+    except Exception:
+        photo = None
+
+    if not photo or photo.get("is_deleted"):
+        await callback.answer("Фото не найдено.", show_alert=True)
+        return
+
+    # подтянем флаг и ссылку best-effort
+    if "has_beta_award" not in photo:
+        photo["has_beta_award"] = False
+    if "user_tg_channel_link" not in photo:
+        try:
+            author = await get_user_by_id(int(photo.get("user_id") or 0))
+        except Exception:
+            author = None
+        if author and author.get("tg_channel_link"):
+            photo["user_tg_channel_link"] = author.get("tg_channel_link")
+
+    caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=to_show)
+    kb = build_rate_keyboard(photo_id, is_premium=True, show_details=to_show)
+
+    try:
+        await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+
+    await callback.answer("Ок")
 
 @router.callback_query(F.data.startswith("rate:skip:"))
 async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
