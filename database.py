@@ -321,12 +321,31 @@ async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
         if last_completed == today:
             return await streak_get_status_by_tg_id(int(tg_id))
 
-        # New day: reset daily action flags
+        # New day: ensure today's daily row exists (daily counters are stored in streak_daily)
         await conn.execute(
-            "UPDATE user_streak "
-            "SET rated_today=0, commented_today=0, uploaded_today=0, goal_done_today=FALSE, updated_at=$2 "
-            "WHERE tg_id=$1",
+            """
+            INSERT INTO streak_daily (tg_id, day_key)
+            VALUES ($1,$2)
+            ON CONFLICT (tg_id, day_key) DO NOTHING
+            """,
             int(tg_id),
+            str(today),
+        )
+
+        # New day: reset nudge counter for today (so reminders can be sent again)
+        await conn.execute(
+            """
+            UPDATE user_streak
+            SET last_nudge_day=$2,
+                nudge_count=CASE
+                    WHEN COALESCE(last_nudge_day, '') <> $2 THEN 0
+                    ELSE COALESCE(nudge_count, 0)
+                END,
+                updated_at=$3
+            WHERE tg_id=$1
+            """,
+            int(tg_id),
+            str(today),
             get_moscow_now_iso(),
         )
 
