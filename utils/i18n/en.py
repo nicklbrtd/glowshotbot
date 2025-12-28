@@ -14,7 +14,13 @@ EN = {
     "profile.rank": "🏷 Rank: {rank}",
     "profile.gender_line": "Gender: {gender}",
     "profile.location_line": "{flag} Location: {loc}",
+
     "profile.link": "🔗 Link: {link}",
+
+    # Ranks
+    "rank.beginner": "Beginner",
+    "rank.amateur": "Amateur",
+    "rank.expert": "Expert",
 
     "profile.section.bio": "📝 <b>Bio</b>",
     "profile.section.stats": "📊 <b>My stats</b>",

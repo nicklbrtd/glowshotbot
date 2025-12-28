@@ -14,7 +14,13 @@ RU = {
     "profile.rank": "🏷 Ранг: {rank}",
     "profile.gender_line": "Пол: {gender}",
     "profile.location_line": "{flag} Локация: {loc}",
+
     "profile.link": "🔗 Ссылка: {link}",
+
+    # Ранги
+    "rank.beginner": "Начинающий",
+    "rank.amateur": "Любитель",
+    "rank.expert": "Эксперт",
 
     "profile.section.bio": "📝 <b>Описание</b>",
     "profile.section.stats": "📊 <b>Моя статистика</b>",

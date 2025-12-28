@@ -42,7 +42,7 @@ from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
-from utils.ranks import format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT
+from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT
 
 router = Router()
 
@@ -199,25 +199,56 @@ async def build_profile_view(user: dict):
     rank_label = None
     if tg_id:
         try:
-            r = await get_user_rank_by_tg_id(int(tg_id)) or {}
+            r_raw = await get_user_rank_by_tg_id(int(tg_id))
+            if not r_raw:
+                r = {}
+            elif isinstance(r_raw, dict):
+                r = r_raw
+            else:
+                # asyncpg.Record / mapping-like
+                try:
+                    r = dict(r_raw)
+                except Exception:
+                    r = {}
+
+            by_code = {
+                "beginner": RANK_BEGINNER,
+                "amateur": RANK_AMATEUR,
+                "expert": RANK_EXPERT,
+            }
+
+            def _render(code: str) -> str | None:
+                code = (code or "").strip().lower()
+                rk = by_code.get(code)
+                if not rk:
+                    return None
+                title = t(rk.i18n_key, lang)
+                return f"{rk.emoji} {title}".strip()
 
             # Prefer points (best, fully localizable)
             rank_points = r.get("rank_points") or r.get("points") or r.get("rank_pts")
             if rank_points is not None:
-                rank_label = format_rank(int(rank_points), lang=lang)
+                rk = rank_from_points(int(rank_points))
+                rank_label = f"{rk.emoji} {t(rk.i18n_key, lang)}".strip()
             else:
                 # Prefer code if available
                 rank_code = (r.get("rank_code") or r.get("code") or "").strip().lower()
-                by_code = {
-                    "beginner": RANK_BEGINNER,
-                    "amateur": RANK_AMATEUR,
-                    "expert": RANK_EXPERT,
-                }
-                if rank_code in by_code:
-                    rank_label = by_code[rank_code].label(lang)
-                else:
-                    # Last resort: keep legacy label (may already be localized)
-                    rank_label = r.get("rank_label")
+                rank_label = _render(rank_code)
+
+                # Legacy: sometimes DB stores i18n key or code in `rank_label`
+                if not rank_label:
+                    legacy = r.get("rank_label")
+                    if isinstance(legacy, str):
+                        s = legacy.strip()
+                        if s.startswith("rank."):
+                            # e.g. rank.beginner
+                            rank_label = _render(s.split(".", 1)[1]) or f"{RANK_BEGINNER.emoji} {t(s, lang)}".strip()
+                        elif s in by_code:
+                            rank_label = _render(s)
+                        else:
+                            # already human label
+                            rank_label = s or None
+
         except Exception:
             rank_label = None
 
