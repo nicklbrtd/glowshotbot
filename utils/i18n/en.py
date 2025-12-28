@@ -2,7 +2,7 @@ EN = {
     "common.back": "⬅️ Back",
     "common.menu": "🏠 Menu",
 
-    "settings.lang.current": "Current language: <b>{lang}</b>",
+    "settings.lang.current": "Current language: <b>{value}</b>",
     "settings.lang.pick": "Choose a language:",
 
     "lang.ru": "🇷🇺 Russian",

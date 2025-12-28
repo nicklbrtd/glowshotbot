@@ -2,7 +2,7 @@ RU = {
     "common.back": "⬅️ Назад",
     "common.menu": "🏠 В меню",
 
-    "settings.lang.current": "Текущий язык: <b>{lang}</b>",
+    "settings.lang.current": "Текущий язык: <b>{value}</b>",
     "settings.lang.pick": "Выбери язык:",
 
     "lang.ru": "🇷🇺 Русский",

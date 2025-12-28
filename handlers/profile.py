@@ -1437,7 +1437,7 @@ async def profile_settings_language(callback: CallbackQuery):
 
     text = (
         f"{t('settings.lang.title', lang)}\n\n"
-        f"{t('settings.lang.current', lang, lang=t('lang.' + lang, lang))}\n\n"
+        f"{t('settings.lang.current', lang, value=t('lang.' + lang, lang))}\n\n"
         f"{t('settings.lang.pick', lang)}"
     )
 
@@ -1488,7 +1488,7 @@ async def profile_settings_language_set(callback: CallbackQuery):
 
     text = (
         f"{t('settings.lang.title', lang)}\n\n"
-        f"{t('settings.lang.current', lang, lang=t('lang.' + lang, lang))}\n\n"
+        f"{t('settings.lang.current', lang, value=t('lang.' + lang, lang))}\n\n"
         f"{t('settings.lang.pick', lang)}"
     )
 
