@@ -141,7 +141,7 @@ EN = {
     "settings.lang.saved": "Done!",
     "settings.lang.save_error": "Couldn't save language 😿",
 
-        # Start / Subscribe / Payments
+    # Start / Subscribe / Payments
     "start.register.text": "🙃 Hi! This is <b>GlowShot</b> — a bot for people who love photography.\n\nHere we rate <b>shots</b>.\n<b>Upload</b> your best photos, <b>rate</b> others, and <b>win</b> in results.\n\nBut first you need to sign up:",
     "start.register.btn": "🚀 Sign up",
 
@@ -163,4 +163,94 @@ EN = {
     "menu.ad.header": "📄 <b>Promo block:</b>",
     "menu.ad.line": "• Subscribe to our channel: {link}",
     "menu.tagline": "Upload · Rate · Win",
+
+    # Streak
+    "streak.title": "🔥 <b>GlowShot Streak</b>",
+    "streak.current": "Current streak: <b>{value}</b>",
+    "streak.best": "Best streak: <b>{value}</b>",
+    "streak.freeze": "Freeze: <b>{value}</b> 🧊",
+    "streak.last_day": "Last day with streak: <b>{value}</b>",
+
+    "streak.goal.done": "✅ Daily goal completed",
+    "streak.goal.not_done": "❌ Daily goal NOT completed",
+
+    "streak.today": "Today: ⭐ {rated}/{rated_goal} | 💬 {commented}/{comment_goal} | 📸 {uploaded}/{upload_goal}",
+
+    "streak.how.header": "Do ANY of these today:",
+    "streak.how.upload": "• 📸 upload a photo: left {value}",
+    "streak.how.rate": "• ⭐ rate photos: left {value}",
+    "streak.how.comment": "• 💬 leave a comment: left {value}",
+
+    "streak.grace": "⏳ Grace after midnight: <b>{value}h</b>",
+    "streak.notify": "🔔 Notifications: <b>{state}</b> ({hh}:{mm})",
+    "streak.notify.on": "on",
+    "streak.notify.off": "off",
+
+    "streak.kb.refresh": "🔥 Refresh",
+    "streak.kb.notify.on": "🔔 Notifications: ON",
+    "streak.kb.notify.off": "🔕 Notifications: OFF",
+
+    "streak.toast.refreshed": "Refreshed 🔥",
+    "streak.toast.ok": "Ok",
+
+    "streak.error.title": "🔥 <b>Streak</b>",
+    "streak.error.text": "Couldn't load streak status 😭",
+    "streak.error.err": "Error: <code>{value}</code>",
+    "streak.error.hint": "Usually it's a DB/migration issue or a connection timeout. Copy this error code to logs and I'll fix it.",
+
+    "streak.user_missing": "You're not in the database. Tap «Start» and try again.",
+    "streak.back_profile": "⬅️ Back to profile",
+
+    # Premium
+    "premium.title": "💎 <b>GlowShot Premium</b>",
+    "premium.benefits.title": "💎 <b>GlowShot Premium</b>",
+    "premium.benefits.header": "<b>What Premium gives you:</b>",
+    "premium.benefits.p1.title": "• 📷 <b>Two active photos instead of one</b>",
+    "premium.benefits.p1.text": "  More ratings — higher chance to win results.",
+    "premium.benefits.p2.title": "• 🔗 <b>Link in your profile</b>",
+    "premium.benefits.p2.text": "  Add a link to your Telegram profile or channel. Others will see it while rating.",
+    "premium.benefits.p3.title": "• 👀 <b>Be visible</b>",
+    "premium.benefits.p3.text": "  When others rate your photos, they will see your name.",
+    "premium.benefits.p4.title": "• 💬 <b>Priority support</b>",
+    "premium.benefits.p4.text": "  Support replies to you faster.",
+    "premium.benefits.footer": "More benefits will be added!",
+
+    "premium.status.active_until": "<b>Status:</b> active until <b>{until}</b> {days_left}",
+    "premium.status.active": "<b>Status:</b> active",
+    "premium.status.inactive": "<b>Status:</b> inactive",
+
+    "premium.news.header": "<b>What's new in Premium (last 7 days):</b>",
+    "premium.news.empty": "— nothing yet",
+
+    "premium.btn.benefits": "✨ Benefits",
+    "premium.btn.extend": "🔁 Extend subscription",
+    "premium.btn.back": "⬅️ Back",
+
+    "premium.plan.7d": "1 week — 70 ⭐️ / 79 ₽",
+    "premium.plan.30d": "1 month — 230 ⭐️ / 239 ₽",
+    "premium.plan.90d": "3 months — 500 ⭐️ / 569 ₽",
+
+    # Main menu buttons
+    "kb.main.myphoto": "📸 My photo",
+    "kb.main.rate": "🔥 Rate",
+    "kb.main.results": "🏁 Results",
+    "kb.main.profile": "👤 Profile",
+    "kb.main.moderator": "🛡 Moderator",
+    "kb.main.admin": "⚙️ Admin",
+
+    # Common buttons
+    "kb.back_to_menu": "⬅️ Menu",
+    "kb.back": "⬅️ Back",
+    "kb.viewed": "✅ Viewed",
+    "kb.yes": "✅ Yes",
+    "kb.cancel": "❌ Cancel",
+
+    # Admin menu
+    "kb.admin.stats": "📊 Stats",
+    "kb.admin.roles": "👥 Roles",
+    "kb.admin.broadcast": "📣 Broadcast",
+    "kb.admin.users": "🙍‍♂️ Users",
+    "kb.admin.logs": "🧾 Logs",
+    "kb.admin.premium": "💎 Premium",
+    "kb.admin.settings": "⚙️ Settings",
 }

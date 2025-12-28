@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.time import get_moscow_now
+from utils.i18n import t
 
 # --- Главное меню ---
 
@@ -9,22 +10,22 @@ def build_main_menu(
     is_admin: bool = False,
     is_moderator: bool = False,
     is_premium: bool = False,
+    lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
 
     # Базовые пользовательские кнопки
-    kb.button(text="📸 Моя фотография", callback_data="myphoto:open")
-    kb.button(text="🔥 Оценивать", callback_data="rate:start")
-
-    kb.button(text="🏁 Итоги", callback_data="results:menu") #
-    kb.button(text="👤 Профиль", callback_data="profile:open")
+    kb.button(text=t("kb.main.myphoto", lang), callback_data="myphoto:open")
+    kb.button(text=t("kb.main.rate", lang), callback_data="rate:start")
+    kb.button(text=t("kb.main.results", lang), callback_data="results:menu")
+    kb.button(text=t("kb.main.profile", lang), callback_data="profile:open")
 
     if is_moderator:
-        kb.button(text="🛡 Модератор", callback_data="moderator:menu")
+        kb.button(text=t("kb.main.moderator", lang), callback_data="moderator:menu")
 
     if is_admin:
-        kb.button(text="⚙️ Админ-панель", callback_data="admin:menu")
+        kb.button(text=t("kb.main.admin", lang), callback_data="admin:menu")
 
     kb.adjust(2, 2, 2)
 

@@ -277,6 +277,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
     if payload in ("payment_success", "payment_fail"):
         user = await db.get_user_by_tg_id(message.from_user.id)
+        lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
         is_premium = await db.is_user_premium_active(message.from_user.id)
         lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
@@ -353,6 +354,7 @@ async def cmd_start(message: Message, state: FSMContext):
         return
 
     user = await db.get_user_by_tg_id(message.from_user.id)
+    lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
     if user is None:
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
@@ -407,6 +409,7 @@ async def cmd_start(message: Message, state: FSMContext):
                         is_admin=is_admin,
                         is_moderator=is_moderator,
                         is_premium=is_premium,
+                        lang=lang,
                     ),
                     link_preview_options=NO_PREVIEW,
                     parse_mode="HTML",
@@ -419,6 +422,7 @@ async def cmd_start(message: Message, state: FSMContext):
                         is_admin=is_admin,
                         is_moderator=is_moderator,
                         is_premium=is_premium,
+                        lang=lang,  
                     ),
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
@@ -432,6 +436,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     is_admin=is_admin,
                     is_moderator=is_moderator,
                     is_premium=is_premium,
+                    lang=lang,
                 ),
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
@@ -459,6 +464,7 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "sub:check")
 async def subscription_check(callback: CallbackQuery):
     user_id = callback.from_user.id
+    user = await db.get_user_by_tg_id(user_id)
     lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
 
     if await is_user_subscribed(callback.bot, user_id):
@@ -475,6 +481,7 @@ async def subscription_check(callback: CallbackQuery):
                     is_admin=is_admin,
                     is_moderator=is_moderator,
                     is_premium=is_premium,
+                    lang=lang,
                 ),
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
@@ -488,6 +495,7 @@ async def subscription_check(callback: CallbackQuery):
                         is_admin=is_admin,
                         is_moderator=is_moderator,
                         is_premium=is_premium,
+                        lang=lang,
                     ),
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
@@ -500,6 +508,7 @@ async def subscription_check(callback: CallbackQuery):
                         is_admin=is_admin,
                         is_moderator=is_moderator,
                         is_premium=is_premium,
+                        lang=lang,
                     ),
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
@@ -525,6 +534,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
     photo_msg_id = data.get("myphoto_photo_msg_id")
 
     user = await db.get_user_by_tg_id(callback.from_user.id)
+    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
     is_admin = _get_flag(user, "is_admin")
     is_moderator = _get_flag(user, "is_moderator")
     is_premium = await db.is_user_premium_active(callback.from_user.id)
@@ -540,6 +550,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 is_admin=is_admin,
                 is_moderator=is_moderator,
                 is_premium=is_premium,
+                lang=lang,
             ),
             link_preview_options=NO_PREVIEW,
             parse_mode="HTML",
@@ -555,6 +566,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                     is_admin=is_admin,
                     is_moderator=is_moderator,
                     is_premium=is_premium,
+                    lang=lang,
                 ),
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
@@ -567,6 +579,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                     is_admin=is_admin,
                     is_moderator=is_moderator,
                     is_premium=is_premium,
+                    lang=lang,
                 ),
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
