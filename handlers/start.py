@@ -48,7 +48,7 @@ REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
 REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/nyqcreative")
 
 # Advertising channel shown inside the menu text (not the gate)
-AD_CHANNEL_LINK = os.getenv("AD_CHANNEL_LINK", "https://t.me/glowshotchanel")
+AD_CHANNEL_LINK = os.getenv("AD_CHANNEL_LINK", "https://t.me/glowshotchannel")
 
 # Рандом-строки для рекламного блока (вторая строка)
 AD_LINES_RU: list[str] = [

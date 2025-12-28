@@ -14,7 +14,7 @@ SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID"))
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/supofglowshotbot")
 REQUIRED_CHANNEL_ID = os.getenv("@nyqcreative")
 REQUIRED_CHANNEL_LINK = os.getenv("https://t.me/nyqcreative")
-AD_CHANNEL_LINK = os.getenv("https://t.me/glowshotchanel")
+AD_CHANNEL_LINK = os.getenv("https://t.me/glowshotchannel")
 
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)

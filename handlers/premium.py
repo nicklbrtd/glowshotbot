@@ -13,13 +13,63 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 router = Router(name="premium")
 
 
-def _get_lang(user: dict | None) -> str:
+def _get_lang(user: object | None) -> str:
+    """Return "ru" or "en".
+
+    Works with dicts AND asyncpg.Record-like objects.
+    Accepts values like "en-US" / "ru-RU" and normalizes to "en"/"ru".
+    """
+    if not user:
+        return "ru"
+
+    keys = ("lang", "language", "language_code", "locale")
+
+    def _read(u: object, k: str):
+        # dict-style
+        try:
+            if isinstance(u, dict):
+                return u.get(k)
+        except Exception:
+            pass
+        # mapping/Record-style: `k in u` and `u[k]`
+        try:
+            if k in u:  # type: ignore[operator]
+                return u[k]  # type: ignore[index]
+        except Exception:
+            pass
+        # attribute-style
+        try:
+            return getattr(u, k)
+        except Exception:
+            return None
+
+    raw = None
+    for k in keys:
+        v = _read(user, k)
+        if v:
+            raw = v
+            break
+
+    if not raw:
+        # try coercing to dict (asyncpg.Record supports dict(record))
+        try:
+            d = dict(user)  # type: ignore[arg-type]
+            for k in keys:
+                if d.get(k):
+                    raw = d.get(k)
+                    break
+        except Exception:
+            pass
+
+    if not raw:
+        return "ru"
+
     try:
-        if user and user.get("lang") in ("ru", "en"):
-            return str(user.get("lang"))
+        s = str(raw).strip().lower()
+        s = s.split("-")[0]
+        return s if s in ("ru", "en") else "ru"
     except Exception:
-        pass
-    return "ru"
+        return "ru"
 
 
 def build_premium_benefits_text(lang: str) -> str:
@@ -34,7 +84,7 @@ def build_premium_benefits_text(lang: str) -> str:
     )
 
 
-def _format_until_and_days_left(until_iso: str | None) -> tuple[str, str]:
+def _format_until_and_days_left(until_iso: str | None, lang: str) -> tuple[str, str]:
     """Returns (human_until, days_left_text)."""
     if not until_iso:
         return ("—", "")
@@ -45,6 +95,8 @@ def _format_until_and_days_left(until_iso: str | None) -> tuple[str, str]:
         days_left = (dt.date() - now.date()).days
         if days_left < 0:
             days_left = 0
+        if lang == "en":
+            return (human, f"({days_left} days)")
         return (human, f"({days_left} дней)")
     except Exception:
         return (str(until_iso), "")
@@ -72,7 +124,7 @@ async def profile_premium_menu(callback: CallbackQuery):
 
     if is_active:
         # --- Active premium scenario ---
-        human_until, days_left_text = _format_until_and_days_left(until)
+        human_until, days_left_text = _format_until_and_days_left(until, lang)
         status_block = (
             t("premium.title", lang)
             + "\n"
