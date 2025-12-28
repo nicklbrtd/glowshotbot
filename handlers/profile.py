@@ -42,15 +42,59 @@ from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
-
+from utils.ranks import format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT
 
 router = Router()
 
 
 # Helper to get language from user dict
-def _get_lang(user: dict | None) -> str:
-    lang = ((user or {}).get("language") or "ru").strip().lower()
-    return lang if lang in ("ru", "en") else "ru"
+def _get_lang(user: object | None) -> str:
+    if not user:
+        return "ru"
+
+    keys = ("lang", "language", "language_code", "locale")
+
+    def _read(u: object, k: str):
+        try:
+            if isinstance(u, dict):
+                return u.get(k)
+        except Exception:
+            pass
+        try:
+            if k in u:  # type: ignore[operator]
+                return u[k]  # type: ignore[index]
+        except Exception:
+            pass
+        try:
+            return getattr(u, k)
+        except Exception:
+            return None
+
+    raw = None
+    for k in keys:
+        v = _read(user, k)
+        if v:
+            raw = v
+            break
+
+    if not raw:
+        try:
+            d = dict(user)  # type: ignore[arg-type]
+            for k in keys:
+                if d.get(k):
+                    raw = d.get(k)
+                    break
+        except Exception:
+            pass
+
+    if not raw:
+        return "ru"
+
+    try:
+        s = str(raw).strip().lower().split("-")[0]
+        return s if s in ("ru", "en") else "ru"
+    except Exception:
+        return "ru"
 
 
 class ProfileEditStates(StatesGroup):
@@ -155,8 +199,25 @@ async def build_profile_view(user: dict):
     rank_label = None
     if tg_id:
         try:
-            r = await get_user_rank_by_tg_id(int(tg_id))
-            rank_label = (r or {}).get("rank_label")
+            r = await get_user_rank_by_tg_id(int(tg_id)) or {}
+
+            # Prefer points (best, fully localizable)
+            rank_points = r.get("rank_points") or r.get("points") or r.get("rank_pts")
+            if rank_points is not None:
+                rank_label = format_rank(int(rank_points), lang=lang)
+            else:
+                # Prefer code if available
+                rank_code = (r.get("rank_code") or r.get("code") or "").strip().lower()
+                by_code = {
+                    "beginner": RANK_BEGINNER,
+                    "amateur": RANK_AMATEUR,
+                    "expert": RANK_EXPERT,
+                }
+                if rank_code in by_code:
+                    rank_label = by_code[rank_code].label(lang)
+                else:
+                    # Last resort: keep legacy label (may already be localized)
+                    rank_label = r.get("rank_label")
         except Exception:
             rank_label = None
 
@@ -322,7 +383,7 @@ async def build_profile_view(user: dict):
     text_lines = [
         f"{t('profile.title', lang)}{premium_badge}{streak_badge}",
         t("profile.name_age", lang, name=name, age=age) if age else t("profile.name", lang, name=name),
-        t("profile.rank", lang, rank=(rank_label or "🟢 Начинающий")),
+        t("profile.rank", lang, rank=(rank_label or format_rank(0, lang=lang))),
         t("profile.gender_line", lang, gender=gender_icon),
     ]
 

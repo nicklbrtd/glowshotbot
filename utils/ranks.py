@@ -23,24 +23,30 @@ from typing import Iterable, Mapping
 
 @dataclass(frozen=True, slots=True)
 class Rank:
-    """A user tier (bilingual)."""
+    """A user tier (localized via i18n)."""
 
     code: str
-    title_ru: str
-    title_en: str
+    i18n_key: str
     emoji: str
 
     def label(self, lang: str = "ru") -> str:
-        """Human label for UI."""
+        """Human label for UI using i18n."""
+        # local import to avoid heavy imports at module import time
+        from utils.i18n import t
+
         l = (lang or "ru").strip().lower().split("-")[0]
-        title = self.title_en if l == "en" else self.title_ru
+        try:
+            title = t(self.i18n_key, l)
+        except Exception:
+            # Safe fallback
+            title = self.code
         return f"{self.emoji} {title}".strip()
 
 
 # --- Default tiers ---
-RANK_BEGINNER = Rank(code="beginner", title_ru="Начинающий", title_en="Beginner", emoji="🟢")
-RANK_AMATEUR = Rank(code="amateur", title_ru="Любитель", title_en="Amateur", emoji="🔵")
-RANK_EXPERT = Rank(code="expert", title_ru="Эксперт", title_en="Expert", emoji="🟣")
+RANK_BEGINNER = Rank(code="beginner", i18n_key="rank.beginner", emoji="🟢")
+RANK_AMATEUR = Rank(code="amateur", i18n_key="rank.amateur", emoji="🔵")
+RANK_EXPERT = Rank(code="expert", i18n_key="rank.expert", emoji="🟣")
 
 DEFAULT_RANKS: tuple[Rank, ...] = (
     RANK_BEGINNER,
