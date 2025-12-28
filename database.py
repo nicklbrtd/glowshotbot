@@ -730,6 +730,7 @@ async def ensure_schema() -> None:
               category TEXT DEFAULT 'photo',
               device_type TEXT,
               device_info TEXT,
+              tag TEXT,
               day_key TEXT,
               moderation_status TEXT NOT NULL DEFAULT 'active',
               is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -1005,10 +1006,8 @@ async def ensure_schema() -> None:
             """
         )
 
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_owner ON photo_share_links(owner_tg_id);")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_active ON photo_share_links(is_active);")
-
+        # ======== ALTER TABLE ========
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS tag TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_city INTEGER NOT NULL DEFAULT 1;")
@@ -1018,11 +1017,11 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_updated_at TEXT;")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'feed';")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source_code TEXT;")
-        # ---- payments migrations (TBank) ----
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id TEXT;")
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_id TEXT;")
         await conn.execute("ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'pending';")
 
+        # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_city ON users(city);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_rank_points ON users(rank_points);")
@@ -1041,11 +1040,16 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_streak_updated_at ON user_streak(updated_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_tg_id ON streak_actions(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_created_at ON streak_actions(created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_owner ON photo_share_links(owner_tg_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_active ON photo_share_links(is_active);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_tag ON photos(tag);")
 
-        # Идемпотентность: один order_id/payment_id на провайдера
+        # ======== CREATE UNIQUE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_order_id ON payments(provider, order_id);")
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_payment_id ON payments(provider, payment_id);")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);")
+        
 
     from database_results import ensure_results_legacy_schema, ensure_results_schema as ensure_results_v2_schema
     await ensure_results_legacy_schema()
@@ -2445,6 +2449,64 @@ async def get_photo_by_id(photo_id: int) -> dict | None:
     async with p.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM photos WHERE id=$1", int(photo_id))
     return dict(row) if row else None
+
+
+async def update_photo_editable_fields(
+    photo_id: int,
+    user_id: int,
+    *,
+    title: str | None = None,
+    device_type: str | None = None,
+    device_info: str | None = None,
+    description: str | None = None,
+    tag: str | None = None,
+) -> bool:
+    """
+    Обновляет редактируемые поля фото ТОЛЬКО у владельца.
+    Возвращает True, если строка обновилась.
+
+    tag — опционально: если колонки нет, обновление тега тихо пропустится.
+    """
+    pool = _assert_pool()
+
+    sets: list[str] = []
+    args: list[object] = []
+
+    def add(col: str, val: object):
+        args.append(val)
+        sets.append(f"{col}=${len(args)+2}")
+
+    if title is not None:
+        add("title", title)
+    if device_type is not None:
+        add("device_type", device_type)
+    if device_info is not None:
+        add("device_info", device_info)
+    if description is not None:
+        add("description", description)
+
+    async with pool.acquire() as conn:
+        updated = False
+
+        if sets:
+            q = f"UPDATE photos SET {', '.join(sets)} WHERE id=$1 AND user_id=$2"
+            res = await conn.execute(q, int(photo_id), int(user_id), *args)
+            updated = res.startswith("UPDATE ") and not res.endswith(" 0")
+
+        if tag is not None:
+            try:
+                res2 = await conn.execute(
+                    "UPDATE photos SET tag=$3 WHERE id=$1 AND user_id=$2",
+                    int(photo_id),
+                    int(user_id),
+                    str(tag),
+                )
+                updated = updated or (res2.startswith("UPDATE ") and not res2.endswith(" 0"))
+            except Exception:
+                # если колонки tag нет — не ломаем редактирование
+                pass
+
+        return bool(updated)
 
 
 async def mark_photo_deleted(photo_id: int) -> None:

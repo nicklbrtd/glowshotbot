@@ -17,6 +17,7 @@ from database import (
     create_today_photo,
     mark_photo_deleted,
     get_photo_by_id,
+    update_photo_editable_fields,
     get_photo_stats,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
@@ -101,6 +102,13 @@ class MyPhotoStates(StatesGroup):
     waiting_photo = State()
     waiting_title = State()
     waiting_device_type = State()
+    waiting_description = State()
+
+
+class EditPhotoStates(StatesGroup):
+    waiting_title = State()
+    waiting_device_type = State()
+    waiting_device_info = State()
     waiting_description = State()
 
 
@@ -265,9 +273,6 @@ def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
     ])
 
-    rows.append([
-        InlineKeyboardButton(text="🔁 Повторить", callback_data=f"myphoto:repeat:{photo_id}"),
-    ])
 
     rows.append([
         InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
@@ -277,6 +282,54 @@ def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+EDIT_TAGS: list[tuple[str, str]] = [
+    ("portrait", "👤 Портрет"),
+    ("landscape", "🌄 Пейзаж"),
+    ("street", "🏙 Стрит"),
+    ("nature", "🌿 Природа"),
+    ("architecture", "🏛 Архитектура"),
+    ("travel", "🧳 Тревел"),
+    ("macro", "🔎 Макро"),
+    ("other", "✨ Другое"),
+    ("", "🚫 Без тега"),
+]
+
+def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="📝 Название", callback_data=f"myphoto:edit:title:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="📷 Устройство", callback_data=f"myphoto:edit:device:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="✍️ Описание", callback_data=f"myphoto:edit:desc:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    return kb.as_markup()
+
+def build_edit_cancel_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    return kb.as_markup()
+
+def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="📱 Смартфон", callback_data=f"myphoto:device:set:{photo_id}:phone"),
+        InlineKeyboardButton(text="📷 Камера", callback_data=f"myphoto:device:set:{photo_id}:camera"),
+    )
+    kb.row(InlineKeyboardButton(text="📸 Другое", callback_data=f"myphoto:device:set:{photo_id}:other"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    return kb.as_markup()
+
+def build_tag_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for tag_key, label in EDIT_TAGS:
+        kb.row(InlineKeyboardButton(text=label, callback_data=f"myphoto:tag:set:{photo_id}:{tag_key}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    return kb.as_markup()
 
 
 # ===== Stats keyboard and avg formatting helpers =====
@@ -1694,19 +1747,267 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer()
 
-# --- Repeat (temporary) handler ---
+# --- Repeat disabled ---
 @router.callback_query(F.data.regexp(r"^myphoto:repeat:(\d+)$"))
 async def myphoto_repeat(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("Скоро ✨", show_alert=True)
+    await callback.answer("Повтор временно отключён.", show_alert=True)
 
 
-# --- Edit (temporary) handler ---
 @router.callback_query(F.data.regexp(r"^myphoto:edit:(\d+)$"))
 async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("Скоро ✨", show_alert=True)
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    photo_id = int((callback.data or "").split(":")[2])
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+    if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    title = (photo.get("title") or "Без названия").strip()
+    device_info = (photo.get("device_info") or "").strip()
+    device_type = (photo.get("device_type") or "").strip()
+    desc = (photo.get("description") or "").strip()
+    tag = (photo.get("tag") or "").strip()
+
+    tag_label = "🚫 Без тега" if tag == "" else tag
+    for k, lbl in EDIT_TAGS:
+        if k == tag:
+            tag_label = lbl
+            break
+
+    text = (
+        "✏️ <b>Редактирование</b>\n\n"
+        f"📝 Название: <b>{title}</b>\n"
+        f"📷 Устройство: <b>{device_type or '—'}</b> {device_info if device_info else ''}\n"
+        f"✍️ Описание: <b>{'есть' if desc else '—'}</b>\n"
+        f"🏷 Тег: <b>{tag_label}</b>"
+    )
+
+    kb = build_edit_menu_kb(photo_id)
+    if callback.message.photo:
+        await callback.message.edit_caption(caption=text, reply_markup=kb)
+    else:
+        await callback.message.edit_text(text, reply_markup=kb)
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:editmenu:(\d+)$"))
+async def myphoto_editmenu(callback: CallbackQuery, state: FSMContext):
+    photo_id = int((callback.data or "").split(":")[2])
+    callback.data = f"myphoto:edit:{photo_id}"
+    await myphoto_edit(callback, state)
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:edit:title:(\d+)$"))
+async def myphoto_edit_title(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    photo_id = int((callback.data or "").split(":")[3])
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(EditPhotoStates.waiting_title)
+    await state.update_data(edit_photo_id=photo_id)
+
+    text = "📝 <b>Новое название</b>\n\nОтправь текстом новое название."
+    kb = build_edit_cancel_kb(photo_id)
+    await callback.message.edit_caption(caption=text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:edit:device:(\d+)$"))
+async def myphoto_edit_device(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    photo_id = int((callback.data or "").split(":")[3])
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(EditPhotoStates.waiting_device_type)
+    await state.update_data(edit_photo_id=photo_id)
+
+    text = "📷 <b>Устройство</b>\n\nВыбери тип устройства:"
+    await callback.message.edit_caption(caption=text, reply_markup=build_device_type_kb(photo_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:device:set:(\d+):(phone|camera|other)$"))
+async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    photo_id = int(parts[3])
+    dev_type = parts[4]
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(EditPhotoStates.waiting_device_info)
+    await state.update_data(edit_photo_id=photo_id, edit_device_type=dev_type)
+
+    text = (
+        "📷 <b>Модель устройства</b>\n\n"
+        "Отправь модель текстом (например: <i>iPhone 15</i> или <i>Sony ZV-E10</i>).\n\n"
+        "Чтобы убрать устройство — отправь <b>—</b>."
+    )
+    await callback.message.edit_caption(caption=text, reply_markup=build_edit_cancel_kb(photo_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:edit:desc:(\d+)$"))
+async def myphoto_edit_desc(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    photo_id = int((callback.data or "").split(":")[3])
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(EditPhotoStates.waiting_description)
+    await state.update_data(edit_photo_id=photo_id)
+
+    text = (
+        "✍️ <b>Описание</b>\n\n"
+        "Отправь описание текстом.\n\n"
+        "Чтобы убрать — отправь <b>—</b>."
+    )
+    await callback.message.edit_caption(caption=text, reply_markup=build_edit_cancel_kb(photo_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:edit:tag:(\d+)$"))
+async def myphoto_edit_tag(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    photo_id = int((callback.data or "").split(":")[3])
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    text = "🏷 <b>Тег</b>\n\nВыбери жанр:"
+    await callback.message.edit_caption(caption=text, reply_markup=build_tag_kb(photo_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:tag:set:(\d+):(.*)$"))
+async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    parts = (callback.data or "").split(":")
+    photo_id = int(parts[3])
+    tag_key = ":".join(parts[4:])  # может быть пустым
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await update_photo_editable_fields(photo_id, int(user["id"]), tag=tag_key)
+
+    await callback.answer("Сохранено ✅")
+    callback.data = f"myphoto:edit:{photo_id}"
+    await myphoto_edit(callback, state)
+
+
+@router.message(EditPhotoStates.waiting_title, F.text)
+async def myphoto_edit_title_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    photo_id = int(data.get("edit_photo_id") or 0)
+    user = await get_user_by_tg_id(message.from_user.id)
+    if not user or not photo_id:
+        await state.clear()
+        await message.delete()
+        return
+
+    title = (message.text or "").strip()
+    await message.delete()
+
+    if not title or has_links_or_usernames(title) or has_promo_channel_invite(title):
+        await state.clear()
+        return
+
+    await update_photo_editable_fields(photo_id, int(user["id"]), title=title)
+    await state.clear()
+
+    # возвращаем карточку
+    photo = await get_photo_by_id(photo_id)
+    if photo and not photo.get("is_deleted"):
+        await message.bot.send_message(message.chat.id, "✅ Название обновлено.", disable_notification=True)
+
+
+@router.message(EditPhotoStates.waiting_device_info, F.text)
+async def myphoto_edit_device_info_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    photo_id = int(data.get("edit_photo_id") or 0)
+    dev_type = str(data.get("edit_device_type") or "")
+    user = await get_user_by_tg_id(message.from_user.id)
+    if not user or not photo_id:
+        await state.clear()
+        await message.delete()
+        return
+
+    txt = (message.text or "").strip()
+    await message.delete()
+
+    if txt == "—":
+        await update_photo_editable_fields(photo_id, int(user["id"]), device_type="", device_info="")
+    else:
+        await update_photo_editable_fields(photo_id, int(user["id"]), device_type=dev_type, device_info=txt)
+
+    await state.clear()
+    await message.bot.send_message(message.chat.id, "✅ Устройство обновлено.", disable_notification=True)
+
+
+@router.message(EditPhotoStates.waiting_description, F.text)
+async def myphoto_edit_desc_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    photo_id = int(data.get("edit_photo_id") or 0)
+    user = await get_user_by_tg_id(message.from_user.id)
+    if not user or not photo_id:
+        await state.clear()
+        await message.delete()
+        return
+
+    txt = (message.text or "").strip()
+    await message.delete()
+
+    desc = "" if txt == "—" else txt
+    await update_photo_editable_fields(photo_id, int(user["id"]), description=desc)
+
+    await state.clear()
+    await message.bot.send_message(message.chat.id, "✅ Описание обновлено.", disable_notification=True)
+
+
+
+
+
 # ====== FINALIZE PHOTO CREATION ======
 
-# Patch: _finalize_photo_creation supports both Message and CallbackQuery and does not rely on callback.message
 async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMContext) -> None:
     """
     Завершить процесс создания фото: сохранить в БД и показать карточку пользователю.
