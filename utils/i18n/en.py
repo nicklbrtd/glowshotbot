@@ -91,4 +91,37 @@ EN = {
     "profile.edit.gender.female": "Female",
     "profile.edit.gender.na": "Prefer not to say",
     "profile.edit.gender.saved": "✅ Gender updated.",
+
+    # Profile edit: channel
+    "profile.edit.channel.premium_only": "Link is available only with GlowShot Premium 💎",
+    "profile.edit.channel.ask": "📡 <b>Link</b>\n\nSend your Telegram channel/profile link.\n\nOnly Telegram links are allowed:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.\n\nTo remove the link, send <code>delete</code>.",
+    "profile.edit.channel.bad_username": "That doesn't look like a valid @username.\n\nSend <code>https://t.me/username</code> or just <code>@username</code>.",
+    "profile.edit.channel.only_tg": "You can set only a Telegram link.\n\nValid examples:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.",
+    "profile.edit.channel.removed": "✅ Link removed.",
+    "profile.edit.channel.saved": "✅ Link updated.",
+
+    # Profile edit: city
+    "profile.edit.city.title": "🏙 <b>City</b>",
+    "profile.edit.city.current": "Current: <b>{city}</b>",
+    "profile.edit.city.visibility": "Profile visibility: <b>{vis}</b>",
+    "profile.edit.city.vis.on": "shown",
+    "profile.edit.city.vis.off": "hidden",
+    "profile.edit.city.btn.change": "✍️ Change",
+    "profile.edit.city.btn.delete": "🗑 Remove",
+    "profile.edit.city.btn.hide": "🙈 Hide",
+    "profile.edit.city.btn.show": "👁 Show",
+    "profile.edit.city.changed_toast": "Ok!",
+    "profile.edit.city.deleted": "🏙 City removed.",
+    "profile.edit.city.deleted_toast": "Done!",
+    "profile.edit.city.ask": "🏙 <b>City</b>\n\nSend your city in one message. Lowercase is fine — I'll normalize it.\n\nTo remove it, send <code>delete</code>.",
+    "profile.edit.city.not_found": "❌ I can't find that city.\n\nTry to be more specific (no extra symbols), e.g.: <code>Oryol</code>, <code>Moscow</code>, <code>Berlin</code>.\nIf it's a small place — try adding a region in the same line.",
+
+    # Profile delete
+    "profile.delete.confirm.title": "⚠️ <b>Delete account</b>",
+    "profile.delete.confirm.text": "Are you sure you want to delete your account?\n\nYour profile will be deactivated and you will stop participating in rankings. Your photos and ratings may still remain in global statistics, but you won't be able to publish new content.",
+    "profile.delete.btn.yes": "❌ Yes, delete account",
+    "profile.delete.btn.no": "⬅️ Cancel",
+    "profile.delete.done.text": "✅ Account deactivated.\n\nIf you want to come back, tap the button below.",
+    "profile.delete.btn.restart": "🚀 Sign up again",
+    "profile.delete.done.toast": "Account deleted.",
 }

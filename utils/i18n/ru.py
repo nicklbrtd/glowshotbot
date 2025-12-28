@@ -91,4 +91,37 @@ RU = {
     "profile.edit.gender.female": "Девушка",
     "profile.edit.gender.na": "Не важно",
     "profile.edit.gender.saved": "✅ Пол обновлён.",
+
+    # Profile edit: channel
+    "profile.edit.channel.premium_only": "Привязка ссылки доступна только с GlowShot Premium 💎",
+    "profile.edit.channel.ask": "📡 <b>Ссылка</b>\n\nОтправь ссылку на свой Telegram-канал или профиль.\n\nПринимаются только Telegram-ссылки:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.\n\nЕсли хочешь убрать ссылку — отправь слово <code>удалить</code>.",
+    "profile.edit.channel.bad_username": "Это не похоже на корректный @username.\n\nОтправь ссылку вида <code>https://t.me/username</code> или просто <code>@username</code>.",
+    "profile.edit.channel.only_tg": "Можно указать только ссылку на Telegram.\n\nПодойдёт:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.",
+    "profile.edit.channel.removed": "✅ Ссылка удалена.",
+    "profile.edit.channel.saved": "✅ Ссылка обновлена.",
+
+    # Profile edit: city
+    "profile.edit.city.title": "🏙 <b>Город</b>",
+    "profile.edit.city.current": "Текущий: <b>{city}</b>",
+    "profile.edit.city.visibility": "Отображение в профиле: <b>{vis}</b>",
+    "profile.edit.city.vis.on": "показан",
+    "profile.edit.city.vis.off": "скрыт",
+    "profile.edit.city.btn.change": "✍️ Изменить",
+    "profile.edit.city.btn.delete": "🗑 Удалить",
+    "profile.edit.city.btn.hide": "🙈 Скрыть",
+    "profile.edit.city.btn.show": "👁 Показать",
+    "profile.edit.city.changed_toast": "Ок!",
+    "profile.edit.city.deleted": "🏙 Город удалён.",
+    "profile.edit.city.deleted_toast": "Готово!",
+    "profile.edit.city.ask": "🏙 <b>Город</b>\n\nВведи город одним сообщением. Можно с маленькой буквы — я поправлю.\n\nЕсли хочешь убрать — напиши <code>удалить</code>.",
+    "profile.edit.city.not_found": "❌ Не могу найти такой город.\n\nПопробуй написать точнее (без лишних символов), например: <code>Орёл</code>, <code>Moscow</code>, <code>Berlin</code>.\nЕсли это небольшой населённый пункт — попробуй добавить регион в одной строке.",
+
+    # Profile delete
+    "profile.delete.confirm.title": "⚠️ <b>Удаление аккаунта</b>",
+    "profile.delete.confirm.text": "Точно удалить аккаунт?\n\nТвой профиль будет деактивирован, участие в рейтингах остановится. Фотографии и оценки могут остаться в общей статистике, но новый контент от тебя появляться не будет.",
+    "profile.delete.btn.yes": "❌ Да, удалить аккаунт",
+    "profile.delete.btn.no": "⬅️ Отмена",
+    "profile.delete.done.text": "✅ Аккаунт деактивирован.\n\nЕсли захочешь вернуться — нажми кнопку ниже.",
+    "profile.delete.btn.restart": "🚀 Зарегистрироваться заново",
+    "profile.delete.done.toast": "Аккаунт удалён.",
 }

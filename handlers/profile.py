@@ -525,6 +525,8 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
         return
 
+    lang = _get_lang(user)
+
     tg_id = user.get("tg_id")
     is_active = False
     if tg_id:
@@ -535,7 +537,7 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
 
     if not is_active:
         await callback.answer(
-            "Привязка ссылки доступна только с GlowShot Premium 💎",
+            t("profile.edit.channel.premium_only", lang),
             show_alert=True,
         )
         return
@@ -544,26 +546,25 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
 
     await callback.message.edit_text(
-        "📡 Отправь ссылку на свой Telegram-канал или профиль.\n\n"
-        "Принимаются только Telegram-ссылки:\n"
-        "• <code>https://t.me/username</code>\n"
-        "• <code>https://telegram.me/username</code>\n"
-        "• или просто <code>@username</code>.\n\n"
-        "Если хочешь убрать ссылку — отправь слово <code>удалить</code>.",
-        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        t("profile.edit.channel.ask", lang),
+        reply_markup=build_back_kb(callback_data="profile:edit", text=t("common.back", lang)),
+        parse_mode="HTML",
     )
     await callback.answer()
 
 
 # -------------------- City / Country edit --------------------
 
-def _build_city_kb(user: dict) -> InlineKeyboardMarkup:
+def _build_city_kb(user: dict, lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     show_city = bool(user.get("show_city", 1))
-    kb.button(text="✍️ Изменить", callback_data="profile:city:change")
-    kb.button(text="🗑 Удалить", callback_data="profile:city:delete")
-    kb.button(text=("🙈 Скрыть" if show_city else "👁 Показать"), callback_data="profile:city:toggle")
-    kb.button(text="⬅️ Назад", callback_data="profile:edit")
+    kb.button(text=t("profile.edit.city.btn.change", lang), callback_data="profile:city:change")
+    kb.button(text=t("profile.edit.city.btn.delete", lang), callback_data="profile:city:delete")
+    if show_city:
+        kb.button(text=t("profile.edit.city.btn.hide", lang), callback_data="profile:city:toggle")
+    else:
+        kb.button(text=t("profile.edit.city.btn.show", lang), callback_data="profile:city:toggle")
+    kb.button(text=t("common.back", lang), callback_data="profile:edit")
     kb.adjust(2, 2)
     return kb.as_markup()
 
@@ -586,30 +587,32 @@ async def profile_edit_city(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
         return
 
+    lang = _get_lang(user)
+
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
 
     city = (user.get("city") or "").strip() or "—"
     show_city = bool(user.get("show_city", 1))
-    vis = "показан" if show_city else "скрыт"
+    vis = t("profile.edit.city.vis.on", lang) if show_city else t("profile.edit.city.vis.off", lang)
 
     text = (
-        "🏙 <b>Город</b>\n\n"
-        f"Текущий: <b>{city}</b>\n"
-        f"Отображение в профиле: <b>{vis}</b>\n"
+        f"{t('profile.edit.city.title', lang)}\n\n"
+        f"{t('profile.edit.city.current', lang, city=city)}\n"
+        f"{t('profile.edit.city.visibility', lang, vis=vis)}\n"
     )
-    await callback.message.edit_text(text, reply_markup=_build_city_kb(user), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=_build_city_kb(user, lang), parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data == "profile:city:change")
 async def profile_city_change(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
     await state.set_state(ProfileEditStates.waiting_new_city)
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
     await callback.message.edit_text(
-        "🏙 <b>Город</b>\n\n"
-        "Введи город одним сообщением. Можно с маленькой буквы — я поправлю.\n\n"
-        "Если хочешь убрать — напиши <code>удалить</code>.",
-        reply_markup=build_back_kb(callback_data="profile:edit_city", text="⬅️ Назад"),
+        t("profile.edit.city.ask", lang),
+        reply_markup=build_back_kb(callback_data="profile:edit_city", text=t("common.back", lang)),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -618,17 +621,23 @@ async def profile_city_change(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "profile:city:delete")
 async def profile_city_delete(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
     if user and user.get("id"):
         await update_user_city(int(user["id"]), None)
 
     user = await get_user_by_tg_id(callback.from_user.id)
-    await callback.message.edit_text("🏙 Город удалён.", reply_markup=_build_city_kb(user or {}), parse_mode="HTML")
-    await callback.answer("Готово!")
+    await callback.message.edit_text(
+        t("profile.edit.city.deleted", lang),
+        reply_markup=_build_city_kb(user or {}, lang),
+        parse_mode="HTML"
+    )
+    await callback.answer(t("profile.edit.city.deleted_toast", lang))
 
 
 @router.callback_query(F.data == "profile:city:toggle")
 async def profile_city_toggle(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
     if user and user.get("id"):
         current = bool(user.get("show_city", 1))
         await set_user_city_visibility(int(user["id"]), not current)
@@ -636,15 +645,15 @@ async def profile_city_toggle(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
     city = (user.get("city") or "").strip() or "—"
     show_city = bool(user.get("show_city", 1))
-    vis = "показан" if show_city else "скрыт"
+    vis = t("profile.edit.city.vis.on", lang) if show_city else t("profile.edit.city.vis.off", lang)
 
     text = (
-        "🏙 <b>Город</b>\n\n"
-        f"Текущий: <b>{city}</b>\n"
-        f"Отображение в профиле: <b>{vis}</b>\n"
+        f"{t('profile.edit.city.title', lang)}\n\n"
+        f"{t('profile.edit.city.current', lang, city=city)}\n"
+        f"{t('profile.edit.city.visibility', lang, vis=vis)}\n"
     )
-    await callback.message.edit_text(text, reply_markup=_build_city_kb(user), parse_mode="HTML")
-    await callback.answer("Ок!")
+    await callback.message.edit_text(text, reply_markup=_build_city_kb(user, lang), parse_mode="HTML")
+    await callback.answer(t("profile.edit.city.changed_toast", lang))
 
 
 @router.message(ProfileEditStates.waiting_new_city, F.text)
@@ -654,6 +663,8 @@ async def profile_set_city(message: Message, state: FSMContext):
     edit_chat_id = data.get("edit_chat_id")
 
     raw = (message.text or "").strip()
+    u0 = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(u0)
 
     if raw.lower() in ("удалить", "delete", "remove"):
         u = await get_user_by_tg_id(message.from_user.id)
@@ -679,12 +690,8 @@ async def profile_set_city(message: Message, state: FSMContext):
             await message.bot.edit_message_text(
                 chat_id=edit_chat_id,
                 message_id=edit_msg_id,
-                text=(
-                    "❌ Не могу найти такой город.\n\n"
-                    "Попробуй написать точнее (без лишних символов), например: <code>Орёл</code>, <code>Moscow</code>, <code>Berlin</code>.\n"
-                    "Если это небольшой населённый пункт — попробуй добавить регион в одной строке."
-                ),
-                reply_markup=build_back_kb(callback_data="profile:edit_city", text="⬅️ Назад"),
+                text=t("profile.edit.city.not_found", lang),
+                reply_markup=build_back_kb(callback_data="profile:edit_city", text=t("common.back", lang)),
                 parse_mode="HTML",
             )
         except TelegramBadRequest as e:
@@ -780,6 +787,8 @@ async def profile_set_channel(message: Message, state: FSMContext):
     edit_chat_id = data.get("edit_chat_id")
 
     raw = (message.text or "").strip()
+    u0 = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(u0)
 
     # Удаление ссылки
     if raw.lower() in ("удалить", "delete", "remove"):
@@ -796,6 +805,7 @@ async def profile_set_channel(message: Message, state: FSMContext):
             message_id=edit_msg_id,
             text=text,
             reply_markup=markup,
+            parse_mode="HTML",
         )
         return
 
@@ -810,12 +820,9 @@ async def profile_set_channel(message: Message, state: FSMContext):
                 await message.bot.edit_message_text(
                     chat_id=edit_chat_id,
                     message_id=edit_msg_id,
-                    text=(
-                        "Это не похоже на корректный @username.\n\n"
-                        "Отправь ссылку вида <code>https://t.me/username</code> "
-                        "или просто <code>@username</code>."
-                    ),
-                    reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+                    text=t("profile.edit.channel.bad_username", lang),
+                    reply_markup=build_back_kb(callback_data="profile:edit_channel", text=t("common.back", lang)),
+                    parse_mode="HTML",
                 )
             except TelegramBadRequest as e:
                 if "message is not modified" not in str(e):
@@ -845,14 +852,9 @@ async def profile_set_channel(message: Message, state: FSMContext):
             await message.bot.edit_message_text(
                 chat_id=edit_chat_id,
                 message_id=edit_msg_id,
-                text=(
-                    "Можно указать только ссылку на Telegram.\n\n"
-                    "Подойдёт:\n"
-                    "• <code>https://t.me/username</code>\n"
-                    "• <code>https://telegram.me/username</code>\n"
-                    "• или просто <code>@username</code>."
-                ),
-                reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+                text=t("profile.edit.channel.only_tg", lang),
+                reply_markup=build_back_kb(callback_data="profile:edit_channel", text=t("common.back", lang)),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -872,6 +874,7 @@ async def profile_set_channel(message: Message, state: FSMContext):
         message_id=edit_msg_id,
         text=text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 
@@ -1630,35 +1633,39 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:delete")
 async def profile_delete_confirm(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
     kb = build_confirm_kb(
         yes_callback="profile:delete_confirm",
         no_callback="menu:profile",
-        yes_text="❌ Да, удалить аккаунт",
-        no_text="⬅️ Отмена",
+        yes_text=t("profile.delete.btn.yes", lang),
+        no_text=t("profile.delete.btn.no", lang),
     )
 
     await callback.message.edit_text(
-        "⚠️ Точно удалить аккаунт?\n\n"
-        "Твой профиль будет деактивирован, участие в рейтинках остановится. "
-        "Фотографии и оценки могут остаться в общей статистике, но новый контент от тебя "
-        "появляться не будет.",
+        f"{t('profile.delete.confirm.title', lang)}\n\n{t('profile.delete.confirm.text', lang)}",
         reply_markup=kb,
+        parse_mode="HTML",
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "profile:delete_confirm")
 async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
     await soft_delete_user(callback.from_user.id)
     await state.clear()
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="🚀 Зарегистрироваться заново", callback_data="auth:start")
+    kb.button(text=t("profile.delete.btn.restart", lang), callback_data="auth:start")
     kb.adjust(2, 2, 1, 1)
 
     await callback.message.edit_text(
-        "✅ Аккаунт деактивирован.\n\nЕсли захочешь вернуться, "
-        "нажми «Зарегистрироваться заново».",
+        t("profile.delete.done.text", lang),
         reply_markup=kb.as_markup(),
+        parse_mode="HTML",
     )
-    await callback.answer("Аккаунт удалён.")
+    await callback.answer(t("profile.delete.done.toast", lang))
