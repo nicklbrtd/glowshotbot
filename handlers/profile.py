@@ -1447,14 +1447,18 @@ async def profile_settings_language(callback: CallbackQuery):
             reply_markup=kb.as_markup(),
             parse_mode="HTML",
         )
-    except TelegramBadRequest:
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb.as_markup(),
-            parse_mode="HTML",
-            disable_notification=True,
-        )
+    except TelegramBadRequest as e:
+    # не плодим новые сообщения, если текст не меняется
+        if "message is not modified" in str(e):
+            pass
+        else:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb.as_markup(),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
 
     await callback.answer()
 
@@ -1467,6 +1471,12 @@ async def profile_settings_language_set(callback: CallbackQuery):
         code = "ru"
 
     tg_id = int(callback.from_user.id)
+    current_user = await get_user_by_tg_id(tg_id)
+    current_lang = _get_lang(current_user)
+
+    if code == current_lang:
+        await callback.answer("Уже выбран" if current_lang == "ru" else "Already selected")
+        return
 
     try:
         await set_user_language_by_tg_id(tg_id, code)
@@ -1498,14 +1508,17 @@ async def profile_settings_language_set(callback: CallbackQuery):
             reply_markup=kb.as_markup(),
             parse_mode="HTML",
         )
-    except TelegramBadRequest:
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb.as_markup(),
-            parse_mode="HTML",
-            disable_notification=True,
-        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            pass
+        else:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb.as_markup(),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
 
     await callback.answer("Готово!" if lang == "ru" else "Done!")
 
