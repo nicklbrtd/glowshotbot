@@ -461,27 +461,34 @@ async def profile_back_to_profile(callback: CallbackQuery):
 async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
-        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        await callback.answer("User not found", show_alert=True)
         return
 
-    await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+    lang = _get_lang(user)
+
+    await state.update_data(
+        edit_msg_id=callback.message.message_id,
+        edit_chat_id=callback.message.chat.id,
+    )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="🪪 Имя", callback_data="profile:edit_name")
-    kb.button(text="🎂 Возраст", callback_data="profile:edit_age")
-
-    kb.button(text="📝 Описание", callback_data="profile:edit_bio")
-    kb.button(text="⚧️ Пол", callback_data="profile:edit_gender")
-
-    kb.button(text="📡 Ссылка", callback_data="profile:edit_channel")
-    kb.button(text="🏙 Город", callback_data="profile:edit_city")
-
-    kb.button(text="🗑 Удалить аккаунт", callback_data="profile:delete")
-    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.button(text=t("profile.edit.btn.name", lang), callback_data="profile:edit_name")
+    kb.button(text=t("profile.edit.btn.age", lang), callback_data="profile:edit_age")
+    kb.button(text=t("profile.edit.btn.bio", lang), callback_data="profile:edit_bio")
+    kb.button(text=t("profile.edit.btn.gender", lang), callback_data="profile:edit_gender")
+    kb.button(text=t("profile.edit.btn.channel", lang), callback_data="profile:edit_channel")
+    kb.button(text=t("profile.edit.btn.city", lang), callback_data="profile:edit_city")
+    kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete")
+    kb.button(text=t("common.back", lang), callback_data="menu:profile")
     kb.adjust(2, 2, 2, 1, 1)
 
+    text = (
+        f"{t('profile.edit.title', lang)}\n\n"
+        f"{t('profile.edit.choose', lang)}"
+    )
+
     await callback.message.edit_text(
-        "✏️ Что хочешь изменить в профиле?",
+        text,
         reply_markup=kb.as_markup(),
         parse_mode="HTML",
     )
@@ -490,11 +497,16 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "profile:edit_name")
 async def profile_edit_name(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
     await state.set_state(ProfileEditStates.waiting_new_name)
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
     await callback.message.edit_text(
-        "🪪 Введи новое имя для профиля.",
-        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+        t("profile.edit.name.ask", lang),
+        reply_markup=build_back_kb(callback_data="profile:edit", text=t("common.back", lang)),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -869,6 +881,9 @@ async def profile_set_name(message: Message, state: FSMContext):
     edit_msg_id = data.get("edit_msg_id")
     edit_chat_id = data.get("edit_chat_id")
 
+    user = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(user)
+
     new_name = message.text.strip()
 
     # Пустое имя
@@ -878,11 +893,9 @@ async def profile_set_name(message: Message, state: FSMContext):
             await message.bot.edit_message_text(
                 chat_id=edit_chat_id,
                 message_id=edit_msg_id,
-                text=(
-                    "Имя не может быть пустым.\n\n"
-                    "Напиши, как тебя записать в профиле — имя или творческий псевдоним."
-                ),
-                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+                text=t("profile.edit.name.empty", lang),
+                reply_markup=build_back_kb(callback_data="profile:edit_name", text=t("common.back", lang)),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -896,12 +909,9 @@ async def profile_set_name(message: Message, state: FSMContext):
             await message.bot.edit_message_text(
                 chat_id=edit_chat_id,
                 message_id=edit_msg_id,
-                text=(
-                    "В имени нельзя оставлять @username, ссылки на Telegram, соцсети или сайты, "
-                    "а также рекламировать каналы.\n\n"
-                    "Напиши имя или свой псевдоним <b>без контактов</b>."
-                ),
-                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+                text=t("profile.edit.name.invalid", lang),
+                reply_markup=build_back_kb(callback_data="profile:edit_name", text=t("common.back", lang)),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -921,21 +931,26 @@ async def profile_set_name(message: Message, state: FSMContext):
         message_id=edit_msg_id,
         text=text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data == "profile:edit_gender")
 async def profile_edit_gender(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="Парень", callback_data="profile:set_gender:male")
-    kb.button(text="Девушка", callback_data="profile:set_gender:female")
-    kb.button(text="Не важно", callback_data="profile:set_gender:na")
-    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.button(text=t("profile.edit.gender.male", lang), callback_data="profile:set_gender:male")
+    kb.button(text=t("profile.edit.gender.female", lang), callback_data="profile:set_gender:female")
+    kb.button(text=t("profile.edit.gender.na", lang), callback_data="profile:set_gender:na")
+    kb.button(text=t("common.back", lang), callback_data="profile:edit")
     kb.adjust(2, 1, 1)
 
     await callback.message.edit_text(
-        "Выбери, как тебя указать в профиле.\n\n",
+        t("profile.edit.gender.ask", lang),
         reply_markup=kb.as_markup(),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -955,23 +970,33 @@ async def profile_set_gender(callback: CallbackQuery):
 
     user = await get_user_by_tg_id(callback.from_user.id)
     text, markup = await build_profile_view(user)
+    user_lang = _get_lang(u)
+
     await callback.message.edit_text(
         text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
-    await callback.answer("Пол обновлён.")
+    await callback.answer(t("profile.edit.gender.saved", user_lang))
 
 
 @router.callback_query(F.data == "profile:edit_age")
 async def profile_edit_age(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
     await state.set_state(ProfileEditStates.waiting_new_age)
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="Пропустить / убрать возраст", callback_data="profile:age_clear")
-    kb.adjust(2, 2, 1, 1)
+    kb.button(text=t("profile.edit.age.clear_btn", lang), callback_data="profile:age_clear")
+    kb.button(text=t("common.back", lang), callback_data="profile:edit")
+    kb.adjust(1, 1)
+
     await callback.message.edit_text(
-        "📅 Введи новый возраст числом или нажми «Пропустить / убрать возраст».",
+        t("profile.edit.age.ask", lang),
         reply_markup=kb.as_markup(),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -982,9 +1007,11 @@ async def profile_age_clear(callback: CallbackQuery, state: FSMContext):
     edit_msg_id = data.get("edit_msg_id", callback.message.message_id)
     edit_chat_id = data.get("edit_chat_id", callback.message.chat.id)
 
-    u = await get_user_by_tg_id(callback.from_user.id)
-    if u and u.get("id"):
-        await update_user_age(int(u["id"]), None)
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
+    if user and user.get("id"):
+        await update_user_age(int(user["id"]), None)
     await state.clear()
 
     user = await get_user_by_tg_id(callback.from_user.id)
@@ -994,8 +1021,9 @@ async def profile_age_clear(callback: CallbackQuery, state: FSMContext):
         message_id=edit_msg_id,
         text=text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
-    await callback.answer("Возраст убран.")
+    await callback.answer(t("profile.edit.age.cleared", lang))
 
 
 @router.message(ProfileEditStates.waiting_new_age, F.text)
@@ -1004,31 +1032,35 @@ async def profile_set_age(message: Message, state: FSMContext):
     edit_msg_id = data.get("edit_msg_id")
     edit_chat_id = data.get("edit_chat_id")
 
-    text = message.text.strip()
-    if not text.isdigit():
+    user = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(user)
+
+    text_val = message.text.strip()
+    if not text_val.isdigit():
         await message.delete()
         await message.bot.edit_message_text(
             chat_id=edit_chat_id,
             message_id=edit_msg_id,
-            text=(
-                "Возраст должен быть числом.\n\n"
-                "Напиши только цифры, например: <code>18</code>."
-            ),
-            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+            text=t("profile.edit.age.invalid", lang),
+            reply_markup=build_back_kb(callback_data="profile:edit_age", text=t("common.back", lang)),
+            parse_mode="HTML",
         )
         return
 
-    age = int(text)
+    age = int(text_val)
     if age < 5 or age > 120:
         await message.delete()
         await message.bot.edit_message_text(
             chat_id=edit_chat_id,
             message_id=edit_msg_id,
-            text=(
-                "Ты уверен(а), что это твой реальный возраст?\n\n"
-                "Введи реальный возраст или нажми «Пропустить / убрать возраст»."
+            text=t("profile.edit.age.range", lang),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=t("profile.edit.age.clear_btn", lang), callback_data="profile:age_clear")],
+                    [InlineKeyboardButton(text=t("common.back", lang), callback_data="profile:edit")],
+                ]
             ),
-            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+            parse_mode="HTML",
         )
         return
 
@@ -1045,16 +1077,22 @@ async def profile_set_age(message: Message, state: FSMContext):
         message_id=edit_msg_id,
         text=text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data == "profile:edit_bio")
 async def profile_edit_bio(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
     await state.set_state(ProfileEditStates.waiting_new_bio)
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
+
     await callback.message.edit_text(
-        "📝 Напиши пж новое описание одним сообщением.",
-        reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+        t("profile.edit.bio.ask", lang),
+        reply_markup=build_back_kb(callback_data="profile:edit", text=t("common.back", lang)),
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -1065,6 +1103,9 @@ async def profile_set_bio(message: Message, state: FSMContext):
     edit_msg_id = data.get("edit_msg_id")
     edit_chat_id = data.get("edit_chat_id")
 
+    user = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(user)
+
     bio = message.text.strip()
 
     # Пустое описание
@@ -1074,11 +1115,9 @@ async def profile_set_bio(message: Message, state: FSMContext):
             await message.bot.edit_message_text(
                 chat_id=edit_chat_id,
                 message_id=edit_msg_id,
-                text=(
-                    "Описание не может быть пустым.\n\n"
-                    "Напиши пару слов о себе: что любишь снимать и какой у тебя стиль."
-                ),
-                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+                text=t("profile.edit.bio.empty", lang),
+                reply_markup=build_back_kb(callback_data="profile:edit_bio", text=t("common.back", lang)),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -1092,12 +1131,9 @@ async def profile_set_bio(message: Message, state: FSMContext):
             await message.bot.edit_message_text(
                 chat_id=edit_chat_id,
                 message_id=edit_msg_id,
-                text=(
-                    "В описании профиля нельзя оставлять @username, ссылки на Telegram, соцсети или сайты, "
-                    "а также рекламировать каналы.\n\n"
-                    "Напиши пару слов о себе как о фотографе <b>без контактов</b>."
-                ),
-                reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ Назад"),
+                text=t("profile.edit.bio.invalid", lang),
+                reply_markup=build_back_kb(callback_data="profile:edit_bio", text=t("common.back", lang)),
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -1117,6 +1153,7 @@ async def profile_set_bio(message: Message, state: FSMContext):
         message_id=edit_msg_id,
         text=text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 
