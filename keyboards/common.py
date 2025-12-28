@@ -13,8 +13,6 @@ def build_main_menu(
     lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-
-
     # Базовые пользовательские кнопки
     kb.button(text=t("kb.main.myphoto", lang), callback_data="myphoto:open")
     kb.button(text=t("kb.main.rate", lang), callback_data="rate:start")
@@ -35,22 +33,26 @@ def build_main_menu(
 # --- Кнопки "назад / в меню" ---
 
 
-def build_back_to_menu_kb() -> InlineKeyboardMarkup:
+def build_back_to_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ В меню", callback_data="menu:back")
+    kb.button(text=t("kb.back_to_menu", lang), callback_data="menu:back")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def build_back_kb(callback_data: str, text: str = "⬅️ Назад") -> InlineKeyboardMarkup:
+def build_back_kb(callback_data: str, text: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if text is None:
+        text = t("kb.back", lang)
     kb.button(text=text, callback_data=callback_data)
     kb.adjust(1)
     return kb.as_markup()
 
 
-def build_viewed_kb(callback_data: str, text: str = "✅ Просмотрено") -> InlineKeyboardMarkup:
+def build_viewed_kb(callback_data: str, text: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if text is None:
+        text = t("kb.viewed", lang)
     kb.button(text=text, callback_data=callback_data)
     kb.adjust(1)
     return kb.as_markup()
@@ -62,10 +64,15 @@ def build_viewed_kb(callback_data: str, text: str = "✅ Просмотрено"
 def build_confirm_kb(
     yes_callback: str,
     no_callback: str,
-    yes_text: str = "✅ Да",
-    no_text: str = "❌ Отмена",
+    yes_text: str | None = None,
+    no_text: str | None = None,
+    lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if yes_text is None:
+        yes_text = t("kb.yes", lang)
+    if no_text is None:
+        no_text = t("kb.cancel", lang)
     kb.button(text=yes_text, callback_data=yes_callback)
     kb.button(text=no_text, callback_data=no_callback)
     kb.adjust(2)
@@ -79,6 +86,7 @@ def build_pagination_kb(
     prev_callback: str | None,
     next_callback: str | None,
     back_callback: str | None = None,
+    lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     
     rows: list[list[InlineKeyboardButton]] = []
@@ -93,7 +101,7 @@ def build_pagination_kb(
 
     if back_callback is not None:
         rows.append(
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data=back_callback)]
+            [InlineKeyboardButton(text=t("kb.back_to_menu", lang), callback_data=back_callback)]
         )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -101,24 +109,24 @@ def build_pagination_kb(
 
 # --- Админ-меню  ---
 
-def build_admin_menu() -> InlineKeyboardMarkup:
+def build_admin_menu(lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
     # 1 ряд
-    kb.button(text="📊 Статистика", callback_data="admin:stats")
-    kb.button(text="👥 Роли", callback_data="admin:roles")
+    kb.button(text=t("kb.admin.stats", lang), callback_data="admin:stats")
+    kb.button(text=t("kb.admin.roles", lang), callback_data="admin:roles")
 
     # 2 ряд
-    kb.button(text="📣 Рассылка", callback_data="admin:broadcast")
-    kb.button(text="🙍‍♂️ Пользователи", callback_data="admin:users")
+    kb.button(text=t("kb.admin.broadcast", lang), callback_data="admin:broadcast")
+    kb.button(text=t("kb.admin.users", lang), callback_data="admin:users")
 
     # 3 ряд
-    kb.button(text="🧾 Логи", callback_data="admin:logs:page:1")
-    kb.button(text="💎 Премиум", callback_data="admin:premium")
+    kb.button(text=t("kb.admin.logs", lang), callback_data="admin:logs:page:1")
+    kb.button(text=t("kb.admin.premium", lang), callback_data="admin:premium")
 
     # 4 ряд
-    kb.button(text="⚙️ Настройки", callback_data="admin:settings")
-    kb.button(text="⬅️ В меню", callback_data="menu:back")
+    kb.button(text=t("kb.admin.settings", lang), callback_data="admin:settings")
+    kb.button(text=t("kb.back_to_menu", lang), callback_data="menu:back")
 
     kb.adjust(2, 2, 2, 2)
     return kb.as_markup()

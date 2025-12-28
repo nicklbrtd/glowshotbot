@@ -107,7 +107,7 @@ def build_subscribe_keyboard(lang: str) -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
-async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) -> str:
+async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, lang: str) -> str:
     """Формирует текст главного меню (персональный)."""
 
     # Имя
@@ -236,11 +236,6 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
 
     title_prefix = "💎 " if is_premium else ""
 
-    try:
-        lang = "ru" if not user else (user.get("lang") if user.get("lang") in ("ru", "en") else "ru")
-    except Exception:
-        lang = "ru"
-
     lines: list[str] = []
     lines.append(t("menu.title", lang, prefix=title_prefix))
     lines.append(t("menu.name", lang, name=safe_name))
@@ -301,11 +296,12 @@ async def cmd_start(message: Message, state: FSMContext):
             is_admin = False
             is_moderator = False
 
-        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium)
+        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium, lang=lang)
         reply_kb = build_main_menu(
             is_admin=is_admin,
             is_moderator=is_moderator,
             is_premium=is_premium,
+            lang=lang,
         )
 
         # Отправляем статус оплаты отдельным сообщением (не мешаем меню)
@@ -396,7 +392,7 @@ async def cmd_start(message: Message, state: FSMContext):
         menu_msg_id = data.get("menu_msg_id")
 
         sent_message = None
-        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium)
+        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium, lang=lang)
 
         if menu_msg_id:
             # Пытаемся отредактировать уже существующее сообщение меню
