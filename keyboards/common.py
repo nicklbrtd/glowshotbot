@@ -17,7 +17,7 @@ def build_main_menu(
     kb.button(text="📸 Моя фотография", callback_data="myphoto:open")
     kb.button(text="🔥 Оценивать", callback_data="rate:start")
 
-    # kb.button(text="🏁 Итоги", callback_data="results:menu") #
+    kb.button(text="🏁 Итоги", callback_data="results:menu") #
     kb.button(text="👤 Профиль", callback_data="profile:open")
 
     if is_moderator:
