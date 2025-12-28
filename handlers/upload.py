@@ -108,7 +108,6 @@ class MyPhotoStates(StatesGroup):
 class EditPhotoStates(StatesGroup):
     waiting_title = State()
     waiting_device_type = State()
-    waiting_device_info = State()
     waiting_description = State()
 
 
@@ -226,7 +225,6 @@ def build_my_photo_caption(photo: dict) -> str:
 
     # Информация об устройстве
     device_type_raw = (photo.get("device_type") or "").lower()
-    device_info = photo.get("device_info") or ""
 
     # Подбираем эмодзи под тип устройства
     if "смартфон" in device_type_raw or "phone" in device_type_raw:
@@ -238,10 +236,8 @@ def build_my_photo_caption(photo: dict) -> str:
 
     title = photo.get("title") or "Без названия"
 
-    # Формируем хвост с устройством для заголовка
-    if device_info:
-        device_suffix = f" ({device_emoji} {device_info})"
-    elif device_type_raw:
+    # Формируем хвост с устройством для заголовка (модель не используем)
+    if device_type_raw:
         device_suffix = f" ({device_emoji})"
     else:
         device_suffix = ""
@@ -353,6 +349,42 @@ def _fmt_avg(v: float | None) -> str:
         return f"{float(v):.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "—"
+    
+
+def _esc_html(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _device_emoji(device_type_raw: str) -> str | None:
+    dt = (device_type_raw or "").lower()
+    if "смартфон" in dt or "phone" in dt:
+        return "📱"
+    if "фотокамера" in dt or "camera" in dt:
+        return "📷"
+    if dt:
+        return "📸"
+    return None
+
+def _tag_label(tag_key: str) -> str:
+    t = (tag_key or "").strip()
+    if t == "":
+        return "не указан"
+    for k, lbl in EDIT_TAGS:
+        if k == t:
+            # lbl может быть с эмодзи — это норм
+            return lbl
+    return t
+
+def _shorten(text: str, limit: int = 220) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)].rstrip() + "…"
+
+def _quote(text: str) -> str:
+    # Telegram HTML поддерживает <blockquote>
+    return f"<blockquote>{_esc_html(text)}</blockquote>"
 
 
 # ===== Upload wizard navigation keyboard (Назад / Отмена) =====
@@ -509,66 +541,58 @@ async def _photo_result_status(photo: dict) -> tuple[bool, str | None, int | Non
 
 
 async def build_my_photo_main_text(photo: dict) -> str:
-    """
-    Новый шаблон:
-    "название" (📱)
-
-    📅 Опубликовано: 12.12.2025г
-    💖 Оценок: 99
-    📉/📈 Рейтинг: 8.2
-
-    📝Описание: ...
-    """
-
-    device_type_raw = (photo.get("device_type") or "").lower()
-    if "смартфон" in device_type_raw or "phone" in device_type_raw:
-        device_emoji = "📱"
-    elif "фотокамера" in device_type_raw or "camera" in device_type_raw:
-        device_emoji = "📷"
-    else:
-        device_emoji = "📸"
+    device_type_raw = str(photo.get("device_type") or "")
+    emoji = _device_emoji(device_type_raw)
 
     title = (photo.get("title") or "Без названия").strip()
+    title_safe = _esc_html(title)
 
-    # дата публикации берём по day_key (московская дата)
+    tag_key = str(photo.get("tag") or "")
+    tag_text = _tag_label(tag_key)
+
+    # дата публикации (day_key)
     day_key = (photo.get("day_key") or "").strip()
-    pub_str = day_key
+    pub_str = "—"
     if day_key:
         try:
             pub_dt = datetime.fromisoformat(day_key)
             pub_str = pub_dt.strftime("%d.%m.%Y")
         except Exception:
-            pub_str = "—"
+            pub_str = day_key
 
-    # статистика
     stats = await get_photo_stats(photo["id"])
     ratings_count = int(stats.get("ratings_count") or 0)
     score = stats.get("bayes_score")
 
-    if score is None:
-        score_str = "—"
-        trend = "📉"
-    else:
+    score_str = "—"
+    if score is not None:
         try:
-            score_f = float(score)
-            score_str = f"{score_f:.2f}".rstrip("0").rstrip(".")
-            trend = "📈" if score_f >= 7 else "📉"
+            f = float(score)
+            score_str = f"{f:.2f}".rstrip("0").rstrip(".")
         except Exception:
             score_str = "—"
-            trend = "📉"
 
-    description = (photo.get("description") or "").strip()
+    desc_full = (photo.get("description") or "").strip()
+    desc_short = _shorten(desc_full, limit=240)
+
+    if emoji:
+        header = f"<code>\"{title_safe}\"</code> ({emoji})"
+    else:
+        header = f"<code>\"{title_safe}\"</code> (устройство не указано)"
 
     lines: list[str] = []
-    lines.append(f"<b>\"{title}\" ({device_emoji})</b>")
+    lines.append(f"<b>{header}</b>")
+    lines.append(f"🏷️ Тег: <b>{_esc_html(tag_text)}</b>")
     lines.append("")
-    lines.append(f"📅 Опубликовано: {pub_str}г")
+    lines.append(f"📅 Опубликовано: {pub_str}")
     lines.append(f"💖 Оценок: {ratings_count}")
-    lines.append(f"{trend} Рейтинг: <b>{score_str}</b>")
-
-    if description:
-        lines.append("")
-        lines.append(f"📝Описание: {description}")
+    lines.append(f"📊 Рейтинг: <b>{score_str}</b>")
+    lines.append("")
+    lines.append("📝 Описание:")
+    if desc_short:
+        lines.append(_quote(desc_short))
+    else:
+        lines.append("<i>не добавлено</i>")
 
     return "\n".join(lines)
 
@@ -653,6 +677,41 @@ async def _edit_or_replace_my_photo_message(
         disable_notification=True,
     )
     await _store_photo_message_id(state, sent.message_id, photo_id=photo["id"])
+
+
+async def _edit_or_replace_caption_with_photo(
+    *,
+    bot,
+    chat_id: int,
+    message_id: int,
+    file_id: str,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> int:
+    try:
+        await bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+        return message_id
+    except Exception:
+        pass
+
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+    sent = await bot.send_photo(
+        chat_id=chat_id,
+        photo=file_id,
+        caption=caption,
+        reply_markup=reply_markup,
+        disable_notification=True,
+    )
+    return sent.message_id
 
 
 # ========= ВХОД В РАЗДЕЛ "МОЯ ФОТОГРАФИЯ" =========
@@ -1769,10 +1828,17 @@ async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
         return
 
     title = (photo.get("title") or "Без названия").strip()
-    device_info = (photo.get("device_info") or "").strip()
     device_type = (photo.get("device_type") or "").strip()
     desc = (photo.get("description") or "").strip()
     tag = (photo.get("tag") or "").strip()
+    # Remember which message we should update after text edits
+    try:
+        await state.update_data(
+            edit_target_chat_id=callback.message.chat.id,
+            edit_target_msg_id=callback.message.message_id
+        )
+    except Exception:
+        pass
 
     tag_label = "🚫 Без тега" if tag == "" else tag
     for k, lbl in EDIT_TAGS:
@@ -1780,13 +1846,24 @@ async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
             tag_label = lbl
             break
 
-    text = (
-        "✏️ <b>Редактирование</b>\n\n"
-        f"📝 Название: <b>{title}</b>\n"
-        f"📷 Устройство: <b>{device_type or '—'}</b> {device_info if device_info else ''}\n"
-        f"✍️ Описание: <b>{'есть' if desc else '—'}</b>\n"
-        f"🏷 Тег: <b>{tag_label}</b>"
-    )
+    title_safe = _esc_html(title)
+    emoji = _device_emoji(device_type)
+
+    if emoji:
+        header = f"<code>\"{title_safe}\"</code> ({emoji})"
+    else:
+        header = f"<code>\"{title_safe}\"</code> (устройство не указано)"
+
+    tag_line = _tag_label(tag)
+
+    text = "✏️ <b>Редактирование</b>\n\n"
+    text += f"<b>{header}</b>\n"
+    text += f"Тег: <b>{_esc_html(tag_line)}</b>\n\n"
+    text += "Описание:\n"
+    if desc:
+        text += _quote(_shorten(desc, 240))
+    else:
+        text += "<i>можно добавить</i>"
 
     kb = build_edit_menu_kb(photo_id)
     if callback.message.photo:
@@ -1818,6 +1895,13 @@ async def myphoto_edit_title(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(EditPhotoStates.waiting_title)
     await state.update_data(edit_photo_id=photo_id)
+    try:
+        await state.update_data(
+            edit_target_chat_id=callback.message.chat.id,
+            edit_target_msg_id=callback.message.message_id
+        )
+    except Exception:
+        pass
 
     text = "📝 <b>Новое название</b>\n\nОтправь текстом новое название."
     kb = build_edit_cancel_kb(photo_id)
@@ -1860,16 +1944,30 @@ async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Нет доступа.", show_alert=True)
         return
 
-    await state.set_state(EditPhotoStates.waiting_device_info)
-    await state.update_data(edit_photo_id=photo_id, edit_device_type=dev_type)
+    # Save immediately: only device_type, and clear device_info
+    try:
+        await update_photo_editable_fields(photo_id, int(user["id"]), device_type=dev_type, device_info="")
+    except Exception:
+        pass
 
-    text = (
-        "📷 <b>Модель устройства</b>\n\n"
-        "Отправь модель текстом (например: <i>iPhone 15</i> или <i>Sony ZV-E10</i>).\n\n"
-        "Чтобы убрать устройство — отправь <b>—</b>."
+    await callback.answer("Сохранено ✅")
+
+    # Refresh main photo card in the same message
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted"):
+        return
+
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(photo_id)
+
+    await _edit_or_replace_caption_with_photo(
+        bot=callback.message.bot,
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id,
+        file_id=str(photo["file_id"]),
+        caption=caption,
+        reply_markup=kb,
     )
-    await callback.message.edit_caption(caption=text, reply_markup=build_edit_cancel_kb(photo_id))
-    await callback.answer()
 
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:desc:(\d+)$"))
@@ -1886,6 +1984,13 @@ async def myphoto_edit_desc(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(EditPhotoStates.waiting_description)
     await state.update_data(edit_photo_id=photo_id)
+    try:
+        await state.update_data(
+            edit_target_chat_id=callback.message.chat.id,
+            edit_target_msg_id=callback.message.message_id
+        )
+    except Exception:
+        pass
 
     text = (
         "✍️ <b>Описание</b>\n\n"
@@ -1930,8 +2035,22 @@ async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
     await update_photo_editable_fields(photo_id, int(user["id"]), tag=tag_key)
 
     await callback.answer("Сохранено ✅")
-    callback.data = f"myphoto:edit:{photo_id}"
-    await myphoto_edit(callback, state)
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted"):
+        return
+
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(photo_id)
+
+    await _edit_or_replace_caption_with_photo(
+        bot=callback.message.bot,
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id,
+        file_id=str(photo["file_id"]),
+        caption=caption,
+        reply_markup=kb,
+    )
 
 
 @router.message(EditPhotoStates.waiting_title, F.text)
@@ -1954,33 +2073,27 @@ async def myphoto_edit_title_text(message: Message, state: FSMContext):
     await update_photo_editable_fields(photo_id, int(user["id"]), title=title)
     await state.clear()
 
-    # возвращаем карточку
     photo = await get_photo_by_id(photo_id)
-    if photo and not photo.get("is_deleted"):
-        await message.bot.send_message(message.chat.id, "✅ Название обновлено.", disable_notification=True)
-
-
-@router.message(EditPhotoStates.waiting_device_info, F.text)
-async def myphoto_edit_device_info_text(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photo_id = int(data.get("edit_photo_id") or 0)
-    dev_type = str(data.get("edit_device_type") or "")
-    user = await get_user_by_tg_id(message.from_user.id)
-    if not user or not photo_id:
-        await state.clear()
-        await message.delete()
+    if not photo or photo.get("is_deleted"):
         return
 
-    txt = (message.text or "").strip()
-    await message.delete()
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(photo_id)
 
-    if txt == "—":
-        await update_photo_editable_fields(photo_id, int(user["id"]), device_type="", device_info="")
-    else:
-        await update_photo_editable_fields(photo_id, int(user["id"]), device_type=dev_type, device_info=txt)
+    target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
+    target_msg_id = int(data.get("edit_target_msg_id") or 0)
 
-    await state.clear()
-    await message.bot.send_message(message.chat.id, "✅ Устройство обновлено.", disable_notification=True)
+    if target_msg_id:
+        await _edit_or_replace_caption_with_photo(
+            bot=message.bot,
+            chat_id=target_chat_id,
+            message_id=target_msg_id,
+            file_id=str(photo["file_id"]),
+            caption=caption,
+            reply_markup=kb,
+        )
+
+
 
 
 @router.message(EditPhotoStates.waiting_description, F.text)
@@ -2000,8 +2113,26 @@ async def myphoto_edit_desc_text(message: Message, state: FSMContext):
     await update_photo_editable_fields(photo_id, int(user["id"]), description=desc)
 
     await state.clear()
-    await message.bot.send_message(message.chat.id, "✅ Описание обновлено.", disable_notification=True)
 
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted"):
+        return
+
+    caption = await build_my_photo_main_text(photo)
+    kb = build_my_photo_keyboard(photo_id)
+
+    target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
+    target_msg_id = int(data.get("edit_target_msg_id") or 0)
+
+    if target_msg_id:
+        await _edit_or_replace_caption_with_photo(
+            bot=message.bot,
+            chat_id=target_chat_id,
+            message_id=target_msg_id,
+            file_id=str(photo["file_id"]),
+            caption=caption,
+            reply_markup=kb,
+        )
 
 
 
