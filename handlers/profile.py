@@ -1401,9 +1401,18 @@ def _kb_profile_settings(notify: dict, streak_status: dict | None, lang: str = "
         streak_enabled = bool(streak_status.get("notify_enabled", True))
 
     kb = InlineKeyboardBuilder()
-    kb.button(text=("❤️ ВКЛ" if likes_enabled else "❤️ ВЫКЛ"), callback_data="profile:settings:toggle:likes")
-    kb.button(text=("💬 ВКЛ" if comments_enabled else "💬 ВЫКЛ"), callback_data="profile:settings:toggle:comments")
-    kb.button(text=("🔥 ВКЛ" if streak_enabled else "🔥 ВЫКЛ"), callback_data="profile:settings:toggle:streak")
+    kb.button(
+        text=t("settings.btn.likes.on" if likes_enabled else "settings.btn.likes.off", lang),
+        callback_data="profile:settings:toggle:likes"
+    )
+    kb.button(
+        text=t("settings.btn.comments.on" if comments_enabled else "settings.btn.comments.off", lang),
+        callback_data="profile:settings:toggle:comments"
+    )
+    kb.button(
+        text=t("settings.btn.streak.on" if streak_enabled else "settings.btn.streak.off", lang),
+        callback_data="profile:settings:toggle:streak"
+    )
     kb.button(text=t("settings.lang.btn", lang), callback_data="profile:settings:language")
     kb.button(text=t("common.back", lang), callback_data="menu:profile")
     kb.adjust(1)
@@ -1419,9 +1428,9 @@ def _render_profile_settings(
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
     streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
 
-    likes_line = "❤️ " + ("<b>ON</b>" if likes_enabled else "<b>OFF</b>")
-    comm_line = "💬 " + ("<b>ON</b>" if comments_enabled else "<b>OFF</b>")
-    streak_line = "🔥 " + ("<b>ON</b>" if streak_enabled else "<b>OFF</b>")
+    likes_line = "❤️ " + (t("settings.state.on", lang) if likes_enabled else t("settings.state.off", lang))
+    comm_line = "💬 " + (t("settings.state.on", lang) if comments_enabled else t("settings.state.off", lang))
+    streak_line = "🔥 " + (t("settings.state.on", lang) if streak_enabled else t("settings.state.off", lang))
 
     return (
         f"{t('settings.title', lang)}\n\n"
@@ -1515,13 +1524,13 @@ async def profile_settings_language_set(callback: CallbackQuery):
     current_lang = _get_lang(current_user)
 
     if code == current_lang:
-        await callback.answer("Уже выбран" if current_lang == "ru" else "Already selected")
+        await callback.answer(t("settings.lang.already", current_lang))
         return
 
     try:
         await set_user_language_by_tg_id(tg_id, code)
     except Exception:
-        await callback.answer("Не получилось сохранить язык 😿", show_alert=True)
+        await callback.answer(t("settings.lang.save_error", current_lang), show_alert=True)
         return
 
     # Сразу обновляем экран выбора языка уже на новом языке
@@ -1560,7 +1569,7 @@ async def profile_settings_language_set(callback: CallbackQuery):
                 disable_notification=True,
             )
 
-    await callback.answer("Готово!" if lang == "ru" else "Done!")
+    await callback.answer(t("settings.lang.saved", lang))
 
 
 @router.callback_query(F.data == "profile:settings:toggle:likes")
@@ -1583,7 +1592,7 @@ async def profile_settings_toggle_likes(callback: CallbackQuery):
         if "message is not modified" not in str(e):
             raise
 
-    await callback.answer("Ок")
+    await callback.answer(t("settings.toast.ok", lang))
 
 
 @router.callback_query(F.data == "profile:settings:toggle:comments")
@@ -1606,7 +1615,7 @@ async def profile_settings_toggle_comments(callback: CallbackQuery):
         if "message is not modified" not in str(e):
             raise
 
-    await callback.answer("Ок")
+    await callback.answer(t("settings.toast.ok", lang))
 
 
 @router.callback_query(F.data == "profile:settings:toggle:streak")
@@ -1628,7 +1637,7 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
         if "message is not modified" not in str(e):
             raise
 
-    await callback.answer("Ок")
+    await callback.answer(t("settings.toast.ok", lang))
 
 
 @router.callback_query(F.data == "profile:delete")

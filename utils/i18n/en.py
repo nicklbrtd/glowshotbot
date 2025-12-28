@@ -124,4 +124,20 @@ EN = {
     "profile.delete.done.text": "✅ Account deactivated.\n\nIf you want to come back, tap the button below.",
     "profile.delete.btn.restart": "🚀 Sign up again",
     "profile.delete.done.toast": "Account deleted.",
+
+    # Settings toggles
+    "settings.state.on": "<b>ON</b>",
+    "settings.state.off": "<b>OFF</b>",
+    "settings.btn.likes.on": "❤️ ON",
+    "settings.btn.likes.off": "❤️ OFF",
+    "settings.btn.comments.on": "💬 ON",
+    "settings.btn.comments.off": "💬 OFF",
+    "settings.btn.streak.on": "🔥 ON",
+    "settings.btn.streak.off": "🔥 OFF",
+    "settings.toast.ok": "Ok",
+
+    # Language toasts
+    "settings.lang.already": "Already selected",
+    "settings.lang.saved": "Done!",
+    "settings.lang.save_error": "Couldn't save language 😿",
 }

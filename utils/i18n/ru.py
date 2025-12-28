@@ -124,4 +124,20 @@ RU = {
     "profile.delete.done.text": "✅ Аккаунт деактивирован.\n\nЕсли захочешь вернуться — нажми кнопку ниже.",
     "profile.delete.btn.restart": "🚀 Зарегистрироваться заново",
     "profile.delete.done.toast": "Аккаунт удалён.",
+
+    # Settings toggles
+    "settings.state.on": "<b>ВКЛ</b>",
+    "settings.state.off": "<b>ВЫКЛ</b>",
+    "settings.btn.likes.on": "❤️ ВКЛ",
+    "settings.btn.likes.off": "❤️ ВЫКЛ",
+    "settings.btn.comments.on": "💬 ВКЛ",
+    "settings.btn.comments.off": "💬 ВЫКЛ",
+    "settings.btn.streak.on": "🔥 ВКЛ",
+    "settings.btn.streak.off": "🔥 ВЫКЛ",
+    "settings.toast.ok": "Ок",
+
+    # Language toasts
+    "settings.lang.already": "Уже выбран",
+    "settings.lang.saved": "Готово!",
+    "settings.lang.save_error": "Не получилось сохранить язык 😿",
 }
