@@ -1,14 +1,17 @@
-from .ru import RU
-from .en import EN
+from utils.i18n.ru import RU
+from utils.i18n.en import EN
 
-_DICTS = {"ru": RU, "en": EN}
+I18N = {
+    "ru": RU,
+    "en": EN,
+}
 
-def t(lang: str | None, key: str, **kwargs) -> str:
-    lang = lang or "ru"
-    d = _DICTS.get(lang, RU)
-
-    s = d.get(key) or RU.get(key) or key  # fallback: ru -> key
-    try:
-        return s.format(**kwargs)
-    except Exception:
-        return s
+def t(key: str, lang: str = "ru", **fmt) -> str:
+    d = I18N.get(lang) or RU
+    text = d.get(key) or RU.get(key) or key
+    if fmt:
+        try:
+            return text.format(**fmt)
+        except Exception:
+            return text
+    return text

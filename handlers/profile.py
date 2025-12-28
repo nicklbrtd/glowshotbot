@@ -1,5 +1,6 @@
 from aiogram import Router, F
 import html
+from utils.i18n import t
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -35,13 +36,21 @@ from database import (
     get_notify_settings_by_tg_id,
     toggle_likes_notify_by_tg_id,
     toggle_comments_notify_by_tg_id,
+    set_user_language_by_tg_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 
+
 router = Router()
+
+
+# Helper to get language from user dict
+def _get_lang(user: dict | None) -> str:
+    lang = ((user or {}).get("language") or "ru").strip().lower()
+    return lang if lang in ("ru", "en") else "ru"
 
 
 class ProfileEditStates(StatesGroup):
@@ -134,6 +143,8 @@ async def build_profile_view(user: dict):
     user_id = user.get("id")
     tg_id = user.get("tg_id")
 
+    lang = _get_lang(user)
+
     # Streak badge (optional)
     streak_badge = ""
     streak_short_line = ""
@@ -154,7 +165,7 @@ async def build_profile_view(user: dict):
         try:
             total = await count_photos_by_user(user_id)          # теперь “всё время”
             active = await count_active_photos_by_user(user_id)  # “сейчас”
-            total_photos = f"{total} (активных: {active})"
+            total_photos = t("profile.stats.total_photos.value", lang, total=total, active=active)
         except Exception:
             total_photos = "—"
 
@@ -175,12 +186,12 @@ async def build_profile_view(user: dict):
                 # Show only the smart (Bayesian) average
                 if bayes_val is not None:
                     bayes_str = f"{bayes_val:.2f}".rstrip("0").rstrip(".")
-                    avg_rating_text = f"{bayes_str}★, {cnt} оценок"
+                    avg_rating_text = t("profile.stats.avg_rating.value", lang, score=bayes_str, count=cnt)
                 elif avg_val is not None:
                     avg_str = f"{avg_val:.2f}".rstrip("0").rstrip(".")
-                    avg_rating_text = f"{avg_str}★, {cnt} оценок"
+                    avg_rating_text = t("profile.stats.avg_rating.value", lang, score=avg_str, count=cnt)
                 else:
-                    avg_rating_text = f"{cnt} оценок"
+                    avg_rating_text = t("profile.stats.avg_rating.value", lang, score="—", count=cnt)
         except Exception:
             avg_rating_text = "—"
 
@@ -214,11 +225,11 @@ async def build_profile_view(user: dict):
                     metric_parts.append(f"{f'{avg_pop:.2f}'.rstrip('0').rstrip('.')}★")
 
                 if ratings_count > 0:
-                    metric_parts.append(f"{ratings_count} оценок")
+                    metric_parts.append(t("profile.stats.popular_photo.ratings", lang, count=ratings_count))
                 else:
-                    metric_parts.append("пока нет оценок")
+                    metric_parts.append(t("profile.stats.popular_photo.no_ratings", lang))
 
-                metric = ", ".join(metric_parts) if metric_parts else "пока нет оценок"
+                metric = ", ".join(metric_parts) if metric_parts else t("profile.stats.popular_photo.no_ratings", lang)
                 popular_photo_line = f"{title} ({metric})"
             else:
                 popular_photo_line = "—"
@@ -285,10 +296,10 @@ async def build_profile_view(user: dict):
             pass
 
     text_lines = [
-        f"👤<b>Твой профиль</b>{premium_badge}{streak_badge}",
-        f"Имя: {name}{age_part} лет" if age else f"Имя: {name}",
-        f"🏷 Ранг: {rank_label}" if rank_label else "🏷 Ранг: 🟢 Начинающий",
-        f"Пол: {gender_icon}",
+        f"{t('profile.title', lang)}{premium_badge}{streak_badge}",
+        t("profile.name_age", lang, name=name, age=age) if age else t("profile.name", lang, name=name),
+        t("profile.rank", lang, rank=(rank_label or "🟢 Начинающий")),
+        t("profile.gender_line", lang, gender=gender_icon),
     ]
 
     # Локация (опционально + можно скрыть)
@@ -306,7 +317,7 @@ async def build_profile_view(user: dict):
 
     if loc_parts:
         flag = country_to_flag(country) if (country and show_country) else "📍"
-        text_lines.append(f"{flag} Локация: {', '.join(loc_parts)}")
+        text_lines.append(t("profile.location_line", lang, flag=flag, loc=", ".join(loc_parts)))
 
     # Ссылка (для премиум-пользователей, если указана)
     tg_link = user.get("tg_channel_link")
@@ -334,36 +345,36 @@ async def build_profile_view(user: dict):
         if username:
             display_link = f"@{username}"
 
-        text_lines.append(f"🔗 Ссылка: {display_link}")
+        text_lines.append(t("profile.link", lang, link=display_link))
 
     # Описание (свернутое)
     bio_raw = html.escape(str(user.get("bio") or "—"), quote=False)
     text_lines.extend([
         "",
-        "📝 <b>Описание</b>",
+        t("profile.section.bio", lang),
         f"<blockquote expandable>{bio_raw}</blockquote>",
         "",
     ])
 
     # --- "Свернутая" статистика  ---
     stats_lines = [
-        f"Всего загрузил: {total_photos}",
-        f"Дней в боте: {days_in_bot}",
-        streak_short_line or "🔥 Streak: —",
-        f"Средняя оценка: {avg_rating_text}",
-        f"Самое популярное фото: {popular_photo_line}",
+        t("profile.stats.total_photos", lang, value=total_photos),
+        t("profile.stats.days_in_bot", lang, value=days_in_bot),
+        streak_short_line or t("profile.stats.streak", lang, value="—"),
+        t("profile.stats.avg_rating", lang, value=avg_rating_text),
+        t("profile.stats.popular_photo", lang, value=popular_photo_line),
     ]
 
     # --- Статистика как цитата ---
     stats_body = "\n".join([html.escape(line, quote=False) for line in stats_lines])
-    text_lines.append("📊 <b>Моя статистика</b>")
+    text_lines.append(t("profile.section.stats", lang))
     text_lines.append(f"<blockquote expandable>{stats_body}</blockquote>")
 
     # Premium
     text_lines.extend([
         "",
-        "💎 <b>GlowShot Premium</b>",
-        f"статус: {premium_status_line}",
+        t("profile.section.premium", lang),
+        t("profile.premium.status", lang, status=premium_status_line),
     ])
 
     if premium_extra_line:
@@ -371,16 +382,16 @@ async def build_profile_view(user: dict):
     text = "\n".join(text_lines)
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="🏆 Награды", callback_data="profile:awards")
-    kb.button(text="🏅 Итоги", callback_data="myresults:0")
-    kb.button(text="✏️ Редактировать профиль", callback_data="profile:edit")
-    kb.button(text="⚙️ Настройки", callback_data="profile:settings")
-    kb.button(text="🔥 Streak", callback_data="profile:streak")
+    kb.button(text=t("profile.btn.awards", lang), callback_data="profile:awards")
+    kb.button(text=t("profile.btn.results", lang), callback_data="myresults:0")
+    kb.button(text=t("profile.btn.edit", lang), callback_data="profile:edit")
+    kb.button(text=t("profile.btn.settings", lang), callback_data="profile:settings")
+    kb.button(text=t("profile.btn.streak", lang), callback_data="profile:streak")
 
-    premium_button_text = "💎 Оформить премиум" if not premium_active else "💎 Мой премиум"
+    premium_button_text = t("profile.btn.premium.my", lang) if premium_active else t("profile.btn.premium.buy", lang)
     kb.button(text=premium_button_text, callback_data="profile:premium")
 
-    kb.button(text="⬅️ В меню", callback_data="menu:back")
+    kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
     kb.adjust(2, 2, 2, 1, 1)
     return text, kb.as_markup()
 
@@ -1341,7 +1352,7 @@ async def profile_awards_menu(callback: CallbackQuery):
 
 # -------------------- Settings UI (notifications) --------------------
 
-def _kb_profile_settings(notify: dict, streak_status: dict | None) -> InlineKeyboardMarkup:
+def _kb_profile_settings(notify: dict, streak_status: dict | None, lang: str = "ru") -> InlineKeyboardMarkup:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
 
@@ -1353,32 +1364,33 @@ def _kb_profile_settings(notify: dict, streak_status: dict | None) -> InlineKeyb
     kb.button(text=("❤️ ВКЛ" if likes_enabled else "❤️ ВЫКЛ"), callback_data="profile:settings:toggle:likes")
     kb.button(text=("💬 ВКЛ" if comments_enabled else "💬 ВЫКЛ"), callback_data="profile:settings:toggle:comments")
     kb.button(text=("🔥 ВКЛ" if streak_enabled else "🔥 ВЫКЛ"), callback_data="profile:settings:toggle:streak")
-
-    kb.button(text="⬅️ Назад", callback_data="menu:profile")
+    kb.button(text=t("settings.lang.btn", lang), callback_data="profile:settings:language")
+    kb.button(text=t("common.back", lang), callback_data="menu:profile")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def _render_profile_settings(notify: dict, streak_status: dict | None) -> str:
+def _render_profile_settings(
+    notify: dict,
+    streak_status: dict | None,
+    lang: str = "ru",
+) -> str:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
+    streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
 
-    streak_enabled = True
-    if streak_status is not None:
-        streak_enabled = bool(streak_status.get("notify_enabled", True))
-
-    likes_line = "❤️ Лайки: <b>ВКЛ</b>" if likes_enabled else "❤️ Лайки: <b>ВЫКЛ</b>"
-    comm_line = "💬 Комментарии: <b>ВКЛ</b>" if comments_enabled else "💬 Комментарии: <b>ВЫКЛ</b>"
-    streak_line = "🔥 Streak: <b>ВКЛ</b>" if streak_enabled else "🔥 Streak: <b>ВЫКЛ</b>"
+    likes_line = "❤️ " + ("<b>ON</b>" if likes_enabled else "<b>OFF</b>")
+    comm_line = "💬 " + ("<b>ON</b>" if comments_enabled else "<b>OFF</b>")
+    streak_line = "🔥 " + ("<b>ON</b>" if streak_enabled else "<b>OFF</b>")
 
     return (
-        "⚙️ <b>Настройки</b>\n\n"
+        f"{t('settings.title', lang)}\n\n"
         f"{likes_line}\n"
-        "<blockquote>Лайки не спамят. Мы копим их и присылаем одним спокойным сообщением раз в день.</blockquote>\n\n"
+        f"<blockquote>{t('settings.likes.hint', lang)}</blockquote>\n\n"
         f"{comm_line}\n"
-        "<blockquote>Комментарии обычно редкие, поэтому приходят сразу. Но можно выключить полностью.</blockquote>\n\n"
+        f"<blockquote>{t('settings.comments.hint', lang)}</blockquote>\n\n"
         f"{streak_line}\n"
-        "<blockquote>Напоминания про огонёк работают только если streak уже начинался.</blockquote>"
+        f"<blockquote>{t('settings.streak.hint', lang)}</blockquote>"
     )
 
 
@@ -1395,8 +1407,9 @@ async def profile_settings_open(callback: CallbackQuery):
 
     streak_status = await get_profile_streak_status(tg_id)
 
-    text = _render_profile_settings(notify, streak_status)
-    kb = _kb_profile_settings(notify, streak_status)
+    lang = _get_lang(user)
+    text = _render_profile_settings(notify, streak_status, lang)
+    kb = _kb_profile_settings(notify, streak_status, lang)
 
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -1407,6 +1420,69 @@ async def profile_settings_open(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "profile:settings:language")
+async def profile_settings_language(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
+    kb = InlineKeyboardBuilder()
+
+    ru_text = ("✅ " if lang == "ru" else "") + t("lang.ru", lang)
+    en_text = ("✅ " if lang == "en" else "") + t("lang.en", lang)
+
+    kb.button(text=ru_text, callback_data="profile:settings:language:ru")
+    kb.button(text=en_text, callback_data="profile:settings:language:en")
+    kb.button(text=t("common.back", lang), callback_data="profile:settings")
+    kb.adjust(2, 1)
+
+    await callback.message.edit_text(
+        f"{t('settings.lang.title', lang)}\n\n"
+        f"{t('settings.lang.current', lang, lang=t('lang.' + lang, lang))}\n\n"
+        f"{t('settings.lang.pick', lang)}",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("profile:settings:language:"))
+async def profile_settings_language_set(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    code = parts[-1] if parts else "ru"
+    if code not in ("ru", "en"):
+        code = "ru"
+
+    tg_id = int(callback.from_user.id)
+
+    try:
+        await set_user_language_by_tg_id(tg_id, code)
+    except Exception:
+        await callback.answer("Не получилось сохранить язык 😿", show_alert=True)
+        return
+
+    # Сразу обновляем экран выбора языка уже на новом языке
+    user = await get_user_by_tg_id(tg_id)
+    lang = _get_lang(user)
+
+    kb = InlineKeyboardBuilder()
+    ru_text = ("✅ " if lang == "ru" else "") + t("lang.ru", lang)
+    en_text = ("✅ " if lang == "en" else "") + t("lang.en", lang)
+    kb.button(text=ru_text, callback_data="profile:settings:language:ru")
+    kb.button(text=en_text, callback_data="profile:settings:language:en")
+    kb.button(text=t("common.back", lang), callback_data="profile:settings")
+    kb.adjust(2, 1)
+
+    await callback.message.edit_text(
+        f"{t('settings.lang.title', lang)}\n\n"
+        f"{t('settings.lang.current', lang, lang=t('lang.' + lang, lang))}\n\n"
+        f"{t('settings.lang.pick', lang)}",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
+    )
+
+    await callback.answer("Готово!" if lang == "ru" else "Done!")
+
+
 @router.callback_query(F.data == "profile:settings:toggle:likes")
 async def profile_settings_toggle_likes(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
@@ -1415,11 +1491,12 @@ async def profile_settings_toggle_likes(callback: CallbackQuery):
     notify = await toggle_likes_notify_by_tg_id(tg_id)
 
     streak_status = await get_profile_streak_status(tg_id)
+    lang = _get_lang(user)
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(notify, streak_status),
-            reply_markup=_kb_profile_settings(notify, streak_status),
+            _render_profile_settings(notify, streak_status, lang),
+            reply_markup=_kb_profile_settings(notify, streak_status, lang),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:
@@ -1437,11 +1514,12 @@ async def profile_settings_toggle_comments(callback: CallbackQuery):
     notify = await toggle_comments_notify_by_tg_id(tg_id)
 
     streak_status = await get_profile_streak_status(tg_id)
+    lang = _get_lang(user)
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(notify, streak_status),
-            reply_markup=_kb_profile_settings(notify, streak_status),
+            _render_profile_settings(notify, streak_status, lang),
+            reply_markup=_kb_profile_settings(notify, streak_status, lang),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:
@@ -1458,11 +1536,12 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
 
     streak_status = await toggle_profile_streak_notify_and_status(tg_id)
     notify = await get_notify_settings_by_tg_id(tg_id)
+    lang = _get_lang(user)
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(notify, streak_status),
-            reply_markup=_kb_profile_settings(notify, streak_status),
+            _render_profile_settings(notify, streak_status, lang),
+            reply_markup=_kb_profile_settings(notify, streak_status, lang),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:

@@ -695,6 +695,7 @@ async def ensure_schema() -> None:
               tg_channel_link TEXT,
               city TEXT,
               country TEXT,
+              language TEXT NOT NULL DEFAULT 'ru',
               show_city INTEGER NOT NULL DEFAULT 1,
               show_country INTEGER NOT NULL DEFAULT 1,
 
@@ -1010,6 +1011,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS tag TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'ru';")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_city INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS show_country INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_points INTEGER NOT NULL DEFAULT 0;")
@@ -1301,8 +1303,8 @@ async def create_user(tg_id: int, username: str | None, name: str | None, gender
     async with p.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO users (tg_id, username, name, gender, age, bio, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$7)
+            INSERT INTO users (tg_id, username, name, gender, age, bio, language, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,'ru',$7,$7)
             ON CONFLICT (tg_id) DO UPDATE
               SET username=EXCLUDED.username,
                   name=EXCLUDED.name,
@@ -1317,6 +1319,7 @@ async def create_user(tg_id: int, username: str | None, name: str | None, gender
     return dict(row)
 
 
+
 async def get_user_by_tg_id(tg_id: int) -> dict | None:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -1325,6 +1328,29 @@ async def get_user_by_tg_id(tg_id: int) -> dict | None:
             int(tg_id),
         )
     return dict(row) if row else None
+
+
+async def get_user_language_by_tg_id(tg_id: int) -> str:
+    u = await get_user_by_tg_id(int(tg_id))
+    lang = (u.get("language") if u else None) or "ru"
+    lang = str(lang).strip().lower()
+    return lang if lang in {"ru", "en"} else "ru"
+
+
+async def set_user_language_by_tg_id(tg_id: int, lang: str) -> None:
+    await _ensure_user_row(int(tg_id))
+    v = (lang or "").strip().lower()
+    if v not in {"ru", "en"}:
+        v = "ru"
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET language=$1, updated_at=$2 WHERE tg_id=$3",
+            v,
+            get_moscow_now_iso(),
+            int(tg_id),
+        )
 
 
 async def get_user_by_id(user_id: int) -> dict | None:
