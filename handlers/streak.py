@@ -40,11 +40,33 @@ GRACE_HOURS = int(os.getenv("STREAK_GRACE_HOURS", "6"))
 
 
 def _get_lang(user: dict | None) -> str:
+    """Return "ru" or "en".
+
+    Be defensive: DB/handlers might store language as:
+    - lang: "ru" | "en" | "en-US" | "ru-RU"
+    - language / language_code
+    """
+    if not user:
+        return "ru"
+
     try:
-        if user and user.get("lang") in ("ru", "en"):
-            return str(user.get("lang"))
+        raw = (
+            user.get("lang")
+            or user.get("language")
+            or user.get("language_code")
+            or user.get("locale")
+        )
+        if not raw:
+            return "ru"
+
+        s = str(raw).strip().lower()
+        # normalize like "en-us" -> "en"
+        s = s.split("-")[0]
+        if s in ("ru", "en"):
+            return s
     except Exception:
         pass
+
     return "ru"
 
 
@@ -132,10 +154,16 @@ async def load_streak_status_dict(tg_id: int) -> dict:
 async def get_profile_streak_badge_and_line(tg_id: int) -> tuple[str, str]:
     try:
         s = await load_streak_status_dict(int(tg_id))
+        user = await get_user_by_tg_id(int(tg_id))
+        lang = _get_lang(user)
         cur_streak = int(s.get("streak") or 0)
         best_streak = int(s.get("best_streak") or 0)
         badge = f" 🔥{cur_streak}" if cur_streak > 0 else ""
-        line = f"🔥 Streak: {cur_streak} (best {best_streak})"
+        # Keep it simple: English for EN, Russian for RU
+        if lang == "en":
+            line = f"🔥 Streak: {cur_streak} (best {best_streak})"
+        else:
+            line = f"🔥 Streak: {cur_streak} (лучший {best_streak})"
         return badge, line
     except Exception:
         return "", ""
@@ -157,7 +185,8 @@ async def toggle_profile_streak_notify_and_status(tg_id: int) -> dict | None:
 async def profile_streak_open(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
-        await callback.answer(t("streak.user_missing", "ru"), show_alert=True)
+        fallback_lang = "ru" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("ru") else "en"
+        await callback.answer(t("streak.user_missing", fallback_lang), show_alert=True)
         return
 
     tg_id = int(user.get("tg_id") or callback.from_user.id)
@@ -198,9 +227,9 @@ async def profile_streak_open(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:streak:refresh")
 async def profile_streak_refresh(callback: CallbackQuery):
-    tg_id = callback.from_user.id
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
 
     try:
         status = await load_streak_status_dict(int(tg_id))
@@ -223,9 +252,9 @@ async def profile_streak_refresh(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:streak:toggle_notify")
 async def profile_streak_toggle_notify(callback: CallbackQuery):
-    tg_id = callback.from_user.id
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
 
     try:
         await streak_toggle_notify_by_tg_id(int(tg_id))

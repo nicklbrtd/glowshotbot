@@ -20,16 +20,27 @@ router = Router()
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
-    try:
-        if user and user.get("lang") in ("ru", "en"):
-            return str(user.get("lang"))
-    except Exception:
-        pass
+    """Return "ru" or "en".
+
+    Be defensive: DB may store language as "en-US" / "ru-RU" or under different keys.
+    """
+    if user:
+        try:
+            raw = (
+                user.get("lang")
+                or user.get("language")
+                or user.get("language_code")
+                or user.get("locale")
+            )
+            if raw:
+                s = str(raw).strip().lower().split("-")[0]
+                if s in ("ru", "en"):
+                    return s
+        except Exception:
+            pass
 
     code = (tg_lang_code or "").lower()
-    if code.startswith("ru"):
-        return "ru"
-    return "en"
+    return "ru" if code.startswith("ru") else "en"
 
 
 # Channel required to use the bot (subscription gate)
@@ -40,10 +51,16 @@ REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/nyqcrea
 AD_CHANNEL_LINK = os.getenv("AD_CHANNEL_LINK", "https://t.me/glowshotchanel")
 
 # Рандом-строки для рекламного блока (вторая строка)
-AD_LINES: list[str] = [
+AD_LINES_RU: list[str] = [
     "Хочешь халявный премиум? приглашай друзей и получай премиум на 2 дня",
     "Оценивай больше — чаще попадаешь в топы 🏁",
     "Публикуй сильный кадр — и проси друзей оценить через ссылку 🔗⭐️",
+]
+
+AD_LINES_EN: list[str] = [
+    "Want free Premium? Invite friends and get 2 days of Premium",
+    "Rate more — show up in results more often 🏁",
+    "Post your best shot and ask friends to rate via a link 🔗⭐️",
 ]
 
 
@@ -118,7 +135,7 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         except Exception:
             name = None
     if not name:
-        name = "друг"
+        name = "друг" if lang == "ru" else "friend"
 
     safe_name = html.escape(str(name), quote=False)
 
@@ -158,12 +175,15 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
             or "пар" in s
         )
 
-    if _is_female(gender_s):
-        rated_verb = "оценила"
-    elif _is_male(gender_s):
-        rated_verb = "оценил"
+    if lang == "en":
+        rated_verb = "rated"
     else:
-        rated_verb = "оценил(а)"
+        if _is_female(gender_s):
+            rated_verb = "оценила"
+        elif _is_male(gender_s):
+            rated_verb = "оценил"
+        else:
+            rated_verb = "оценил(а)"
 
     can_rate_text = "—"
     rated_by_me_text = "—"
@@ -247,9 +267,10 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
     # Рекламный блок
     lines.append(t("menu.ad.header", lang))
     lines.append(t("menu.ad.line", lang, link=AD_CHANNEL_LINK))
-    # рандомная вторая строка (всегда)
-    if AD_LINES:
-        lines.append(f"• {random.choice(AD_LINES)}")
+    # random 2nd promo line
+    ad_lines = AD_LINES_RU if lang == "ru" else AD_LINES_EN
+    if ad_lines:
+        lines.append(f"• {random.choice(ad_lines)}")
 
 
     lines.append("")
