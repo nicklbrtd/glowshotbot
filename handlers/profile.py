@@ -23,7 +23,6 @@ from database import (
     get_user_rating_summary,
     get_user_rank_by_tg_id,
     get_most_popular_photo_for_user,
-    get_weekly_rank_for_user,
     get_user_premium_status,
     is_user_premium_active,
     get_awards_for_user,
@@ -37,6 +36,7 @@ from database import (
     toggle_likes_notify_by_tg_id,
     toggle_comments_notify_by_tg_id,
 )
+from database_results import get_weekly_rank_for_user
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full

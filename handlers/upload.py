@@ -18,10 +18,6 @@ from database import (
     mark_photo_deleted,
     get_photo_by_id,
     get_photo_stats,
-    get_daily_top_photos,
-    add_weekly_candidate,
-    is_photo_in_weekly,
-    get_weekly_photos_for_user,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
     is_user_premium_active,
@@ -34,11 +30,17 @@ from database import (
     count_comments_for_photo,
     count_active_users,
     count_photo_reports_for_photo,
-    get_photo_rank_in_day,
     get_link_ratings_count_for_photo,
     get_photo_skip_count_for_photo,
     get_comments_for_photo_sorted,
     streak_record_action_by_tg_id,
+)
+from database_results import (
+    add_weekly_candidate,
+    get_daily_top_photos,
+    get_photo_rank_in_day,
+    get_weekly_photos_for_user,
+    is_photo_in_weekly,
 )
 from utils.time import get_moscow_now
 

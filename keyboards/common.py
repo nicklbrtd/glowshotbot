@@ -26,7 +26,7 @@ def build_main_menu(
     if is_admin:
         kb.button(text="⚙️ Админ-панель", callback_data="admin:menu")
 
-    kb.adjust(2, 1, 2)
+    kb.adjust(2, 2, 2)
 
     return kb.as_markup()
 
