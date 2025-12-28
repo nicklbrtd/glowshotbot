@@ -240,8 +240,12 @@ async def build_profile_view(user: dict):
         # Позиция в топе недели
             weekly_top_position = "—"
 
-    # GlowShot Premium статус
-    premium_status_line = "нет (доступно для покупки)"
+    # GlowShot Premium status
+    if lang == "en":
+        premium_status_line = "inactive (available to buy)"
+    else:
+        premium_status_line = "нет (доступно для покупки)"
+
     premium_badge = ""
     premium_extra_line = ""
     premium_active = False
@@ -259,38 +263,58 @@ async def build_profile_view(user: dict):
                     try:
                         dt = datetime.fromisoformat(until)
                         human_until = dt.strftime("%d.%m.%Y")
-                        premium_status_line = f"активен (до {human_until})"
 
-                        # Считаем, сколько дней осталось, если дата в будущем
+                        if lang == "en":
+                            premium_status_line = f"active (until {human_until})"
+                        else:
+                            premium_status_line = f"активен (до {human_until})"
+
+                        # Days left (only if date is in the future)
                         try:
                             days_left = (dt.date() - datetime.now().date()).days
                             if days_left >= 0:
-                                days_text = _plural_ru(
-                                    days_left,
-                                    "день",
-                                    "дня",
-                                    "дней",
-                                )
-                                premium_extra_line = f"Осталось: {days_left} {days_text}."
+                                if lang == "en":
+                                    day_word = "day" if days_left == 1 else "days"
+                                    premium_extra_line = f"Left: {days_left} {day_word}."
+                                else:
+                                    days_text = _plural_ru(days_left, "день", "дня", "дней")
+                                    premium_extra_line = f"Осталось: {days_left} {days_text}."
                         except Exception:
-                            # Дополнительную строку можно не показывать, если что-то пошло не так
                             pass
                     except Exception:
-                        premium_status_line = f"активен до {until}"
+                        if lang == "en":
+                            premium_status_line = f"active until {until}"
+                        else:
+                            premium_status_line = f"активен до {until}"
                 else:
-                    premium_status_line = "активен (бессрочно)"
-                    premium_extra_line = "Подписка без ограничения по дате."
+                    if lang == "en":
+                        premium_status_line = "active (no expiry)"
+                        premium_extra_line = "Subscription has no end date."
+                    else:
+                        premium_status_line = "активен (бессрочно)"
+                        premium_extra_line = "Подписка без ограничения по дате."
                 premium_badge = " 💎"
             else:
-                # Если флаг стоит, но срок истёк
+                # Flag may be set but the subscription expired
                 if had_premium and raw_status.get("premium_until"):
-                    premium_status_line = "срок действия истёк"
-                    premium_extra_line = "Ты можешь продлить подписку через кнопку ниже."
+                    if lang == "en":
+                        premium_status_line = "expired"
+                        premium_extra_line = "You can extend your subscription using the button below."
+                    else:
+                        premium_status_line = "срок действия истёк"
+                        premium_extra_line = "Ты можешь продлить подписку через кнопку ниже."
                 elif had_premium:
-                    premium_status_line = "срок действия истёк"
-                    premium_extra_line = "Ты можешь заново оформить подписку через кнопку ниже."
+                    if lang == "en":
+                        premium_status_line = "expired"
+                        premium_extra_line = "You can buy Premium again using the button below."
+                    else:
+                        premium_status_line = "срок действия истёк"
+                        premium_extra_line = "Ты можешь заново оформить подписку через кнопку ниже."
                 else:
-                    premium_extra_line = "Оформить премиум можно через кнопку ниже."
+                    if lang == "en":
+                        premium_extra_line = "You can buy Premium using the button below."
+                    else:
+                        premium_extra_line = "Оформить премиум можно через кнопку ниже."
         except Exception:
             # В случае ошибки не ломаем профиль
             pass
