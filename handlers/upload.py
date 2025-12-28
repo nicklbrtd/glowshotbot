@@ -35,17 +35,56 @@ from database import (
     get_comments_for_photo_sorted,
     streak_record_action_by_tg_id,
 )
+
 from database_results import (
-    add_weekly_candidate,
-    get_daily_top_photos,
-    get_photo_rank_in_day,
-    get_weekly_photos_for_user,
-    is_photo_in_weekly,
+    PERIOD_DAY,
+    SCOPE_GLOBAL,
+    KIND_TOP_PHOTOS,
+    get_results_items,
 )
+
 from utils.time import get_moscow_now
 
 
 router = Router()
+
+
+# =====================
+# Results v2 helpers (daily only)
+# =====================
+
+async def _get_daily_top_photos_v2(day_key: str, limit: int = 10) -> list[dict]:
+    """Read daily top photos from results_v2 cache and return full photo dicts."""
+    try:
+        items = await get_results_items(
+            period=PERIOD_DAY,
+            period_key=str(day_key),
+            scope_type=SCOPE_GLOBAL,
+            scope_key="",
+            kind=KIND_TOP_PHOTOS,
+            limit=int(limit),
+        )
+    except Exception:
+        items = []
+
+    photos: list[dict] = []
+    for it in items:
+        pid = it.get("photo_id")
+        if pid is None:
+            continue
+        try:
+            p = await get_photo_by_id(int(pid))
+        except Exception:
+            p = None
+        if not p:
+            continue
+        if bool(p.get("is_deleted")):
+            continue
+        photos.append(p)
+        if len(photos) >= int(limit):
+            break
+
+    return photos
 
 
 class MyPhotoStates(StatesGroup):
@@ -63,6 +102,8 @@ class MyPhotoStates(StatesGroup):
     waiting_title = State()
     waiting_device_type = State()
     waiting_description = State()
+
+
 def _build_draft_caption(*, category: str | None, title: str | None, device_type: str | None, description: str | None) -> str:
     """Собрать временную подпись к работе во время мастера загрузки.
 
@@ -226,7 +267,6 @@ def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
 
     rows.append([
         InlineKeyboardButton(text="🔁 Повторить", callback_data=f"myphoto:repeat:{photo_id}"),
-        InlineKeyboardButton(text="🚀 Продвигать", callback_data=f"myphoto:promote:{photo_id}"),
     ])
 
     rows.append([
@@ -390,52 +430,6 @@ async def _clear_photo_message_id(state: FSMContext) -> None:
     await state.set_data(data)
 
 
-async def _compute_can_promote(photo: dict) -> bool:
-    """Можно ли показывать кнопку «Продвигать» для этой фотографии.
-
-    Условие:
-    • текущая дата строго позже дня фотографии;
-    • фотография входит в топ-4 дня;
-    • её ещё нет в недельном отборе.
-    """
-
-    now = get_moscow_now()
-
-    day_key = photo.get("day_key")
-    if not day_key:
-        # Фото ещё не из БД, неизвестно, к какому дню относится — не даём продвигать
-        return False
-
-    try:
-        day = datetime.fromisoformat(day_key).date()
-    except Exception:
-        day = now.date()
-
-    # Продвигать можно только, когда день фотографии уже полностью прошёл
-    if now.date() <= day:
-        return False
-
-    # Берём только топ-4 работ дня — продвигать можно 1–4 место
-    top4 = await get_daily_top_photos(day_key, limit=4)
-    in_top4 = any(p["id"] == photo["id"] for p in top4)
-    if not in_top4:
-        return False
-
-    # Если эта конкретная фотография уже в недельном отборе — больше не продвигаем
-    if await is_photo_in_weekly(photo["id"]):
-        return False
-
-    # Ограничение: у пользователя может быть только одна активная работа в недельном отборе
-    user_id = photo.get("user_id")
-    if user_id:
-        weekly_photos = await get_weekly_photos_for_user(user_id)
-        if weekly_photos:
-            # уже есть хотя бы одна работа, участвующая в итогах недели
-            return False
-
-    return True
-
-
 async def _photo_result_status(photo: dict) -> tuple[bool, str | None, int | None]:
     """
     Определить, «светилась» ли фотография в итогах.
@@ -452,20 +446,12 @@ async def _photo_result_status(photo: dict) -> tuple[bool, str | None, int | Non
     # 1) Топ-10 дня
     if day_key:
         try:
-            top10 = await get_daily_top_photos(day_key, limit=10)
+            top10 = await _get_daily_top_photos_v2(day_key, limit=10)
             for i, p in enumerate(top10, start=1):
-                if int(p.get("id")) == int(photo.get("id")):
+                if int(p.get("id") or 0) == int(photo.get("id") or 0):
                     return True, "daily_top10", i
         except Exception:
             pass
-
-    # 2) Недельный отбор
-    try:
-        if await is_photo_in_weekly(int(photo.get("id"))):
-            return True, "weekly_candidate", None
-    except Exception:
-        pass
-
     return False, None, None
 
 
@@ -866,10 +852,19 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
     lines.append("")
 
     if is_premium_user:
-        place_now = None
-        try:
-            place_now = await get_photo_rank_in_day(photo_id, str(photo.get("day_key") or ""))
-        except Exception:
+        # Rank in today's top based on results_v2 cache
+        dk = str(photo.get("day_key") or "")
+        if dk:
+            try:
+                top_items = await _get_daily_top_photos_v2(dk, limit=50)
+                place_now = None
+                for i, p in enumerate(top_items, start=1):
+                    if int(p.get("id") or 0) == int(photo_id):
+                        place_now = i
+                        break
+            except Exception:
+                place_now = None
+        else:
             place_now = None
 
         total_users = 0
@@ -1698,40 +1693,6 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
-
-
-# --- Promote handler ---
-@router.callback_query(F.data.regexp(r"^myphoto:promote:(\d+)$"))
-async def myphoto_promote(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    photo_id_str = callback.data.split(":")[2]
-    try:
-        photo_id = int(photo_id_str)
-    except Exception:
-        await callback.answer("Ошибка.")
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
-        await callback.answer("Фотография не найдена.", show_alert=True)
-        return
-
-    can = await _compute_can_promote(photo)
-    if not can:
-        await callback.answer("Сейчас эту фотографию нельзя продвигать.", show_alert=True)
-        return
-
-    try:
-        await add_weekly_candidate(photo_id)
-    except Exception:
-        await callback.answer("Не удалось продвинуть фотографию. Попробуй позже.", show_alert=True)
-        return
-
-    await callback.answer("Готово! Фотография добавлена в недельный отбор ✅", show_alert=True)
-
 
 # --- Repeat (temporary) handler ---
 @router.callback_query(F.data.regexp(r"^myphoto:repeat:(\d+)$"))

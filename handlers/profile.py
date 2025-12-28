@@ -36,7 +36,6 @@ from database import (
     toggle_likes_notify_by_tg_id,
     toggle_comments_notify_by_tg_id,
 )
-from database_results import get_weekly_rank_for_user
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
@@ -237,11 +236,6 @@ async def build_profile_view(user: dict):
             print("POPULAR PHOTO ERROR:", repr(e))
 
         # Позиция в топе недели
-        try:
-            rank = await get_weekly_rank_for_user(user_id)
-            if rank is not None:
-                weekly_top_position = str(rank)
-        except Exception:
             weekly_top_position = "—"
 
     # GlowShot Premium статус
