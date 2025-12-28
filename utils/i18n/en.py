@@ -140,4 +140,27 @@ EN = {
     "settings.lang.already": "Already selected",
     "settings.lang.saved": "Done!",
     "settings.lang.save_error": "Couldn't save language 😿",
+
+        # Start / Subscribe / Payments
+    "start.register.text": "🙃 Hi! This is <b>GlowShot</b> — a bot for people who love photography.\n\nHere we rate <b>shots</b>.\n<b>Upload</b> your best photos, <b>rate</b> others, and <b>win</b> in results.\n\nBut first you need to sign up:",
+    "start.register.btn": "🚀 Sign up",
+
+    "start.subscribe.btn": "🔔 Subscribe",
+    "start.subscribe.ready": "✅ Done",
+    "start.subscribe.prompt": "To use the bot, please subscribe to our channel.\n\n1) Tap «🔔 Subscribe»\n2) Come back here and tap «✅ Done»",
+    "start.subscribe.thanks": "Thanks for subscribing! 🎉",
+    "start.subscribe.not_yet": "Looks like you're not subscribed yet.\nSubscribe and try again 🙂",
+
+    "start.payment.success_active": "✅ <b>Payment successful!</b> Premium is already active.\nThanks for supporting the project! 🎉",
+    "start.payment.success_pending": "🧾 <b>Payment received</b>. Confirming…\nUsually it takes up to 1 minute.",
+    "start.payment.fail": "❌ <b>Payment not completed</b> (canceled/error).\nIf it was a mistake — try again in «Profile → Premium».",
+
+    # Menu (start)
+    "menu.title": "{prefix}🦒 GlowShot — Photography",
+    "menu.name": "Name: {name}",
+    "menu.can_rate": "Can rate: {value}",
+    "menu.rated_by_me": "You {verb}: {value}",
+    "menu.ad.header": "📄 <b>Promo block:</b>",
+    "menu.ad.line": "• Subscribe to our channel: {link}",
+    "menu.tagline": "Upload · Rate · Win",
 }

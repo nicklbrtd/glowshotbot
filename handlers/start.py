@@ -1,6 +1,7 @@
 import os
 import random
 import html
+from utils.i18n import t
 from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.filters import CommandStart
@@ -17,6 +18,18 @@ from keyboards.common import build_main_menu
 router = Router()
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
+    try:
+        if user and user.get("lang") in ("ru", "en"):
+            return str(user.get("lang"))
+    except Exception:
+        pass
+
+    code = (tg_lang_code or "").lower()
+    if code.startswith("ru"):
+        return "ru"
+    return "en"
 
 
 # Channel required to use the bot (subscription gate)
@@ -74,7 +87,7 @@ async def is_user_subscribed(bot, user_id: int) -> bool:
     return member.status in ("member", "administrator", "creator")
 
 
-def build_subscribe_keyboard() -> InlineKeyboardMarkup:
+def build_subscribe_keyboard(lang: str) -> InlineKeyboardMarkup:
     """
     Клавиатура для экрана обязательной подписки:
     «Подписаться» + «Готово», сразу в виде InlineKeyboardMarkup.
@@ -84,11 +97,11 @@ def build_subscribe_keyboard() -> InlineKeyboardMarkup:
     channel_link = REQUIRED_CHANNEL_LINK
 
     kb.button(
-        text="🔔 Подписаться",
+        text=t("start.subscribe.btn", lang),
         url=channel_link,
     )
     kb.button(
-        text="✅ Готово",
+        text=t("start.subscribe.ready", lang),
         callback_data="sub:check",
     )
     kb.adjust(1)
@@ -223,24 +236,29 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool) ->
 
     title_prefix = "💎 " if is_premium else ""
 
+    try:
+        lang = "ru" if not user else (user.get("lang") if user.get("lang") in ("ru", "en") else "ru")
+    except Exception:
+        lang = "ru"
+
     lines: list[str] = []
-    lines.append(f"{title_prefix}🦒 GlowShot — Photography")
-    lines.append(f"Имя: {safe_name}")
+    lines.append(t("menu.title", lang, prefix=title_prefix))
+    lines.append(t("menu.name", lang, name=safe_name))
     lines.append("")
 
-    lines.append(f"Можно оценить: {can_rate_text}")
-    lines.append(f"Ты {rated_verb}: {rated_by_me_text}")
-
+    lines.append(t("menu.can_rate", lang, value=can_rate_text))
+    lines.append(t("menu.rated_by_me", lang, verb=rated_verb, value=rated_by_me_text))    
     lines.append("")
-    lines.append("📄 <b>Рекламный блок:</b>")
-    lines.append(f"• Подпишись на наш телеграм канал: {AD_CHANNEL_LINK}")
+    # Рекламный блок
+    lines.append(t("menu.ad.header", lang))
+    lines.append(t("menu.ad.line", lang, link=AD_CHANNEL_LINK))
     # рандомная вторая строка (всегда)
     if AD_LINES:
         lines.append(f"• {random.choice(AD_LINES)}")
 
 
     lines.append("")
-    lines.append("Публикуй · Оценивай · Побеждай")
+    lines.append(t("menu.tagline", lang))
 
     return "\n".join(lines)
 
@@ -261,23 +279,15 @@ async def cmd_start(message: Message, state: FSMContext):
         user = await db.get_user_by_tg_id(message.from_user.id)
 
         is_premium = await db.is_user_premium_active(message.from_user.id)
+        lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
         if payload == "payment_success":
             if is_premium:
-                payment_note = (
-                    "✅ <b>Оплата прошла!</b> Премиум уже активен.\n"
-                    "Спасибо за поддержку проекта! 🎉"
-                )
+                payment_note = t("start.payment.success_active", lang)
             else:
-                payment_note = (
-                    "🧾 <b>Платёж принят</b>. Сейчас подтверждаем оплату…\n"
-                    "Обычно это занимает до 1 минуты.\n"
-                )
+                payment_note = t("start.payment.success_pending", lang)
         else:
-            payment_note = (
-                "❌ <b>Оплата не завершена</b> (отмена/ошибка).\n"
-                "Если это была ошибка — попробуй ещё раз в «Профиль → Премиум»."
-            )
+            payment_note = t("start.payment.fail", lang)
 
         # Пытаемся обновить уже существующее сообщение меню (не спамим чат)
         data = await state.get_data()
@@ -303,6 +313,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 payment_note,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
             )
         except Exception:
             pass
@@ -316,6 +327,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     message_id=menu_msg_id,
                     reply_markup=reply_kb,
                     link_preview_options=NO_PREVIEW,
+                    parse_mode="HTML",
                 )
                 edited = True
             except Exception:
@@ -328,6 +340,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 reply_markup=reply_kb,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
             )
             data["menu_msg_id"] = sent.message_id
             await state.set_data(data)
@@ -351,19 +364,18 @@ async def cmd_start(message: Message, state: FSMContext):
                 except Exception:
                     pass
 
-        text = (
-            "🙃 Привет! Это <b>GlowShot</b> — бот для тех, кто любит фотографировать.\n\n"
-            "Здесь мы оцениваем <b>кадры</b>.\n"
-            "<b>Выкладывай</b> свои лучшие фотографии, <b>оценивай</b> работы других и <b>побеждай</b> в итогах.\n\n"
-            "Но для начала нужно зарегистрироваться:"
-        )
+        lang = _pick_lang(None, getattr(message.from_user, "language_code", None))
+        text = t("start.register.text", lang)
+
         kb = InlineKeyboardBuilder()
-        kb.button(text="🚀 Зарегистрироваться", callback_data="auth:start")
+        kb.button(text=t("start.register.btn", lang), callback_data="auth:start")
         kb.adjust(1)
+
         await message.answer(
             text,
             reply_markup=kb.as_markup(),
             disable_notification=True,
+            parse_mode="HTML",
         )
         try:
             await message.delete()
@@ -397,6 +409,7 @@ async def cmd_start(message: Message, state: FSMContext):
                         is_premium=is_premium,
                     ),
                     link_preview_options=NO_PREVIEW,
+                    parse_mode="HTML",
                 )
             except TelegramBadRequest:
                 # Если редактирование не удалось (сообщение удалено/устарело) — отправляем новое
@@ -409,6 +422,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     ),
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
+                    parse_mode="HTML",
                 )
         else:
             # Меню ещё ни разу не показывалось — отправляем новое сообщение
@@ -421,6 +435,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 ),
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
             )
 
         # Если мы отправили новое меню — запоминаем его message_id в состоянии
@@ -428,13 +443,13 @@ async def cmd_start(message: Message, state: FSMContext):
             data["menu_msg_id"] = sent_message.message_id
             await state.set_data(data)
     else:
-        sub_kb = build_subscribe_keyboard()
+        lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
+        sub_kb = build_subscribe_keyboard(lang)
         await message.answer(
-            "Чтобы пользоваться ботом, подпишись на наш канал.\n\n"
-            "1) Нажми «🔔 Подписаться»\n"
-            "2) Вернись сюда и нажми «✅ Готово»",
+            t("start.subscribe.prompt", lang),
             reply_markup=sub_kb,
             disable_notification=True,
+            parse_mode="HTML",
         )
     try:
         await message.delete()
@@ -444,6 +459,7 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "sub:check")
 async def subscription_check(callback: CallbackQuery):
     user_id = callback.from_user.id
+    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
 
     if await is_user_subscribed(callback.bot, user_id):
         # достаём пользователя и флаги ролей
@@ -461,6 +477,7 @@ async def subscription_check(callback: CallbackQuery):
                     is_premium=is_premium,
                 ),
                 link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
             )
         except Exception:
             try:
@@ -474,6 +491,7 @@ async def subscription_check(callback: CallbackQuery):
                     ),
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
+                    parse_mode="HTML",
                 )
             except Exception:
                 await callback.message.answer(
@@ -485,11 +503,12 @@ async def subscription_check(callback: CallbackQuery):
                     ),
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
+                    parse_mode="HTML",
                 )
-        await callback.answer("Спасибо за подписку! 🎉", show_alert=False)
+        await callback.answer(t("start.subscribe.thanks", lang), show_alert=False)
     else:
         await callback.answer(
-            "Похоже, ты ещё не подписан на канал.\nПодпишись и попробуй снова 🙂",
+            t("start.subscribe.not_yet", lang),
             show_alert=True,
         )
 
@@ -523,6 +542,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 is_premium=is_premium,
             ),
             link_preview_options=NO_PREVIEW,
+            parse_mode="HTML",
         )
         menu_msg_id = callback.message.message_id
     except Exception:
@@ -538,6 +558,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 ),
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
             )
         except Exception:
             sent = await callback.message.answer(
@@ -549,6 +570,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
                 ),
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
             )
         menu_msg_id = sent.message_id
 
