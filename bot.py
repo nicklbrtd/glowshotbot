@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from utils.time import get_moscow_now
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, MASTER_ADMIN_ID
 from database import (
     init_db,
     log_bot_error,
@@ -25,6 +25,27 @@ def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✖️ Отмена", callback_data="premium:reminder:dismiss")],
         ]
     )
+
+
+def _admin_error_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧾 Открыть логи", callback_data="admin:logs")],
+        ]
+    )
+
+
+# простая анти-спам защита: одинаковая ошибка в том же хендлере не чаще раза в 30 секунд
+_LAST_ADMIN_ERR: dict[str, float] = {}
+_ADMIN_ERR_COOLDOWN_SEC = 30.0
+
+
+def _err_key(handler_name: str | None, error_type: str, error_text: str) -> str:
+    h = handler_name or "unknown"
+    t = (error_text or "").strip()
+    if len(t) > 180:
+        t = t[:180]
+    return f"{h}|{error_type}|{t}"
 
 
 async def premium_expiry_reminder_loop(bot: Bot) -> None:
@@ -184,18 +205,57 @@ class ErrorsToDbMiddleware(BaseMiddleware):
             except Exception:
                 handler_name = None
 
+            err_type = type(e).__name__
+            err_text = str(e)
+
+            logged_ok = False
             try:
                 await log_bot_error(
                     chat_id=chat_id,
                     tg_user_id=tg_user_id,
                     handler=handler_name,
                     update_type=update_type,
-                    error_type=type(e).__name__,
-                    error_text=str(e),
+                    error_type=err_type,
+                    error_text=err_text,
                     traceback_text=tb,
                 )
+                logged_ok = True
             except Exception:
                 # не убиваем бота, если БД/логирование легло
+                logged_ok = False
+
+            # Пушим мастеру-админу краткое уведомление (если задан) — даже если логирование упало,
+            # чтобы ты видел, что бот реально падает.
+            try:
+                if MASTER_ADMIN_ID:
+                    key = _err_key(handler_name, err_type, err_text)
+                    now_ts = datetime.utcnow().timestamp()
+                    last = _LAST_ADMIN_ERR.get(key, 0.0)
+                    if now_ts - last >= _ADMIN_ERR_COOLDOWN_SEC:
+                        _LAST_ADMIN_ERR[key] = now_ts
+
+                        handler_label = handler_name or "—"
+                        chat_label = str(chat_id) if chat_id is not None else "—"
+                        user_label = str(tg_user_id) if tg_user_id is not None else "—"
+                        log_flag = "✅" if logged_ok else "⚠️"
+
+                        text = (
+                            f"🚨 <b>Ошибка в боте</b> {log_flag}\n\n"
+                            f"<b>{err_type}</b>: <code>{err_text[:700]}</code>\n\n"
+                            f"Хендлер: <code>{handler_label}</code>\n"
+                            f"Update: <code>{update_type}</code>\n"
+                            f"chat_id: <code>{chat_label}</code>\n"
+                            f"user_id: <code>{user_label}</code>\n\n"
+                            "Открыть список логов?"
+                        )
+
+                        await data["bot"].send_message(
+                            chat_id=MASTER_ADMIN_ID,
+                            text=text,
+                            reply_markup=_admin_error_kb(),
+                            disable_notification=True,
+                        )
+            except Exception:
                 pass
 
             raise

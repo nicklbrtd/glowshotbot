@@ -1,9 +1,8 @@
 from __future__ import annotations
-
-# =============================================================
-# ==== АДМИНКА: ЛОГИ / ОШИБКИ =================================
-# =============================================================
-
+import asyncio
+import html
+import os
+import subprocess
 from datetime import datetime
 from typing import Optional, Union
 
@@ -20,14 +19,11 @@ from database import (
     clear_bot_error_logs,
 )
 
-from .common import (
-    _ensure_admin,
-    _ensure_user,
-)
 
 router = Router()
 
 UserEvent = Union[Message, CallbackQuery]
+
 
 
 # =============================================================
@@ -46,7 +42,7 @@ async def _ensure_user(event: UserEvent) -> Optional[dict]:
     if user is None:
         text = "Сначала нужно зарегистрироваться через /start."
         if isinstance(event, CallbackQuery):
-            await event.message.answer(text)
+            await event.message.answer(text, parse_mode="HTML")
         else:
             await event.answer(text)
         return None
@@ -81,6 +77,8 @@ async def _ensure_admin(event: UserEvent) -> Optional[dict]:
 
 _LOGS_PAGE_LIMIT = 10
 _MAX_TG_TEXT = 3900  # safe margin for Telegram 4096
+_SYSTEMD_UNIT = os.getenv("BOT_SYSTEMD_UNIT", "glowshot-bot")
+_SYSTEMD_LOG_LIMIT = int(os.getenv("BOT_SYSTEMD_LOG_LIMIT", "200"))
 
 
 def _cut_text(s: str | None, limit: int = _MAX_TG_TEXT) -> str:
@@ -89,6 +87,47 @@ def _cut_text(s: str | None, limit: int = _MAX_TG_TEXT) -> str:
     s = str(s)
     return s if len(s) <= limit else s[: limit - 3] + "..."
 
+
+def _tail_text(s: str, limit: int = _MAX_TG_TEXT) -> str:
+    if len(s) <= limit:
+        return s
+    tail = s[-(limit - 4):]
+    return "...\n" + tail
+
+
+def _systemd_cmd(limit: int) -> list[str]:
+    return [
+        "journalctl",
+        "-u",
+        _SYSTEMD_UNIT,
+        "-n",
+        str(limit),
+        "--no-pager",
+        "--output=short-iso",
+    ]
+
+
+async def _fetch_systemd_logs(limit: int) -> tuple[str | None, str | None]:
+    cmd = _systemd_cmd(limit)
+
+    def _run() -> tuple[str, str, int]:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        return res.stdout or "", res.stderr or "", int(res.returncode)
+
+    try:
+        stdout, stderr, code = await asyncio.to_thread(_run)
+    except FileNotFoundError:
+        return None, "journalctl not found on this host."
+    except subprocess.TimeoutExpired:
+        return None, "journalctl timed out."
+    except Exception as e:
+        return None, f"journalctl failed: {type(e).__name__}: {e}"
+
+    if code != 0:
+        err = stderr.strip() or f"journalctl exited with code {code}"
+        return None, err
+
+    return stdout, None
 
 def _fmt_dt_safe(dt_str: str | None) -> str:
     if not dt_str:
@@ -159,11 +198,41 @@ async def _render_logs_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
             kb.button(text="➡️", callback_data=next_cb)
 
     # действия
+    kb.button(text="📟 Systemd логи", callback_data="admin:logs:systemd")
     kb.button(text="🧹 Очистить логи", callback_data=f"admin:logs:clear:confirm:{page}")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
 
-    # раскладка: (подробности до 5) / (стрелки 2) / (очистить) / (в меню)
-    kb.adjust(5, 2, 1, 1)
+    # раскладка: (подробности до 5) / (стрелки 2) / (systemd) / (очистить) / (в меню)
+    kb.adjust(5, 2, 1, 1, 1)
+
+    return text, kb.as_markup()
+
+
+async def _render_systemd_logs() -> tuple[str, InlineKeyboardMarkup]:
+    stdout, err = await _fetch_systemd_logs(_SYSTEMD_LOG_LIMIT)
+
+    title = "📟 <b>Systemd логи бота</b>"
+    meta = f"Юнит: <code>{html.escape(_SYSTEMD_UNIT)}</code> · последние <b>{_SYSTEMD_LOG_LIMIT}</b> строк"
+
+    if err:
+        body = (
+            "Не удалось получить systemd-логи.\n"
+            f"<code>{html.escape(err)}</code>\n\n"
+            "Если видишь ошибку прав — добавь пользователя бота в группу "
+            "<code>systemd-journal</code> или настрой вывод в файл."
+        )
+    else:
+        logs_text = stdout.strip() if stdout else "Логи пустые."
+        safe = _tail_text(logs_text, _MAX_TG_TEXT - 600)
+        body = f"<code>{html.escape(safe)}</code>"
+
+    text = "\n\n".join([title, meta, body]).strip()
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔄 Обновить", callback_data="admin:logs:systemd:refresh")
+    kb.button(text="⬅️ К списку ошибок", callback_data="admin:logs:page:1")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
 
     return text, kb.as_markup()
 
@@ -181,11 +250,43 @@ async def admin_logs_open(callback: CallbackQuery):
     text, markup = await _render_logs_page(1)
 
     try:
-        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
     except Exception:
-        await callback.message.answer(text, reply_markup=markup)
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
 
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:logs:systemd")
+async def admin_logs_systemd(callback: CallbackQuery):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    text, markup = await _render_systemd_logs()
+
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:logs:systemd:refresh")
+async def admin_logs_systemd_refresh(callback: CallbackQuery):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    text, markup = await _render_systemd_logs()
+
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+    await callback.answer("Обновил")
 
 
 # =============================================================
@@ -206,9 +307,9 @@ async def admin_logs_page(callback: CallbackQuery):
     text, markup = await _render_logs_page(page)
 
     try:
-        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
     except Exception:
-        await callback.message.answer(text, reply_markup=markup)
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
 
     await callback.answer()
 
@@ -260,9 +361,9 @@ async def admin_logs_view(callback: CallbackQuery):
     if not row:
         text = "Запись не найдена (возможно, слишком старая)."
         try:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup())
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(text, reply_markup=kb.as_markup())
+            await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
         await callback.answer()
         return
 
@@ -290,16 +391,16 @@ async def admin_logs_view(callback: CallbackQuery):
     )
 
     try:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except TelegramBadRequest:
         # Иногда Telegram ругается на слишком длинный текст даже после обрезки
         safe_text = _cut_text(text, _MAX_TG_TEXT)
         try:
-            await callback.message.edit_text(safe_text, reply_markup=kb.as_markup())
+            await callback.message.edit_text(safe_text, reply_markup=kb.as_markup(), parse_mode="HTML")
         except Exception:
-            await callback.message.answer(safe_text, reply_markup=kb.as_markup())
+            await callback.message.answer(safe_text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
-        await callback.message.answer(_cut_text(text, _MAX_TG_TEXT), reply_markup=kb.as_markup())
+        await callback.message.answer(_cut_text(text, _MAX_TG_TEXT), reply_markup=kb.as_markup(), parse_mode="HTML")
 
     await callback.answer()
 
@@ -333,9 +434,9 @@ async def admin_logs_clear_confirm(callback: CallbackQuery):
     kb.adjust(1, 1)
 
     try:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
-        await callback.message.answer(text, reply_markup=kb.as_markup())
+        await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
     await callback.answer()
 
@@ -352,8 +453,8 @@ async def admin_logs_clear_do(callback: CallbackQuery):
     text = "✅ Логи очищены.\n\n" + text
 
     try:
-        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
     except Exception:
-        await callback.message.answer(text, reply_markup=markup)
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
 
     await callback.answer()

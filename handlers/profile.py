@@ -1435,13 +1435,27 @@ async def profile_settings_language(callback: CallbackQuery):
     kb.button(text=t("common.back", lang), callback_data="profile:settings")
     kb.adjust(2, 1)
 
-    await callback.message.edit_text(
+    text = (
         f"{t('settings.lang.title', lang)}\n\n"
         f"{t('settings.lang.current', lang, lang=t('lang.' + lang, lang))}\n\n"
-        f"{t('settings.lang.pick', lang)}",
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
+        f"{t('settings.lang.pick', lang)}"
     )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+
     await callback.answer()
 
 
@@ -1472,13 +1486,26 @@ async def profile_settings_language_set(callback: CallbackQuery):
     kb.button(text=t("common.back", lang), callback_data="profile:settings")
     kb.adjust(2, 1)
 
-    await callback.message.edit_text(
+    text = (
         f"{t('settings.lang.title', lang)}\n\n"
         f"{t('settings.lang.current', lang, lang=t('lang.' + lang, lang))}\n\n"
-        f"{t('settings.lang.pick', lang)}",
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
+        f"{t('settings.lang.pick', lang)}"
     )
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
 
     await callback.answer("Готово!" if lang == "ru" else "Done!")
 
