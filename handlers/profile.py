@@ -1,14 +1,16 @@
 from aiogram import Router, F
 import html
-import os
-import traceback
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from datetime import datetime
-from handlers.streak import load_streak_status_dict, render_streak_text_from_dict, build_streak_kb_from_dict
+from handlers.streak import (
+    get_profile_streak_badge_and_line,
+    get_profile_streak_status,
+    toggle_profile_streak_notify_and_status,
+)
 
 from database import (
     get_user_by_tg_id,
@@ -30,8 +32,6 @@ from database import (
     update_user_city,
     update_user_country,
     set_user_city_visibility,
-    streak_get_status_by_tg_id,
-    streak_toggle_notify_by_tg_id,
     get_notify_settings_by_tg_id,
     toggle_likes_notify_by_tg_id,
     toggle_comments_notify_by_tg_id,
@@ -138,16 +138,7 @@ async def build_profile_view(user: dict):
     streak_badge = ""
     streak_short_line = ""
     if tg_id:
-        try:
-            s = await streak_get_status_by_tg_id(int(tg_id))
-            cur_streak = int(s.get("streak") or 0)
-            best_streak = int(s.get("best_streak") or 0)
-            if cur_streak > 0:
-                streak_badge = f" 🔥{cur_streak}"
-            streak_short_line = f"🔥 Streak: {cur_streak} (best {best_streak})"
-        except Exception:
-            streak_badge = ""
-            streak_short_line = ""
+        streak_badge, streak_short_line = await get_profile_streak_badge_and_line(int(tg_id))
 
     # Rank (cached)
     rank_label = None
@@ -1402,11 +1393,7 @@ async def profile_settings_open(callback: CallbackQuery):
 
     notify = await get_notify_settings_by_tg_id(tg_id)
 
-    streak_status = None
-    try:
-        streak_status = await load_streak_status_dict(tg_id)
-    except Exception:
-        streak_status = None
+    streak_status = await get_profile_streak_status(tg_id)
 
     text = _render_profile_settings(notify, streak_status)
     kb = _kb_profile_settings(notify, streak_status)
@@ -1427,11 +1414,7 @@ async def profile_settings_toggle_likes(callback: CallbackQuery):
 
     notify = await toggle_likes_notify_by_tg_id(tg_id)
 
-    streak_status = None
-    try:
-        streak_status = await load_streak_status_dict(tg_id)
-    except Exception:
-        streak_status = None
+    streak_status = await get_profile_streak_status(tg_id)
 
     try:
         await callback.message.edit_text(
@@ -1453,11 +1436,7 @@ async def profile_settings_toggle_comments(callback: CallbackQuery):
 
     notify = await toggle_comments_notify_by_tg_id(tg_id)
 
-    streak_status = None
-    try:
-        streak_status = await load_streak_status_dict(tg_id)
-    except Exception:
-        streak_status = None
+    streak_status = await get_profile_streak_status(tg_id)
 
     try:
         await callback.message.edit_text(
@@ -1477,15 +1456,8 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
     tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
 
-    await streak_toggle_notify_by_tg_id(tg_id)
-
+    streak_status = await toggle_profile_streak_notify_and_status(tg_id)
     notify = await get_notify_settings_by_tg_id(tg_id)
-
-    streak_status = None
-    try:
-        streak_status = await load_streak_status_dict(tg_id)
-    except Exception:
-        streak_status = None
 
     try:
         await callback.message.edit_text(
@@ -1534,93 +1506,3 @@ async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
         reply_markup=kb.as_markup(),
     )
     await callback.answer("Аккаунт удалён.")
-
-
-@router.callback_query(F.data == "profile:streak")
-async def profile_streak_open(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    if user is None:
-        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
-        return
-
-    tg_id = user.get("tg_id") or callback.from_user.id
-
-    try:
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status)
-        kb = build_streak_kb_from_dict(
-            status,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-    except Exception as e:
-        err_name = type(e).__name__
-        err_text = str(e)[:180]
-        print("[PROFILE_STREAK_ERROR]", err_name, err_text)
-        print(traceback.format_exc())
-
-        # если что-то совсем жёстко упало — не зависаем
-        await callback.message.edit_text(
-            "🔥 <b>Streak</b>\n\n"
-            "Не получилось загрузить статус streak 😭\n"
-            f"Ошибка: <code>{html.escape(err_name)}: {html.escape(err_text)}</code>\n\n"
-            "Обычно это либо косяк в БД/миграции streak, либо таймаут соединения. "
-            "Скинь этот код из ошибки в логи — и я починю.",
-            reply_markup=build_back_kb(callback_data="menu:profile", text="⬅️ В профиль"),
-            parse_mode="HTML",
-        )
-
-    await callback.answer()
-
-@router.callback_query(F.data == "profile:streak:refresh")
-async def profile_streak_refresh(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    tg_id = (user or {}).get("tg_id") or callback.from_user.id
-
-    try:
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status)
-        kb = build_streak_kb_from_dict(
-            status,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-    finally:
-        # даже если упало — Telegram не будет крутить “загрузку”
-        await callback.answer("Обновил 🔥")
-
-@router.callback_query(F.data == "profile:streak:toggle_notify")
-async def profile_streak_toggle_notify(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    tg_id = (user or {}).get("tg_id") or callback.from_user.id
-
-    try:
-        await streak_toggle_notify_by_tg_id(int(tg_id))
-
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status)
-        kb = build_streak_kb_from_dict(
-            status,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-    finally:
-        await callback.answer("Ок")
