@@ -469,7 +469,7 @@ async def subscription_check(callback: CallbackQuery):
         is_admin = _get_flag(user, "is_admin")
         is_moderator = _get_flag(user, "is_moderator")
         is_premium = await db.is_user_premium_active(user_id)
-        menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium)
+        menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
         try:
             await callback.message.edit_text(
                 menu_text,
@@ -537,7 +537,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
 
     menu_msg_id = None
 
-    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium)
+    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium, lang=lang)
     # 1. Пытаемся превратить текущее сообщение в меню
     try:
         await callback.message.edit_text(
