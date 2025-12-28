@@ -23,21 +23,24 @@ from typing import Iterable, Mapping
 
 @dataclass(frozen=True, slots=True)
 class Rank:
-    """A user tier."""
+    """A user tier (bilingual)."""
 
     code: str
-    title: str
+    title_ru: str
+    title_en: str
     emoji: str
 
-    def label(self) -> str:
+    def label(self, lang: str = "ru") -> str:
         """Human label for UI."""
-        return f"{self.emoji} {self.title}".strip()
+        l = (lang or "ru").strip().lower().split("-")[0]
+        title = self.title_en if l == "en" else self.title_ru
+        return f"{self.emoji} {title}".strip()
 
 
 # --- Default tiers ---
-RANK_BEGINNER = Rank(code="beginner", title="Начинающий", emoji="🟢")
-RANK_AMATEUR = Rank(code="amateur", title="Любитель", emoji="🔵")
-RANK_EXPERT = Rank(code="expert", title="Эксперт", emoji="🟣")
+RANK_BEGINNER = Rank(code="beginner", title_ru="Начинающий", title_en="Beginner", emoji="🟢")
+RANK_AMATEUR = Rank(code="amateur", title_ru="Любитель", title_en="Amateur", emoji="🔵")
+RANK_EXPERT = Rank(code="expert", title_ru="Эксперт", title_en="Expert", emoji="🟣")
 
 DEFAULT_RANKS: tuple[Rank, ...] = (
     RANK_BEGINNER,
@@ -101,9 +104,13 @@ def rank_from_points(points: int | None, thresholds: Iterable[tuple[int, Rank]] 
     return current
 
 
-def format_rank(points: int | None, thresholds: Iterable[tuple[int, Rank]] = DEFAULT_THRESHOLDS) -> str:
-    """Return a short UI string like '🟣 Эксперт'."""
-    return rank_from_points(points, thresholds=thresholds).label()
+def format_rank(
+    points: int | None,
+    thresholds: Iterable[tuple[int, Rank]] = DEFAULT_THRESHOLDS,
+    lang: str = "ru",
+) -> str:
+    """Return a short UI string like '🟣 Expert' / '🟣 Эксперт'."""
+    return rank_from_points(points, thresholds=thresholds).label(lang)
 
 
 def thresholds_from_mapping(mapping: Mapping[str, int], ranks: Iterable[Rank] = DEFAULT_RANKS) -> list[tuple[int, Rank]]:
