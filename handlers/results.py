@@ -29,7 +29,21 @@ except Exception:  # pragma: no cover
     recalc_day_country = None  # type: ignore
 
 
+
 router = Router()
+
+# =========================
+# TEMP: Results are in development
+# =========================
+RESULTS_IN_DEVELOPMENT = True
+
+def _dev_placeholder(title: str) -> str:
+    return (
+        f"{title}\n\n"
+        "Сейчас итоги находятся в разработке.\n"
+        "Мы полностью перестраиваем систему (кэш + движки + пороги участия), чтобы было быстро и честно.\n\n"
+        "<i>Загляни позже — скоро откроем первый рабочий раздел.</i>"
+    )
 
 
 # =========================
@@ -242,8 +256,9 @@ async def results_menu(callback: CallbackQuery):
     kb = build_results_menu_kb()
     text = (
         "🏁 <b>Итоги</b>\n\n"
-        "Выбирай раздел ниже 👇\n\n"
-        "<i>Итоги работают через кэш (results_v2): быстро, стабильно, без лагов.</i>"
+        "Сейчас мы переделываем итоги на новую систему (кэш + движки + пороги участия).\n"
+        "Скоро здесь появятся: итоги дня/недели, город/страна, мои итоги и теги.\n\n"
+        "<i>Пока раздел в разработке.</i>"
     )
     await _show_text(callback, text, kb)
     await callback.answer()
@@ -429,6 +444,12 @@ async def results_day(callback: CallbackQuery):
     Итоги дня показываем за вчерашний календарный день по Москве,
     и показываем только после 07:00 МСК (как у тебя было).
     """
+    if RESULTS_IN_DEVELOPMENT:
+        kb = build_back_to_menu_kb()
+        await _show_text(callback, _dev_placeholder("🔥 <b>Итоги дня</b>"), kb)
+        await callback.answer()
+        return
+
     now = get_moscow_now()
 
     if now.hour < 7:
@@ -448,6 +469,11 @@ async def results_day(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("results:day:"))
 async def results_day_nav(callback: CallbackQuery):
+    if RESULTS_IN_DEVELOPMENT:
+        kb = build_back_to_menu_kb()
+        await _show_text(callback, _dev_placeholder("🔥 <b>Итоги дня</b>"), kb)
+        await callback.answer()
+        return
     try:
         _, _, day_key, step_str = callback.data.split(":", 3)
         step = int(step_str)
@@ -470,6 +496,11 @@ async def results_day_nav(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:week")
 async def results_week(callback: CallbackQuery):
+    if RESULTS_IN_DEVELOPMENT:
+        kb = build_back_to_menu_kb()
+        await _show_text(callback, _dev_placeholder("🗓 <b>Итоги недели</b>"), kb)
+        await callback.answer()
+        return
     kb = build_back_to_menu_kb()
     text = (
         "🗓 <b>Итоги недели</b>\n\n"
@@ -482,6 +513,11 @@ async def results_week(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:me")
 async def results_me(callback: CallbackQuery):
+    if RESULTS_IN_DEVELOPMENT:
+        kb = build_results_menu_kb()
+        await _show_text(callback, _dev_placeholder("👤 <b>Мои итоги</b>"), kb)
+        await callback.answer()
+        return
     kb = build_results_menu_kb()
     text = (
         "👤 <b>Мои итоги</b>\n\n"
@@ -498,6 +534,11 @@ async def results_me(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:city")
 async def results_city(callback: CallbackQuery):
+    if RESULTS_IN_DEVELOPMENT:
+        kb = build_results_menu_kb()
+        await _show_text(callback, _dev_placeholder("🏙 <b>Итоги города</b>"), kb)
+        await callback.answer()
+        return
     now = get_moscow_now()
 
     if now.hour < 7:
@@ -576,6 +617,11 @@ async def results_city(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:country")
 async def results_country(callback: CallbackQuery):
+    if RESULTS_IN_DEVELOPMENT:
+        kb = build_results_menu_kb()
+        await _show_text(callback, _dev_placeholder("🌍 <b>Итоги страны</b>"), kb)
+        await callback.answer()
+        return
     now = get_moscow_now()
 
     if now.hour < 7:
