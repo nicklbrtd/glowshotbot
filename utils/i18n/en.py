@@ -120,7 +120,7 @@ EN = {
     "profile.edit.city.deleted": "🏙 City removed.",
     "profile.edit.city.deleted_toast": "Done!",
     "profile.edit.city.ask": "🏙 <b>City</b>\n\nSend your city in one message. Lowercase is fine — I'll normalize it.\n\nTo remove it, send <code>delete</code>.",
-    "profile.edit.city.not_found": "❌ I can't find that city.\n\nTry to be more specific (no extra symbols), e.g.: <code>Oryol</code>, <code>Moscow</code>, <code>Berlin</code>.\nIf it's a small place — try adding a region in the same line.",
+    "profile.edit.city.not_found": "❌ I can't find that city.\n\nTry to be more specific (no extra symbols), e.g.: <code>New York</code>.\nIf it's a small place — try adding a region in the same line.",
 
     # Profile delete
     "profile.delete.confirm.title": "⚠️ <b>Delete account</b>",
