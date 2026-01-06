@@ -105,17 +105,18 @@ def render_streak_text_from_dict(d: dict, lang: str) -> str:
     lines.append("")
 
     # tasks line
-    def _mark(done: bool) -> str:
-        return "✅" if done else "❌"
-
-    rate_mark = _mark(rated_today >= DAILY_GOAL_RATE_COUNT)
-    comment_mark = _mark(commented_today >= DAILY_GOAL_COMMENT_COUNT)
-    upload_mark = _mark(uploaded_today >= DAILY_GOAL_UPLOAD_COUNT)
+    all_done = (
+        rated_today >= DAILY_GOAL_RATE_COUNT
+        or commented_today >= DAILY_GOAL_COMMENT_COUNT
+        or uploaded_today >= DAILY_GOAL_UPLOAD_COUNT
+    )
+    prefix_mark = "✅" if all_done else "❌"
 
     lines.append(
-        f"Задания: ⭐️ {rate_mark} {rated_today}/{DAILY_GOAL_RATE_COUNT} | "
-        f"💬 {comment_mark} {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | "
-        f"📸 {upload_mark} {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}"
+        f"{prefix_mark} Задания: "
+        f"⭐️ {rated_today}/{DAILY_GOAL_RATE_COUNT} | "
+        f"💬 {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | "
+        f"📸 {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}"
     )
     lines.append("")
 
