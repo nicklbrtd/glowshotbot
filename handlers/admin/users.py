@@ -31,6 +31,7 @@ from database import (
     set_user_premium_status,
     hide_active_photos_for_user,
     restore_photos_from_status,
+    get_all_users_tg_ids,
 )
 
 from .common import (
@@ -323,6 +324,8 @@ class PremiumAdminStates(StatesGroup):
     waiting_identifier_for_grant = State()
     waiting_premium_until = State()
     waiting_identifier_for_revoke = State()
+    waiting_fest_name = State()
+    waiting_fest_days = State()
 
 
 
@@ -1104,7 +1107,9 @@ async def admin_premium_list(callback: CallbackQuery, state: FSMContext):
         text = "Сейчас нет ни одного премиум-пользователя."
     else:
         lines = ["<b>Премиум-пользователи</b>", ""]
-        for u in users[:200]:
+        now = datetime.utcnow()
+        shown = 0
+        for u in users[:400]:
             uname = u.get("username")
             label = f"@{uname}" if uname else (u.get("name") or "Без имени")
             label = html.escape(str(label), quote=False)
@@ -1112,12 +1117,26 @@ async def admin_premium_list(callback: CallbackQuery, state: FSMContext):
             until = u.get("premium_until")
             if until:
                 try:
-                    until_str = datetime.fromisoformat(until).strftime("%d.%m.%Y")
-                    lines.append(f"• {label} — до {until_str}")
+                    until_dt = datetime.fromisoformat(until)
                 except Exception:
+                    until_dt = None
+
+                # Пропускаем просроченный премиум
+                if until_dt and until_dt <= now:
+                    continue
+
+                if until_dt:
+                    days_left = max(1, int((until_dt - now).total_seconds() // 86400 + 1))
+                    until_str = until_dt.strftime("%d.%m.%Y")
+                    lines.append(f"• {label} — до {until_str} ({days_left} дн.)")
+                else:
                     lines.append(f"• {label} — до {html.escape(str(until), quote=False)}")
             else:
                 lines.append(f"• {label} — бессрочно")
+
+            shown += 1
+            if shown >= 200:
+                break
 
         text = "\n".join(lines)
 
@@ -1130,8 +1149,160 @@ async def admin_premium_list(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.message(PremiumAdminStates.waiting_fest_name, F.text)
+async def admin_premium_festive_name(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    fest_name = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not fest_name:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+        await _edit_premium_prompt_or_answer(
+            message,
+            state,
+            "Название праздника не может быть пустым. Введи ещё раз.",
+            kb.as_markup(),
+        )
+        return
+
+    await state.update_data(fest_name=fest_name)
+    await state.set_state(PremiumAdminStates.waiting_fest_days)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    await _edit_premium_prompt_or_answer(
+        message,
+        state,
+        f"🎉 {html.escape(fest_name)}\n\nТеперь введи срок премиума в днях (целое число > 0).",
+        kb.as_markup(),
+    )
+
+
+@router.message(PremiumAdminStates.waiting_fest_days, F.text)
+async def admin_premium_festive_days(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    fest_name = (data.get("fest_name") or "").strip()
+    if not fest_name:
+        await _premium_soft_clear(state)
+        await _edit_premium_prompt_or_answer(message, state, "Сессия потерялась. Открой «Премиум» заново.", build_premium_menu_kb())
+        return
+
+    try:
+        days = int(raw)
+    except Exception:
+        days = 0
+
+    if days <= 0:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1, 1)
+        await _edit_premium_prompt_or_answer(
+            message,
+            state,
+            "Нужно целое число дней больше нуля. Введи снова.",
+            kb.as_markup(),
+        )
+        return
+
+    now = datetime.now()
+    until_dt = (now + timedelta(days=days)).replace(hour=23, minute=59, second=59, microsecond=0)
+    until_iso = until_dt.isoformat()
+
+    tg_ids = await get_all_users_tg_ids()
+    total = len(tg_ids)
+    updated = 0
+    notified = 0
+
+    notice_text = (
+        f"🎉 <b>Вам выдан премиум «{html.escape(fest_name, quote=False)}»</b>\n\n"
+        f"Срок: <b>{days}</b> дн. (до {until_dt.strftime('%d.%m.%Y')})\n"
+        "Поздравляем!"
+    )
+
+    for uid in tg_ids:
+        try:
+            await set_user_premium_status(int(uid), True, premium_until=until_iso)
+            updated += 1
+        except Exception:
+            continue
+
+        try:
+            await message.bot.send_message(
+                chat_id=int(uid),
+                text=notice_text,
+                parse_mode="HTML",
+            )
+            notified += 1
+        except Exception:
+            pass
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Список", callback_data="admin:premium:list")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1, 1)
+
+    summary = (
+        f"✅ Праздничный премиум «{html.escape(fest_name, quote=False)}» выдан.\n\n"
+        f"Срок: <b>{days}</b> дн. (до {until_dt.strftime('%d.%m.%Y')})\n"
+        f"Обновили статус: <b>{updated}/{total}</b>\n"
+        f"Уведомлений доставлено: <b>{notified}</b>"
+    )
+
+    await _premium_soft_clear(state)
+    await _edit_premium_prompt_or_answer(message, state, summary, kb.as_markup())
+
+
 @router.callback_query(F.data == "admin:premium:grant")
 async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await _premium_soft_clear(state)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎉 Праздничный всем", callback_data="admin:premium:grant:festive")
+    kb.button(text="🎯 Выборочно", callback_data="admin:premium:grant:selective")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1, 1, 1)
+
+    text = (
+        "➕ <b>Выдать премиум</b>\n\n"
+        "Выбери вариант:\n"
+        "• 🎉 Праздничный всем — задать праздник и срок, выдать всем активным пользователям;\n"
+        "• 🎯 Выборочно — по @username / ID и сроку."
+    )
+
+    await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:grant:selective")
+async def admin_premium_grant_selective(callback: CallbackQuery, state: FSMContext):
     admin = await _ensure_admin(callback)
     if not admin:
         return
@@ -1139,15 +1310,36 @@ async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PremiumAdminStates.waiting_identifier_for_grant)
 
     text = (
-        "➕ <b>Выдать премиум</b>\n\n"
+        "🎯 <b>Выборочная выдача</b>\n\n"
         "Отправь Telegram ID или @username пользователя.\n"
         "Пример: <code>123456789</code> или <code>@username</code>."
     )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1)
+    kb.adjust(1, 1)
+
+    await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:grant:festive")
+async def admin_premium_grant_festive(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await _premium_soft_clear(state)
+    await state.set_state(PremiumAdminStates.waiting_fest_name)
+
+    text = (
+        "🎉 <b>Праздничный премиум</b>\n\n"
+        "Введи название праздника (например, «Новый год»). После этого я спрошу срок в днях и выдам премиум всем активным пользователям с уведомлением."
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
 
     await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
     await callback.answer()

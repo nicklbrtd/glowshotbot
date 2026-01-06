@@ -2260,16 +2260,32 @@ async def moderator_ban_reason_input(message: Message, state: FSMContext) -> Non
         await state.clear()
         return
 
-    # Обновляем статус фотографии
+    # Пытаемся загрузить фото и автора
     try:
-        await set_photo_moderation_status(int(photo_id), "blocked")
+        photo = await get_photo_by_id(int(photo_id))
     except Exception:
-        await message.bot.send_message(
-            chat_id=message.chat.id,
-            text="Не удалось обновить статус фотографии. Попробуй позже.",
-        )
-        await state.clear()
-        return
+        photo = None
+
+    author = None
+    if photo is not None:
+        try:
+            author = await get_user_by_id(int(photo.get("user_id") or 0))
+        except Exception:
+            author = None
+
+    # Удаляем фотографию из выдачи полностью
+    try:
+        await mark_photo_deleted(int(photo_id))
+    except Exception:
+        pass
+    try:
+        await set_photo_moderation_status(int(photo_id), "deleted_by_moderator")
+    except Exception:
+        pass
+    try:
+        await delete_moderation_message_for_photo(int(photo_id))
+    except Exception:
+        pass
 
     # Фиксируем модераторское действие в журнале
     try:
@@ -2287,50 +2303,68 @@ async def moderator_ban_reason_input(message: Message, state: FSMContext) -> Non
         except Exception:
             pass
 
-    # Пытаемся уведомить автора фотографии
-    try:
-        photo = await get_photo_by_id(int(photo_id))
-    except Exception:
-        photo = None
-
-    if photo is not None:
-        author_user_id = photo.get("user_id")
-        if author_user_id:
+    # Если выбран вариант с баном — блокируем пользователя и удаляем все его фото
+    if action == "delete_and_ban" and author is not None and author.get("tg_id"):
+        until_dt = get_moscow_now() + timedelta(days=3)
+        until_iso = until_dt.isoformat()
+        try:
+            await set_user_block_status_by_tg_id(
+                int(author["tg_id"]),
+                is_blocked=True,
+                reason=f"FULL_BAN: {reason}",
+                until_iso=until_iso,
+            )
+        except Exception:
+            pass
+        try:
+            ids = await get_photo_ids_for_user(int(photo.get("user_id") or 0))
+        except Exception:
+            ids = []
+        for pid in ids:
             try:
-                author = await get_user_by_id(author_user_id)
+                await mark_photo_deleted(int(pid))
             except Exception:
-                author = None
-
-            if author is not None:
-                author_tg_id = author.get("tg_id")
-                if author_tg_id:
-                    if action == "delete_and_ban":
-                        notify_text = (
-                            "⚠️ Ваша фотография была удалена модератором, "
-                            "а возможность публиковать новые работы временно "
-                            "ограничена на 3 дня.\n\n"
-                            f"Причина: {reason}"
-                        )
-                    else:
-                        notify_text = (
-                            "⚠️ Ваша фотография была удалена модератором "
-                            "и больше не участвует в оценке.\n\n"
-                            f"Причина: {reason}"
-                        )
-                    kb = InlineKeyboardBuilder()
-                    kb.button(
-                        text="✅ Просмотрено",
-                        callback_data="user:notify_seen",
-                    )
-                    kb.adjust(1)
-                    try:
-                        await message.bot.send_message(
-                            chat_id=author_tg_id,
-                            text=notify_text,
-                            reply_markup=kb.as_markup(),
-                        )
-                    except Exception:
-                        pass
+                pass
+            try:
+                await set_photo_moderation_status(int(pid), "deleted_by_moderator")
+            except Exception:
+                pass
+        # Уведомление о бане
+        try:
+            await message.bot.send_message(
+                chat_id=int(author["tg_id"]),
+                text=(
+                    "⛔ <b>Вы заблокированы модераторами.</b>\n\n"
+                    "Срок: <b>3</b> дня\n"
+                    f"Причина: {escape(reason)}\n\n"
+                    f"Блокировка действует до: <code>{until_dt.strftime('%d.%m.%Y %H:%M')}</code> (по Москве)"
+                ),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+    elif author is not None and author.get("tg_id"):
+        # Уведомление без бана
+        try:
+            notify_text = (
+                "⚠️ Ваша фотография была удалена модератором "
+                "и больше не участвует в оценке.\n\n"
+                f"Причина: {reason}"
+            )
+            kb = InlineKeyboardBuilder()
+            kb.button(
+                text="✅ Просмотрено",
+                callback_data="user:notify_seen",
+            )
+            kb.adjust(1)
+            await message.bot.send_message(
+                chat_id=int(author["tg_id"]),
+                text=notify_text,
+                reply_markup=kb.as_markup(),
+            )
+        except Exception:
+            pass
 
     # Пытаемся удалить карточку с фото, если её message_id известен
     if prompt_msg_id:
@@ -2345,9 +2379,8 @@ async def moderator_ban_reason_input(message: Message, state: FSMContext) -> Non
     # Сообщаем модератору итог
     if action == "delete_and_ban":
         summary_text = (
-            "Фотография удалена, пользователю объявлен бан на 3 дня.\n\n"
-            "Техническую реализацию ограничения на загрузку мы можем "
-            "добавить отдельно в логике загрузки фото."
+            "Фотография удалена, пользователь заблокирован на 3 дня. "
+            "Все его фотографии скрыты и не вернутся после разблокировки."
         )
     else:
         summary_text = "Фотография удалена и больше не участвует в оценке."
