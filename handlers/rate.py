@@ -1026,10 +1026,10 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
     # Create report + compute stats safely. If anything fails, show an error to the user instead of silence.
     try:
         await create_photo_report(
-            int(photo_id),
             int(user["id"]),
+            int(photo_id),
             str(reason_code),
-            str(text),
+            str(text) if text else None,
         )
 
         try:

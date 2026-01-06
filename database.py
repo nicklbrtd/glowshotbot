@@ -2772,8 +2772,14 @@ async def get_photo_report_stats(photo_id: int) -> dict:
             "SELECT COUNT(*) FROM photo_reports WHERE photo_id=$1 AND status='pending'",
             int(photo_id)
         )
-    return {"total": int(total or 0), "pending": int(pending or 0)}
-
+    total_i = int(total or 0)
+    pending_i = int(pending or 0)
+    return {
+        "total": total_i,
+        "pending": pending_i,
+        "total_all": total_i,
+        "total_pending": pending_i,
+    }
 
 async def set_photo_moderation_status(photo_id: int, status: str) -> None:
     p = _assert_pool()
