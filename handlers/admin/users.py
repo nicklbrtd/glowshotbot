@@ -352,6 +352,7 @@ class PremiumAdminStates(StatesGroup):
     waiting_fest_name = State()
     waiting_fest_text = State()
     waiting_fest_days = State()
+    waiting_fest_notify = State()
 
 
 
@@ -1238,7 +1239,39 @@ async def admin_premium_festive_text(message: Message, state: FSMContext):
         return
 
     await state.update_data(fest_text=raw)
+    await state.set_state(PremiumAdminStates.waiting_fest_notify)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📣 С уведомлением", callback_data="admin:premium:notify:yes")
+    kb.button(text="🤫 Тихо (без уведомлений)", callback_data="admin:premium:notify:no")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1, 1, 1)
+
+    await _edit_premium_prompt_or_answer(
+        message,
+        state,
+        f"🎁 {html.escape(fest_name)}\n\nТекст сохранён.\nВыбери режим уведомления:",
+        kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:premium:notify:"))
+async def admin_premium_festive_notify(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    mode = (callback.data or "").split(":")[-1]
+    if mode not in {"yes", "no"}:
+        await callback.answer("Некорректный режим.", show_alert=True)
+        return
+
+    await state.update_data(fest_notify_mode="notify" if mode == "yes" else "silent")
     await state.set_state(PremiumAdminStates.waiting_fest_days)
+
+    data = await state.get_data()
+    fest_name = (data.get("fest_name") or "").strip()
 
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
@@ -1246,11 +1279,12 @@ async def admin_premium_festive_text(message: Message, state: FSMContext):
     kb.adjust(1, 1)
 
     await _edit_premium_prompt_or_answer(
-        message,
+        callback.message,
         state,
-        f"🎁 {html.escape(fest_name)}\n\nТекст сохранён.\nТеперь введи срок премиума в днях (целое число > 0).",
+        f"🎁 {html.escape(fest_name)}\n\nРежим: {'с уведомлением' if mode=='yes' else 'тихо'}.\nТеперь введи срок премиума в днях (целое число > 0).",
         kb.as_markup(),
     )
+    await callback.answer()
 
 
 @router.message(PremiumAdminStates.waiting_fest_days, F.text)
@@ -1268,6 +1302,7 @@ async def admin_premium_festive_days(message: Message, state: FSMContext):
     data = await state.get_data()
     fest_name = (data.get("fest_name") or "").strip()
     fest_text = (data.get("fest_text") or "").strip()
+    notify_mode = data.get("fest_notify_mode") or "notify"
     if not fest_name:
         await _premium_soft_clear(state)
         await _edit_premium_prompt_or_answer(message, state, "Сессия потерялась. Открой «Премиум» заново.", build_premium_menu_kb())
@@ -1328,31 +1363,32 @@ async def admin_premium_festive_days(message: Message, state: FSMContext):
         except Exception:
             continue
 
-        # Уведомляем только тех, кому реально продлили (в т.ч. у кого срок был)
-        final_until_dt = until_dt
-        if new_until is None and current_until is None:
-            final_until_str = "бессрочно"
-        else:
-            try:
-                final_until_dt = datetime.fromisoformat(new_until) if new_until else until_dt
-            except Exception:
-                final_until_dt = until_dt
-            final_until_str = final_until_dt.strftime("%d.%m.%Y")
+        if notify_mode == "notify":
+            # Уведомляем только тех, кому реально продлили (в т.ч. у кого срок был)
+            final_until_dt = until_dt
+            if new_until is None and current_until is None:
+                final_until_str = "бессрочно"
+            else:
+                try:
+                    final_until_dt = datetime.fromisoformat(new_until) if new_until else until_dt
+                except Exception:
+                    final_until_dt = until_dt
+                final_until_str = final_until_dt.strftime("%d.%m.%Y")
 
-        try:
-            await message.bot.send_message(
-                chat_id=int(uid),
-                text=notice_text_tpl.format(
-                    fest=html.escape(fest_name, quote=False),
-                    days=days,
-                    until=final_until_str,
-                    extra=html.escape(extra_text, quote=False),
-                ),
-                parse_mode="HTML",
-            )
-            notified += 1
-        except Exception:
-            pass
+            try:
+                await message.bot.send_message(
+                    chat_id=int(uid),
+                    text=notice_text_tpl.format(
+                        fest=html.escape(fest_name, quote=False),
+                        days=days,
+                        until=final_until_str,
+                        extra=html.escape(extra_text, quote=False),
+                    ),
+                    parse_mode="HTML",
+                )
+                notified += 1
+            except Exception:
+                pass
 
     kb = InlineKeyboardBuilder()
     kb.button(text="📋 Список", callback_data="admin:premium:list")
@@ -1388,8 +1424,9 @@ async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
     text = (
         "➕ <b>Выдать премиум</b>\n\n"
         "Выбери вариант:\n"
-        "• 🎉 Праздничный всем — задать праздник и срок, выдать всем активным пользователям;\n"
-        "• 🎯 Выборочно — по @username / ID и сроку."
+        "• 🎁 Премиум всем — задать название/текст/срок, выдать всем активным пользователям;\n"
+        "• 🎯 Выборочно — по @username / ID и сроку.\n\n"
+        "⚠️ На следующих шагах можно выбрать режим уведомления: «с уведомлением» или «тихо»."
     )
 
     await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
