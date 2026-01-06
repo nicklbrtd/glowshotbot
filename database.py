@@ -1041,6 +1041,7 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_photo_id ON photo_reports(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_user_created_at ON photo_reports(user_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_streak_updated_at ON user_streak(updated_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_tg_id ON streak_actions(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_created_at ON streak_actions(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_created_at ON payments(created_at);")
@@ -1327,6 +1328,29 @@ async def get_user_by_tg_id(tg_id: int) -> dict | None:
         row = await conn.fetchrow(
             "SELECT * FROM users WHERE tg_id=$1 AND is_deleted=0",
             int(tg_id),
+        )
+    return dict(row) if row else None
+
+
+async def get_user_by_username(username: str) -> dict | None:
+    """
+    Ищет пользователя по username (без @). Регистр игнорируется.
+    """
+    p = _assert_pool()
+    uname = (username or "").strip().lstrip("@")
+    if not uname:
+        return None
+
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM users
+            WHERE is_deleted=0 AND LOWER(username)=LOWER($1)
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            uname,
         )
     return dict(row) if row else None
 

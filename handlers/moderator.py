@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from datetime import timedelta
+from datetime import timedelta, datetime
 from utils.time import get_moscow_now
 from html import escape
 
@@ -28,6 +28,7 @@ from database import (
     delete_moderation_message_for_photo,
     get_photo_ids_for_user,
     set_user_block_status_by_tg_id,
+    get_user_by_username,
 )
 
 # Роутер раздела модерации
@@ -145,6 +146,115 @@ def build_moderation_photo_keyboard(photo_id: int, source: str) -> InlineKeyboar
     )
     kb.adjust(1)
     return kb.as_markup()
+
+
+def _format_block_until(until_val) -> str:
+    if not until_val:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(until_val))
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(until_val)
+
+
+def _get_status_target_id(user: dict) -> int | None:
+    """
+    Предпочитаем tg_id (его требует set_user_block_status_by_tg_id), иначе — внутренний id.
+    """
+    try:
+        if user.get("tg_id"):
+            return int(user["tg_id"])
+    except Exception:
+        pass
+    try:
+        if user.get("id"):
+            return int(user["id"])
+    except Exception:
+        pass
+    return None
+
+
+async def _load_user_by_numeric_id(num_id: int) -> dict | None:
+    """Пробуем загрузить пользователя по tg_id, если нет — по внутреннему id."""
+    user = await get_user_by_tg_id(num_id)
+    if user is not None:
+        return user
+    try:
+        return await get_user_by_id(num_id)
+    except Exception:
+        return None
+
+
+async def _resolve_user_for_status_query(query: str) -> dict | None:
+    """
+    Пытается найти пользователя по:
+    - username (если указан с @ или без);
+    - tg_id (число);
+    - внутреннему id (число, если не нашли по tg_id).
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    if q.startswith("@"):
+        user = await get_user_by_username(q.lstrip("@"))
+        if user:
+            return user
+
+    # Попробуем интерпретировать как число
+    try:
+        num_id = int(q)
+    except Exception:
+        num_id = None
+
+    if num_id is not None:
+        user = await get_user_by_tg_id(num_id)
+        if user:
+            return user
+        try:
+            return await get_user_by_id(num_id)
+        except Exception:
+            return None
+
+    return None
+
+
+def _build_user_status_view(user: dict) -> tuple[str, InlineKeyboardMarkup | None]:
+    tg_id = user.get("tg_id")
+    internal_id = user.get("id")
+    username = (user.get("username") or "").strip()
+    display_username = f"@{username}" if username else "—"
+    display_name = user.get("name") or user.get("display_name") or "—"
+
+    is_blocked = bool(user.get("is_blocked"))
+    reason = (user.get("block_reason") or "—").strip()
+    block_until = _format_block_until(user.get("block_until"))
+
+    lines: list[str] = []
+    lines.append("👤 <b>Статус пользователя</b>")
+    lines.append(f"Имя: <b>{escape(str(display_name))}</b>")
+    lines.append(f"Username: <code>{escape(display_username)}</code>")
+    lines.append(f"TG ID: <code>{escape(str(tg_id) if tg_id else '—')}</code>")
+    lines.append(f"User ID: <code>{escape(str(internal_id) if internal_id else '—')}</code>")
+    lines.append("")
+    lines.append("Состояние:")
+    lines.append("⛔ Заблокирован" if is_blocked else "✅ Активен")
+    lines.append("📸 Публикации: закрыты" if is_blocked else "📸 Публикации: доступны")
+    lines.append(f"Причина: {escape(reason)}")
+    lines.append(f"До: <code>{escape(block_until)}</code>")
+
+    target_id = _get_status_target_id(user)
+    if target_id is None:
+        return "\n".join(lines), None
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔓 Разбанить", callback_data=f"mod:status:unban:{target_id}")
+    kb.button(text="📸 Публ.ON", callback_data=f"mod:status:publish:{target_id}")
+    kb.button(text="🔄 Обновить", callback_data=f"mod:status:refresh:{target_id}")
+    kb.adjust(2, 1)
+
+    return "\n".join(lines), kb.as_markup()
 
 
 async def _build_moderation_caption(
@@ -472,6 +582,36 @@ async def moderator_entry(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(Command("status"))
+async def moderator_status(message: Message) -> None:
+    """
+    Карточка статуса пользователя для модераторов: /status @username или /status <tg_id|user_id>.
+    Показывает блокировки и даёт кнопки для быстрого разбана.
+    """
+    if not await is_moderator_by_tg_id(message.from_user.id):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Укажи пользователя: /status @username или /status <tg_id|user_id>",
+            disable_notification=True,
+        )
+        return
+
+    query = parts[1].strip()
+    user = await _resolve_user_for_status_query(query)
+    if user is None:
+        await message.answer(
+            "Пользователь не найден. Попробуй другой username или ID.",
+            disable_notification=True,
+        )
+        return
+
+    text, kb = _build_user_status_view(user)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML", disable_notification=True)
+
+
 # Новый обработчик: вход в модераторскую панель по callback из главного меню
 @router.callback_query(F.data == "moderator:menu")
 async def moderator_menu_from_main(callback: CallbackQuery) -> None:
@@ -506,6 +646,80 @@ async def moderator_menu_from_main(callback: CallbackQuery) -> None:
         await callback.answer()
     except TelegramBadRequest:
         pass
+
+
+@router.callback_query(F.data.startswith("mod:status:"))
+async def moderator_status_actions(callback: CallbackQuery) -> None:
+    """
+    Обработка кнопок из карточки /status:
+    - разбанить;
+    - вернуть публикации (тот же разбан, но подчёркиваем смысл);
+    - обновить карточку.
+    """
+    if not await is_moderator_by_tg_id(callback.from_user.id):
+        await callback.answer("Только для модераторов.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные параметры.", show_alert=True)
+        return
+
+    action = parts[2]
+    try:
+        target_id = int(parts[3])
+    except Exception:
+        await callback.answer("Некорректный ID.", show_alert=True)
+        return
+
+    user = await _load_user_by_numeric_id(target_id)
+    if user is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    if action in {"unban", "publish"}:
+        tg_id = user.get("tg_id")
+        if not tg_id:
+            await callback.answer("Нет tg_id для разбана.", show_alert=True)
+            return
+
+        try:
+            await set_user_block_status_by_tg_id(
+                int(tg_id),
+                is_blocked=False,
+                reason=None,
+                until_iso=None,
+            )
+            user = await _load_user_by_numeric_id(target_id) or user
+            await callback.answer("Готово, ограничения сняты.")
+        except Exception:
+            await callback.answer("Не удалось обновить статус.", show_alert=True)
+            return
+    elif action == "refresh":
+        await callback.answer("Обновлено.")
+    else:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    text, kb = _build_user_status_view(user)
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        try:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "mod:menu")

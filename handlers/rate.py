@@ -80,6 +80,17 @@ async def build_mod_report_caption(
 ) -> str:
     title = (photo.get("title") or "Без названия").strip()
     tag = (photo.get("tag") or "").strip() or "—"
+    author_line = "Автор: —"
+    try:
+        author = await get_user_by_id(int(photo.get("user_id") or 0))
+    except Exception:
+        author = None
+    if author:
+        uname = (author.get("username") or "").strip()
+        tg_id = author.get("tg_id")
+        uname_display = f"@{uname}" if uname else "—"
+        tg_id_display = str(tg_id) if tg_id else "—"
+        author_line = f"Автор: {escape(uname_display)} / {escape(tg_id_display)}"
 
     pub = _fmt_pub_date(photo.get("day_key"))
 
@@ -107,6 +118,7 @@ async def build_mod_report_caption(
     lines.append("")
     lines.append(f"<b>«{escape(title)}»</b>")
     lines.append(f"🏷 Тег: <code>{escape(tag)}</code>")
+    lines.append(author_line)
     lines.append("")
     lines.append(f"Опубликовано: <code>{escape(pub)}</code>")
     lines.append(f"Оценок + рейтинг: <b>{ratings_count}</b> = <b>{escape(score_str)}</b>")
