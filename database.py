@@ -2700,6 +2700,70 @@ async def create_photo_report(user_id: int, photo_id: int, reason: str, text: st
         )
 
 
+# =====================
+# Moderation chat message mapping (photo_id -> (chat_id, message_id))
+# Used to edit the same moderation card when new reports arrive.
+# =====================
+
+async def _ensure_moderation_messages_table(conn) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS moderation_messages (
+            photo_id BIGINT PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            message_id BIGINT NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    )
+
+async def get_moderation_message_for_photo(photo_id: int) -> dict | None:
+    """Return mapping for a photo moderation message: {chat_id, message_id}."""
+    async with pool.acquire() as conn:
+        await _ensure_moderation_messages_table(conn)
+        row = await conn.fetchrow(
+            "SELECT chat_id, message_id FROM moderation_messages WHERE photo_id=$1",
+            int(photo_id),
+        )
+        if not row:
+            return None
+        return {"chat_id": int(row["chat_id"]), "message_id": int(row["message_id"])}
+
+async def upsert_moderation_message_for_photo(photo_id: int, chat_id: int, message_id: int) -> None:
+    """Create/update mapping for a photo moderation message."""
+    async with pool.acquire() as conn:
+        await _ensure_moderation_messages_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO moderation_messages(photo_id, chat_id, message_id, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (photo_id)
+            DO UPDATE SET chat_id=EXCLUDED.chat_id, message_id=EXCLUDED.message_id, updated_at=NOW()
+            """,
+            int(photo_id),
+            int(chat_id),
+            int(message_id),
+        )
+
+async def delete_moderation_message_for_photo(photo_id: int) -> None:
+    """Remove mapping so next report creates a fresh card."""
+    async with pool.acquire() as conn:
+        await _ensure_moderation_messages_table(conn)
+        await conn.execute(
+            "DELETE FROM moderation_messages WHERE photo_id=$1",
+            int(photo_id),
+        )
+
+async def get_photo_ids_for_user(user_id: int) -> list[int]:
+    """Return ALL non-deleted photo ids for a user (any moderation status/day)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM photos WHERE user_id=$1 AND COALESCE(is_deleted, FALSE)=FALSE",
+            int(user_id),
+        )
+    return [int(r["id"]) for r in rows]
+
+
 async def get_photo_report_stats(photo_id: int) -> dict:
     p = _assert_pool()
     async with p.acquire() as conn:

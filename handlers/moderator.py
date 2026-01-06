@@ -7,6 +7,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from datetime import timedelta
+from utils.time import get_moscow_now
+from html import escape
 
 from database import (
     get_user_by_tg_id,
@@ -21,6 +24,10 @@ from database import (
     add_moderator_review,
     get_next_photo_for_self_moderation,
     get_next_photo_for_detailed_moderation,
+    get_moderation_message_for_photo,
+    delete_moderation_message_for_photo,
+    get_photo_ids_for_user,
+    set_user_block_status_by_tg_id,
 )
 
 # Роутер раздела модерации
@@ -35,6 +42,8 @@ class ModeratorStates(StatesGroup):
     waiting_user_search_query = State()
     # Поиск пользователя для бана / разбана
     waiting_user_block_query = State()
+    waiting_fullban_days = State()
+    waiting_fullban_reason = State()
 
 
 def build_moderator_menu() -> InlineKeyboardMarkup:
@@ -73,6 +82,17 @@ def build_moderator_users_menu() -> InlineKeyboardMarkup:
     kb.button(text="🧾 Список заблокированных", callback_data="mod:users_blocked")
     kb.button(text="⬅️ Назад", callback_data="mod:menu")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_fullban_days_keyboard(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="1 день", callback_data=f"mod:report_block_days:{photo_id}:1")
+    kb.button(text="3 дня", callback_data=f"mod:report_block_days:{photo_id}:3")
+    kb.button(text="7 дней", callback_data=f"mod:report_block_days:{photo_id}:7")
+    kb.button(text="30 дней", callback_data=f"mod:report_block_days:{photo_id}:30")
+    kb.button(text="⬅️ Назад", callback_data=f"mod:report_block_back:{photo_id}")
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -820,6 +840,325 @@ async def moderator_photo_block(callback: CallbackQuery, state: FSMContext) -> N
         pass
 
 
+@router.callback_query(F.data.startswith("mod:report_ok:"))
+async def mod_report_ok(callback: CallbackQuery) -> None:
+    tg_id = callback.from_user.id
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer("Этот раздел доступен только модераторам.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except Exception:
+        await callback.answer("Некорректный ID.", show_alert=True)
+        return
+
+    try:
+        await set_photo_moderation_status(photo_id, "active")
+    except Exception:
+        await callback.answer("Не удалось обновить статус.", show_alert=True)
+        return
+
+    try:
+        await delete_moderation_message_for_photo(photo_id)
+    except Exception:
+        pass
+
+    try:
+        await callback.message.edit_caption(
+            caption=(callback.message.caption or "") + "\n\n✅ <b>Решено:</b> всё в порядке. Снято с проверки.",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer("Ок.")
+
+
+@router.callback_query(F.data.startswith("mod:report_delete:"))
+async def mod_report_delete(callback: CallbackQuery) -> None:
+    tg_id = callback.from_user.id
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer("Этот раздел доступен только модераторам.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except Exception:
+        await callback.answer("Некорректный ID.", show_alert=True)
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo:
+        await callback.answer("Фото не найдено.", show_alert=True)
+        return
+
+    try:
+        await mark_photo_deleted(photo_id)
+    except Exception:
+        pass
+    try:
+        await set_photo_moderation_status(photo_id, "deleted_by_moderator")
+    except Exception:
+        pass
+
+    author = None
+    try:
+        author = await get_user_by_id(int(photo["user_id"]))
+    except Exception:
+        author = None
+
+    until_dt = get_moscow_now() + timedelta(days=3)
+    until_iso = until_dt.isoformat()
+
+    if author and author.get("tg_id"):
+        try:
+            await set_user_block_status_by_tg_id(
+                int(author["tg_id"]),
+                is_blocked=True,
+                reason=f"UPLOAD_BAN: удаление фото #{photo_id} модератором",
+                until_iso=until_iso,
+            )
+        except Exception:
+            pass
+
+        try:
+            await callback.message.bot.send_message(
+                chat_id=int(author["tg_id"]),
+                text=(
+                    "🗑 <b>Ваша фотография удалена модераторами.</b>\n"
+                    "На 3 дня вам ограничена возможность загружать новые фотографии.\n\n"
+                    f"Ограничение действует до: <code>{until_dt.strftime('%d.%m.%Y %H:%M')}</code> (по Москве)"
+                ),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+
+    try:
+        await delete_moderation_message_for_photo(photo_id)
+    except Exception:
+        pass
+
+    try:
+        await callback.message.edit_caption(
+            caption=(callback.message.caption or "") + "\n\n🗑 <b>Решено:</b> фото удалено. Upload-ban 3 дня.",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer("Удалено.")
+
+
+@router.callback_query(F.data.startswith("mod:report_block:"))
+async def mod_report_block_start(callback: CallbackQuery, state: FSMContext) -> None:
+    tg_id = callback.from_user.id
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer("Этот раздел доступен только модераторам.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except Exception:
+        await callback.answer("Некорректный ID.", show_alert=True)
+        return
+
+    await state.update_data(
+        fullban_photo_id=photo_id,
+        fullban_msg_chat_id=callback.message.chat.id,
+        fullban_msg_id=callback.message.message_id,
+        fullban_prev_caption=callback.message.caption or "",
+    )
+    await state.set_state(ModeratorStates.waiting_fullban_days)
+
+    try:
+        await callback.message.edit_caption(
+            caption="⛔ <b>Блокировка пользователя</b>\n\nВыбери, на сколько дней заблокировать:",
+            parse_mode="HTML",
+            reply_markup=build_fullban_days_keyboard(photo_id),
+        )
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mod:report_block_back:"))
+async def mod_report_block_back(callback: CallbackQuery, state: FSMContext) -> None:
+    tg_id = callback.from_user.id
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer("Этот раздел доступен только модераторам.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    prev = data.get("fullban_prev_caption")
+
+    try:
+        if prev:
+            await callback.message.edit_caption(caption=str(prev), parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+
+    await state.clear()
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mod:report_block_days:"))
+async def mod_report_block_days(callback: CallbackQuery, state: FSMContext) -> None:
+    tg_id = callback.from_user.id
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer("Этот раздел доступен только модераторам.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(parts[2])
+        days = int(parts[3])
+    except Exception:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+
+    await state.update_data(fullban_photo_id=photo_id, fullban_days=days)
+    await state.set_state(ModeratorStates.waiting_fullban_reason)
+
+    try:
+        await callback.message.edit_caption(
+            caption=(
+                "⛔ <b>Блокировка пользователя</b>\n\n"
+                f"Срок: <b>{days}</b> дней\n\n"
+                "Теперь отправь <b>причину</b> одним сообщением."
+            ),
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer()
+
+
+@router.message(ModeratorStates.waiting_fullban_reason)
+async def mod_report_block_reason(message: Message, state: FSMContext) -> None:
+    tg_id = message.from_user.id
+    if not await is_moderator_by_tg_id(tg_id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    photo_id = int(data.get("fullban_photo_id") or 0)
+    days = int(data.get("fullban_days") or 0)
+    mod_chat_id = int(data.get("fullban_msg_chat_id") or 0)
+    mod_msg_id = int(data.get("fullban_msg_id") or 0)
+
+    reason = (message.text or "").strip()
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not photo_id or not days or not reason:
+        await state.clear()
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if not photo:
+        await state.clear()
+        return
+
+    author = None
+    try:
+        author = await get_user_by_id(int(photo["user_id"]))
+    except Exception:
+        author = None
+
+    until_dt = get_moscow_now() + timedelta(days=days)
+    until_iso = until_dt.isoformat()
+
+    if author and author.get("tg_id"):
+        try:
+            await set_user_block_status_by_tg_id(
+                int(author["tg_id"]),
+                is_blocked=True,
+                reason=f"FULL_BAN: {reason}",
+                until_iso=until_iso,
+            )
+        except Exception:
+            pass
+
+    try:
+        ids = await get_photo_ids_for_user(int(photo["user_id"]))
+    except Exception:
+        ids = []
+
+    for pid in ids:
+        try:
+            await mark_photo_deleted(int(pid))
+        except Exception:
+            pass
+        try:
+            await set_photo_moderation_status(int(pid), "deleted_by_moderator")
+        except Exception:
+            pass
+
+    if author and author.get("tg_id"):
+        try:
+            await message.bot.send_message(
+                chat_id=int(author["tg_id"]),
+                text=(
+                    "⛔ <b>Вы заблокированы модераторами.</b>\n\n"
+                    f"Срок: <b>{days}</b> дней\n"
+                    f"Причина: {escape(reason)}\n\n"
+                    f"Блокировка действует до: <code>{until_dt.strftime('%d.%m.%Y %H:%M')}</code> (по Москве)"
+                ),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+
+    try:
+        await delete_moderation_message_for_photo(photo_id)
+    except Exception:
+        pass
+
+    try:
+        await message.bot.edit_message_caption(
+            chat_id=mod_chat_id,
+            message_id=mod_msg_id,
+            caption=(data.get("fullban_prev_caption") or "") + "\n\n⛔ <b>Решено:</b> пользователь заблокирован и все его фото удалены.",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+    await state.clear()
+    
+
 # Новый обработчик: отправить фото на детальную проверку
 @router.callback_query(F.data.startswith("mod:photo_deep:"))
 async def moderator_photo_deep(callback: CallbackQuery) -> None:
@@ -1439,7 +1778,6 @@ async def moderator_block_action(callback: CallbackQuery, state: FSMContext) -> 
         await callback.answer()
     except TelegramBadRequest:
         pass
-
 
 @router.message(ModeratorStates.waiting_user_search_query)
 async def moderator_users_search_input(message: Message, state: FSMContext) -> None:

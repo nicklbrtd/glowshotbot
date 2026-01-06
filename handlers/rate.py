@@ -39,11 +39,143 @@ from database import (
     streak_get_status_by_tg_id,
     get_notify_settings_by_tg_id,
     increment_likes_daily_for_tg_id,
+    get_photo_stats,
+    get_moderation_message_for_photo,
+    upsert_moderation_message_for_photo,
+    get_user_block_status_by_tg_id,
+    set_user_block_status_by_tg_id,
 )
 from html import escape
 from config import MODERATION_CHAT_ID
 
 router = Router()
+
+
+def _fmt_pub_date(day_key: str | None) -> str:
+    s = (day_key or "").strip()
+    if not s:
+        return "—"
+    try:
+        return str(s).split("T", 1)[0]
+    except Exception:
+        return s
+
+def build_mod_report_keyboard(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Удалить", callback_data=f"mod:report_delete:{photo_id}")
+    kb.button(text="⛔ Заблокировать", callback_data=f"mod:report_block:{photo_id}")
+    kb.button(text="✅ Всё в порядке", callback_data=f"mod:report_ok:{photo_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def build_mod_report_caption(
+    *,
+    photo: dict,
+    report_stats: dict,
+    last_reason_code: str,
+    last_comment: str,
+) -> str:
+    title = (photo.get("title") or "Без названия").strip()
+    tag = (photo.get("tag") or "").strip() or "—"
+
+    pub = _fmt_pub_date(photo.get("day_key"))
+
+    try:
+        ps = await get_photo_stats(int(photo["id"]))
+    except Exception:
+        ps = {}
+
+    ratings_count = int(ps.get("ratings_count") or 0)
+    score = ps.get("bayes_score")
+    score_str = "—"
+    if score is not None:
+        try:
+            score_str = f"{float(score):.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            score_str = "—"
+
+    pending = int(report_stats.get("total_pending") or 0)
+    total = int(report_stats.get("total_all") or 0)
+
+    reason_label = REPORT_REASON_LABELS.get(last_reason_code, last_reason_code)
+
+    lines: list[str] = []
+    lines.append(f"🚨 <b>Новая жалоба!</b> #{total}")
+    lines.append("")
+    lines.append(f"<b>«{escape(title)}»</b>")
+    lines.append(f"🏷 Тег: <code>{escape(tag)}</code>")
+    lines.append("")
+    lines.append(f"Опубликовано: <code>{escape(pub)}</code>")
+    lines.append(f"Оценок + рейтинг: <b>{ratings_count}</b> = <b>{escape(score_str)}</b>")
+    lines.append("")
+    lines.append(f"Кол-во жалоб: <b>{pending}</b>")
+    lines.append(f"(Последняя) Причина: {escape(reason_label)}")
+
+    last_comment_clean = (last_comment or "").strip()
+    if last_comment_clean:
+        lines.append(f"(Последний) Комментарий: {escape(last_comment_clean)}")
+    else:
+        lines.append("(Последний) Комментарий: —")
+
+    return "\n".join(lines)
+
+
+async def _deny_if_full_banned(callback: CallbackQuery | None = None, message: Message | None = None) -> bool:
+    actor_id = None
+    if callback is not None:
+        actor_id = callback.from_user.id
+    elif message is not None:
+        actor_id = message.from_user.id
+
+    if not actor_id:
+        return False
+
+    try:
+        block = await get_user_block_status_by_tg_id(int(actor_id))
+    except Exception:
+        return False
+
+    is_blocked = bool(block.get("is_blocked"))
+    until_str = block.get("block_until")
+    reason = (block.get("block_reason") or "").strip()
+
+    if not is_blocked:
+        return False
+
+    from utils.time import get_moscow_now
+    from datetime import datetime
+
+    until_dt = None
+    if until_str:
+        try:
+            until_dt = datetime.fromisoformat(str(until_str))
+        except Exception:
+            until_dt = None
+
+    now = get_moscow_now()
+    if until_dt is not None and until_dt <= now:
+        try:
+            await set_user_block_status_by_tg_id(int(actor_id), is_blocked=False, reason=None, until_iso=None)
+        except Exception:
+            pass
+        return False
+
+    if not reason.startswith("FULL_BAN:"):
+        return False
+
+    if callback is not None:
+        try:
+            await callback.answer("⛔ Вы заблокированы модераторами.", show_alert=True)
+        except Exception:
+            pass
+    elif message is not None:
+        try:
+            await message.answer("⛔ Вы заблокированы модераторами.")
+        except Exception:
+            pass
+
+    return True
+
 
 def _moscow_day_key() -> str:
     try:
@@ -272,6 +404,8 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
       – если текущее сообщение уже с фото — меняем медиа;
       – если текущее сообщение текстовое — удаляем его и отправляем новое с фото.
     """
+    if await _deny_if_full_banned(callback=callback):
+        return
     photo = await get_random_photo_for_rating(user_id)
     message = callback.message
 
@@ -401,6 +535,8 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
 
 @router.callback_query(F.data.startswith("rate:comment:"))
 async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _deny_if_full_banned(callback=callback):
+        return
     parts = callback.data.split(":")
     if len(parts) != 3:
         await callback.answer("Странный комментарий, не понял.", show_alert=True)
@@ -467,6 +603,8 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:comment_mode:"))
 async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _deny_if_full_banned(callback=callback):
+        return
     """Пользователь выбрал режим комментария (публичный / анонимный)."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -522,6 +660,8 @@ async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:report:"))
 async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _deny_if_full_banned(callback=callback):
+        return
     parts = callback.data.split(":")
     # ['rate', 'report', '<photo_id>']
     if len(parts) != 3:
@@ -568,6 +708,8 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:report_reason:"))
 async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _deny_if_full_banned(callback=callback):
+        return
     """Пользователь выбрал причину жалобы."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -610,6 +752,13 @@ async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None
 
 @router.message(RateStates.waiting_comment_text)
 async def rate_comment_text(message: Message, state: FSMContext) -> None:
+    if await _deny_if_full_banned(message=message):
+        await state.clear()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
     data = await state.get_data()
     photo_id = data.get("photo_id")
     rate_msg_id = data.get("rate_msg_id")
@@ -781,6 +930,13 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
 @router.message(RateStates.waiting_report_text)
 async def rate_report_text(message: Message, state: FSMContext) -> None:
+    if await _deny_if_full_banned(message=message):
+        await state.clear()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
     data = await state.get_data()
     photo_id = data.get("report_photo_id")
     report_msg_id = data.get("report_msg_id")
@@ -860,126 +1016,82 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
         total_all=stats_dict.get("total_all", 0),
     )
 
-    decision = decide_after_new_report(stats)
 
-    author_name = user.get("name") or ""
-    username = user.get("username")
-    if username:
-        author = f"{author_name} (@{username})" if author_name else f"@{username}"
-    else:
-        author = author_name or f"id {user['tg_id']}"
+    # Always mark photo under review after the first report
+    try:
+        await set_photo_moderation_status(int(photo_id), "under_review")
+    except Exception:
+        pass
 
-    admin_text_lines = [
-        "⚠️ <b>Новая жалоба на фотографию</b>",
-        "",
-        f"Фото ID: <code>{photo_id}</code>",
-        f"От: {author}",
-        f"Причина: {reason_label}",
-        "",
-        "Текст жалобы:",
-        text,
-    ]
-    admin_text = "\n".join(admin_text_lines)
-    
-
-    # If a moderation group chat is configured, send there; otherwise fallback to DMs to each moderator.
+    # Send/update ONE moderation card in the moderation chat (group) if configured
     if MODERATION_CHAT_ID:
         try:
-            await message.bot.send_message(
-                chat_id=int(MODERATION_CHAT_ID),
-                text=admin_text,
-                parse_mode="HTML",
-                disable_notification=True,
-            )
+            photo_for_mod = await get_photo_by_id(int(photo_id))
         except Exception:
-            pass
-    else:
-        moderators = await get_moderators()
-        for moderator in moderators:
-            tg_id = moderator.get("tg_id")
-            if not tg_id:
-                continue
+            photo_for_mod = None
+
+        if photo_for_mod is not None:
+            caption = await build_mod_report_caption(
+                photo=photo_for_mod,
+                report_stats=stats_dict,
+                last_reason_code=str(reason_code),
+                last_comment=str(text),
+            )
+            kb = build_mod_report_keyboard(int(photo_id))
+
+            mapping = None
             try:
-                await message.bot.send_message(
-                    chat_id=tg_id,
-                    text=admin_text,
-                    parse_mode="HTML",
-                )
+                mapping = await get_moderation_message_for_photo(int(photo_id))
             except Exception:
-                # Если какому-то модератору не можем доставить сообщение, просто идём дальше
-                continue
-    
+                mapping = None
 
-    if decision.should_mark_under_review:
-        await set_photo_moderation_status(photo_id, "under_review")
-
-        try:
-            photo = await get_photo_by_id(photo_id)
-        except Exception:
-            photo = None
-
-        if photo is not None:
-            mod_caption_lines = [
-                "⚠️ <b>Фотография отправлена на проверку</b>",
-                "",
-                f"ID фото: <code>{photo_id}</code>",
-                f"Автор user_id: <code>{photo['user_id']}</code>",
-                f"Активных жалоб: {stats.total_pending}",
-                f"Всего жалоб: {stats.total_all}",
-                "",
-                "Последняя жалоба:",
-                f"Причина: {reason_label}",
-                "Описание:",
-                text,
-            ]
-            mod_caption = "\n".join(mod_caption_lines)
-
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="✅ Всё хорошо",
-                            callback_data=f"mod:photo_ok:{photo_id}",
-                        ),
-                        InlineKeyboardButton(
-                            text="⛔ Отключить",
-                            callback_data=f"mod:photo_block:{photo_id}",
-                        ),
-                    ]
-                ]
-            )
-
-            # If a moderation group chat is configured, send there; otherwise fallback to DMs.
-            if MODERATION_CHAT_ID:
+            if mapping and int(mapping.get("chat_id") or 0) == int(MODERATION_CHAT_ID):
+                # Update existing card
                 try:
-                    await message.bot.send_photo(
+                    await message.bot.edit_message_caption(
                         chat_id=int(MODERATION_CHAT_ID),
-                        photo=photo["file_id"],
-                        caption=mod_caption,
-                        reply_markup=kb,
+                        message_id=int(mapping["message_id"]),
+                        caption=caption,
                         parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                except Exception:
+                    # If editing fails (deleted message, etc.) — send a new card and overwrite mapping
+                    try:
+                        sent = await message.bot.send_photo(
+                            chat_id=int(MODERATION_CHAT_ID),
+                            photo=photo_for_mod["file_id"],
+                            caption=caption,
+                            parse_mode="HTML",
+                            reply_markup=kb,
+                            disable_notification=True,
+                        )
+                        await upsert_moderation_message_for_photo(
+                            int(photo_id),
+                            int(MODERATION_CHAT_ID),
+                            int(sent.message_id),
+                        )
+                    except Exception:
+                        pass
+            else:
+                # First time: send a new card
+                try:
+                    sent = await message.bot.send_photo(
+                        chat_id=int(MODERATION_CHAT_ID),
+                        photo=photo_for_mod["file_id"],
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=kb,
                         disable_notification=True,
+                    )
+                    await upsert_moderation_message_for_photo(
+                        int(photo_id),
+                        int(MODERATION_CHAT_ID),
+                        int(sent.message_id),
                     )
                 except Exception:
                     pass
-            else:
-                moderators = await get_moderators()
-                for moderator in moderators:
-                    tg_id = moderator.get("tg_id")
-                    if not tg_id:
-                        continue
-                    try:
-                        await message.bot.send_photo(
-                            chat_id=tg_id,
-                            photo=photo["file_id"],
-                            caption=mod_caption,
-                            reply_markup=kb,
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        # Если какому-то модератору не можем доставить фото, просто идём дальше
-                        continue
-
+    
     photo = await get_photo_by_id(photo_id)
     if photo is not None:
         caption = await build_rate_caption(photo, viewer_tg_id=int(message.from_user.id), show_details=False)
