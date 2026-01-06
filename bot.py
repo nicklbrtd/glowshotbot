@@ -21,6 +21,9 @@ from database import (
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
     is_user_soft_deleted,
+    hide_active_photos_for_user,
+    restore_photos_from_status,
+    get_user_by_tg_id,
 )
 def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -163,11 +166,21 @@ def _extract_chat_and_user_from_update(update: Update) -> tuple[int | None, int 
 
 def _format_block_notice(block: dict, until_dt) -> str:
     reason = (block.get("block_reason") or "").strip()
-    text_lines: list[str] = ["⛔ Ваш аккаунт заблокирован модераторами."]
+    clean_reason = reason
+    for prefix in ("FULL_BAN:", "UPLOAD_BAN:", "ADMIN_BAN:"):
+        if clean_reason.startswith(prefix):
+            clean_reason = clean_reason[len(prefix):].strip()
+            break
+
     if until_dt is not None:
-        text_lines.append(f"Блокировка действует до {until_dt.strftime('%d.%m.%Y %H:%M')} (МСК).")
-    if reason:
-        text_lines.append(f"Причина: {reason}")
+        days = max(1, int((until_dt - get_moscow_now()).total_seconds() // 86400 + 1))
+        text_lines: list[str] = [f"⛔ Ваш аккаунт заблокирован на {days} дней."]
+        text_lines.append(f"До: {until_dt.strftime('%d.%m.%Y %H:%M')} (МСК).")
+    else:
+        text_lines = ["⛔ Ваш аккаунт заблокирован."]
+
+    if clean_reason:
+        text_lines.append(f"Причина: {clean_reason}")
     text_lines.append("")
     text_lines.append("Доступно только: профиль (для удаления аккаунта) и /help.")
     return "\n".join(text_lines)
@@ -239,12 +252,23 @@ class BlockGuardMiddleware(BaseMiddleware):
         if is_blocked and until_dt is not None and until_dt <= get_moscow_now():
             try:
                 await set_user_block_status_by_tg_id(int(tg_user_id), is_blocked=False, reason=None, until_iso=None)
+                user_row = await get_user_by_tg_id(int(tg_user_id))
+                if user_row:
+                    await restore_photos_from_status(int(user_row["id"]), from_status="blocked_by_ban", to_status="active")
             except Exception:
                 pass
             is_blocked = False
 
         if not is_blocked:
             return await handler(event, data)
+
+        # Скрываем активные фото заблокированного пользователя из выдачи (однократно, best-effort)
+        try:
+            user_row = await get_user_by_tg_id(int(tg_user_id))
+            if user_row:
+                await hide_active_photos_for_user(int(user_row["id"]), new_status="blocked_by_ban")
+        except Exception:
+            pass
 
         block_text = _format_block_notice(block, until_dt)
         short_block_text = _shorten(block_text)

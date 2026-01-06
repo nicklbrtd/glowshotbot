@@ -10,6 +10,7 @@ import asyncio
 from typing import Optional
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -367,3 +368,21 @@ async def admin_broadcast_send(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer()
 
+
+@router.callback_query(F.data == "admin:notif_read")
+async def admin_broadcast_seen(callback: CallbackQuery):
+    """
+    Получатель рассылки нажал «Просмотрено» — удаляем уведомление.
+    """
+    try:
+        await callback.message.delete()
+    except Exception:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass

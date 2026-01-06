@@ -1551,6 +1551,55 @@ async def set_user_block_status_by_tg_id(tg_id: int, is_blocked: bool,
         )
 
 
+async def hide_active_photos_for_user(user_id: int, new_status: str = "blocked_by_ban") -> int:
+    """
+    Скрыть все активные фото пользователя из выдачи (ставим новый статус).
+    Возвращает количество обновлённых записей (best-effort).
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE photos
+            SET moderation_status=$2
+            WHERE user_id=$1 AND is_deleted=0 AND moderation_status='active'
+            """,
+            int(user_id),
+            str(new_status),
+        )
+    try:
+        return int(res.split()[-1])
+    except Exception:
+        return 0
+
+
+async def restore_photos_from_status(
+    user_id: int,
+    from_status: str = "blocked_by_ban",
+    to_status: str = "active",
+) -> int:
+    """
+    Вернуть фото пользователя из статуса `from_status` в `to_status`.
+    Используем при разбане (чтобы не трогать другие статусы).
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE photos
+            SET moderation_status=$3
+            WHERE user_id=$1 AND is_deleted=0 AND moderation_status=$2
+            """,
+            int(user_id),
+            str(from_status),
+            str(to_status),
+        )
+    try:
+        return int(res.split()[-1])
+    except Exception:
+        return 0
+
+
 # -------------------- premium --------------------
 
 async def set_user_premium_status(tg_id: int, is_premium: bool, premium_until: str | None = None) -> None:

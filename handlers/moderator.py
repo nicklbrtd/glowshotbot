@@ -29,6 +29,8 @@ from database import (
     get_photo_ids_for_user,
     set_user_block_status_by_tg_id,
     get_user_by_username,
+    hide_active_photos_for_user,
+    restore_photos_from_status,
 )
 
 # Роутер раздела модерации
@@ -690,6 +692,10 @@ async def moderator_status_actions(callback: CallbackQuery) -> None:
                 reason=None,
                 until_iso=None,
             )
+            try:
+                await restore_photos_from_status(int(user.get("id") or 0), from_status="blocked_by_ban", to_status="active")
+            except Exception:
+                pass
             user = await _load_user_by_numeric_id(target_id) or user
             await callback.answer("Готово, ограничения сняты.")
         except Exception:
@@ -1146,6 +1152,10 @@ async def mod_report_delete(callback: CallbackQuery) -> None:
             )
         except Exception:
             pass
+        try:
+            await hide_active_photos_for_user(int(author["id"]), new_status="blocked_by_ban")
+        except Exception:
+            pass
 
         try:
             await callback.message.bot.send_message(
@@ -1320,6 +1330,10 @@ async def mod_report_block_reason(message: Message, state: FSMContext) -> None:
                 reason=f"FULL_BAN: {reason}",
                 until_iso=until_iso,
             )
+        except Exception:
+            pass
+        try:
+            await hide_active_photos_for_user(int(author["id"]), new_status="blocked_by_ban")
         except Exception:
             pass
 

@@ -261,8 +261,7 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
     lines.append(t("menu.name", lang, name=safe_name))
     lines.append("")
 
-    lines.append(t("menu.can_rate", lang, value=can_rate_text))
-    lines.append(t("menu.rated_by_me", lang, verb=rated_verb, value=rated_by_me_text))    
+    lines.append(t("menu.rated_by_me", lang, verb=rated_verb, value=rated_by_me_text))
     lines.append("")
     # Рекламный блок
     lines.append(t("menu.ad.header", lang))

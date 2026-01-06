@@ -21,6 +21,7 @@ from database import (
     get_user_by_id,
     get_user_by_username,
     get_user_block_status_by_tg_id,
+    set_user_block_status_by_tg_id,
     get_user_rating_summary,
     get_user_admin_stats,
     get_awards_for_user,
@@ -28,11 +29,14 @@ from database import (
     get_photo_admin_stats,
     get_premium_users,
     set_user_premium_status,
+    hide_active_photos_for_user,
+    restore_photos_from_status,
 )
 
 from .common import (
     _ensure_admin,
 )
+from utils.time import get_moscow_now
 
 router = Router()
 
@@ -312,6 +316,8 @@ async def _notify_user_premium_change(
 
 class UserAdminStates(StatesGroup):
     waiting_identifier_for_profile = State()
+    waiting_ban_reason = State()
+    waiting_ban_days = State()
 
 class PremiumAdminStates(StatesGroup):
     waiting_identifier_for_grant = State()
@@ -552,7 +558,10 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
     kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
     kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
 
-    kb.button(text="🚫 Бан", callback_data="admin:users:ban")
+    if bool(block_status.get("is_blocked")):
+        kb.button(text="🔓 Разбан", callback_data="admin:users:unban")
+    else:
+        kb.button(text="🚫 Бан", callback_data="admin:users:ban")
 
     kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
@@ -846,12 +855,97 @@ async def admin_users_stats(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin:users:ban")
 async def admin_users_ban(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("Бан пользователя — пока заглушка.", show_alert=True)
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    target_tg_id = data.get("selected_user_tg_id")
+    target_user_id = data.get("selected_user_id")
+    if not target_tg_id or not target_user_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    kb = InlineKeyboardBuilder()
+    for days in (1, 3, 7, 30):
+        kb.button(text=f"{days} дн.", callback_data=f"admin:users:ban_days:{days}")
+    kb.button(text="∞ Бессрочно", callback_data="admin:users:ban_days:0")
+    kb.button(text="⬅️ Назад к профилю", callback_data="admin:users:profile")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 2, 1, 1)
+
+    await _edit_user_prompt_or_answer(
+        callback.message,
+        state,
+        "Выбери срок бана пользователя.",
+        reply_markup=kb.as_markup(),
+    )
+    await state.update_data(
+        admin_ban_user_tg_id=target_tg_id,
+        admin_ban_user_id=target_user_id,
+    )
+    await state.set_state(UserAdminStates.waiting_ban_days)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin:users:unban")
 async def admin_users_unban(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("Разбан пользователя — пока заглушка.", show_alert=True)
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    target_tg_id = data.get("selected_user_tg_id")
+    target_user_id = data.get("selected_user_id")
+    if not target_tg_id or not target_user_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    try:
+        await set_user_block_status_by_tg_id(int(target_tg_id), is_blocked=False, reason=None, until_iso=None)
+        await restore_photos_from_status(int(target_user_id), from_status="blocked_by_ban", to_status="active")
+    except Exception:
+        await callback.answer("Не удалось снять бан. Попробуй позже.", show_alert=True)
+        return
+
+    # Обновим карточку
+    user = await get_user_by_id(int(target_user_id)) or await get_user_by_tg_id(int(target_tg_id))
+    block_status = await get_user_block_status_by_tg_id(int(target_tg_id))
+    rating_summary = await get_user_rating_summary(int(target_user_id))
+    admin_stats = await get_user_admin_stats(int(target_user_id))
+    awards = await get_awards_for_user(int(target_user_id))
+
+    text = await _render_admin_user_profile(
+        user=user,
+        block_status=block_status,
+        rating_summary=rating_summary,
+        admin_stats=admin_stats,
+        awards=awards,
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
+    kb.button(text="📸 Фотография", callback_data="admin:users:photo")
+    kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
+    kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
+    kb.button(text="🚫 Бан", callback_data="admin:users:ban")
+    kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 3, 1, 2)
+
+    await _edit_user_prompt_or_answer(
+        callback.message,
+        state,
+        text=text,
+        reply_markup=kb.as_markup(),
+    )
+
+    try:
+        await callback.answer("Блокировка снята.")
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "admin:users:limit")
@@ -859,6 +953,118 @@ async def admin_users_limit(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Ограничить доступ — пока заглушка.", show_alert=True)
 
 
+@router.callback_query(F.data.startswith("admin:users:ban_days:"))
+async def admin_users_ban_days(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректные данные.", show_alert=True)
+        return
+    try:
+        days = int(parts[3])
+    except Exception:
+        await callback.answer("Некорректный срок.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    if not data.get("admin_ban_user_tg_id"):
+        await callback.answer("Сначала выбери пользователя.", show_alert=True)
+        return
+
+    await state.update_data(admin_ban_days=days)
+    prompt = (
+        "Введи причину бана одним сообщением.\n"
+        "Она будет отправлена пользователю."
+    )
+    await _edit_user_prompt_or_answer(callback.message, state, prompt)
+    await state.set_state(UserAdminStates.waiting_ban_reason)
+    await callback.answer()
+
+
+@router.message(UserAdminStates.waiting_ban_reason)
+async def admin_users_ban_reason(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    tg_id = data.get("admin_ban_user_tg_id")
+    internal_id = data.get("admin_ban_user_id")
+    days = int(data.get("admin_ban_days") or 0)
+
+    if not tg_id or not internal_id:
+        await _edit_user_prompt_or_answer(message, state, "Сессия бана потеряна. Открой профиль заново.")
+        await state.clear()
+        return
+
+    reason_raw = (message.text or "").strip() or "Без причины"
+    until_iso = None
+    until_dt = None
+    if days > 0:
+        until_dt = get_moscow_now() + timedelta(days=days)
+        until_iso = until_dt.isoformat()
+
+    reason_db = f"ADMIN_BAN: {reason_raw}"
+
+    try:
+        await set_user_block_status_by_tg_id(int(tg_id), is_blocked=True, reason=reason_db, until_iso=until_iso)
+        await hide_active_photos_for_user(int(internal_id), new_status="blocked_by_ban")
+    except Exception:
+        await _edit_user_prompt_or_answer(message, state, "Не удалось применить бан. Попробуй позже.")
+        await state.clear()
+        return
+
+    # Уведомим пользователя
+    try:
+        lines = []
+        if days > 0:
+            lines.append(f"⛔ Вы забанены админом бота на {days} дней.")
+            if until_dt:
+                lines.append(f"До: {until_dt.strftime('%d.%m.%Y %H:%M')} (МСК)")
+        else:
+            lines.append("⛔ Вы забанены админом бота.")
+        lines.append(f"Причина: {reason_raw}")
+        await message.bot.send_message(chat_id=int(tg_id), text="\n".join(lines))
+    except Exception:
+        pass
+
+    # Обновим карточку в админке
+    user = await get_user_by_id(int(internal_id)) or await get_user_by_tg_id(int(tg_id))
+    block_status = await get_user_block_status_by_tg_id(int(tg_id))
+    rating_summary = await get_user_rating_summary(int(internal_id))
+    admin_stats = await get_user_admin_stats(int(internal_id))
+    awards = await get_awards_for_user(int(internal_id))
+
+    text = await _render_admin_user_profile(
+        user=user,
+        block_status=block_status,
+        rating_summary=rating_summary,
+        admin_stats=admin_stats,
+        awards=awards,
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
+    kb.button(text="📸 Фотография", callback_data="admin:users:photo")
+    kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
+    kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
+    kb.button(text="🔓 Разбан", callback_data="admin:users:unban")
+    kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 3, 1, 2)
+
+    await _edit_user_prompt_or_answer(message, state, text, reply_markup=kb.as_markup())
+    await state.set_state(UserAdminStates.waiting_identifier_for_profile)
+    try:
+        await message.answer("Бан применён.", disable_notification=True)
+    except Exception:
+        pass
 # ===============================================================
 # ============== ПОЛЬЗОВАТЕЛИ: ПРЕМИУМ ==========================
 # ===============================================================
