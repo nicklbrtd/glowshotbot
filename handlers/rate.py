@@ -41,6 +41,7 @@ from database import (
     increment_likes_daily_for_tg_id,
 )
 from html import escape
+from config import MODERATION_CHAT_ID
 
 router = Router()
 
@@ -881,20 +882,32 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
     admin_text = "\n".join(admin_text_lines)
     
 
-    moderators = await get_moderators()
-    for moderator in moderators:
-        tg_id = moderator.get("tg_id")
-        if not tg_id:
-            continue
+    # If a moderation group chat is configured, send there; otherwise fallback to DMs to each moderator.
+    if MODERATION_CHAT_ID:
         try:
             await message.bot.send_message(
-                chat_id=tg_id,
+                chat_id=int(MODERATION_CHAT_ID),
                 text=admin_text,
                 parse_mode="HTML",
+                disable_notification=True,
             )
         except Exception:
-        # Если какому-то модератору не можем доставить сообщение, просто идём дальше
-            continue
+            pass
+    else:
+        moderators = await get_moderators()
+        for moderator in moderators:
+            tg_id = moderator.get("tg_id")
+            if not tg_id:
+                continue
+            try:
+                await message.bot.send_message(
+                    chat_id=tg_id,
+                    text=admin_text,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                # Если какому-то модератору не можем доставить сообщение, просто идём дальше
+                continue
     
 
     if decision.should_mark_under_review:
@@ -936,22 +949,36 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 ]
             )
 
-            moderators = await get_moderators()
-            for moderator in moderators:
-                tg_id = moderator.get("tg_id")
-                if not tg_id:
-                    continue
+            # If a moderation group chat is configured, send there; otherwise fallback to DMs.
+            if MODERATION_CHAT_ID:
                 try:
                     await message.bot.send_photo(
-                        chat_id=tg_id,
+                        chat_id=int(MODERATION_CHAT_ID),
                         photo=photo["file_id"],
                         caption=mod_caption,
                         reply_markup=kb,
                         parse_mode="HTML",
+                        disable_notification=True,
                     )
                 except Exception:
-                    # Если какому-то модератору не можем доставить фото, просто идём дальше
-                    continue
+                    pass
+            else:
+                moderators = await get_moderators()
+                for moderator in moderators:
+                    tg_id = moderator.get("tg_id")
+                    if not tg_id:
+                        continue
+                    try:
+                        await message.bot.send_photo(
+                            chat_id=tg_id,
+                            photo=photo["file_id"],
+                            caption=mod_caption,
+                            reply_markup=kb,
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        # Если какому-то модератору не можем доставить фото, просто идём дальше
+                        continue
 
     photo = await get_photo_by_id(photo_id)
     if photo is not None:

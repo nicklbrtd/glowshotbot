@@ -383,161 +383,34 @@ async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
         )
 
 
-# ================== Удаление фото и удаление+бан ==================
+@router.message(Command("chatid"))
+async def moderator_chat_id(message: Message) -> None:
+    """Helper: prints current chat_id so admin/mods can put it into .env as MODERATION_CHAT_ID."""
+    tg_id = message.from_user.id
 
-@router.callback_query(F.data.startswith("mod:photo_delete:"))
-async def moderator_photo_delete(callback: CallbackQuery) -> None:
-    """
-    Удаление фотографии модератором.
-
-    Логика:
-    - помечаем фото как удалённое в БД (is_deleted = 1);
-    - выставляем статус модерации, чтобы оно не попадало в очереди;
-    - показываем следующую работу в том же режиме (очередь / детальная / самостоятельная).
-    """
-    tg_id = callback.from_user.id
-
+    # Allow only moderators (and master admin by tg id if it exists in DB as moderator)
     if not await is_moderator_by_tg_id(tg_id):
-        await callback.answer(
-            "Этот раздел доступен только модераторам.",
-            show_alert=True,
-        )
         return
 
-    parts = callback.data.split(":")
-    # ['mod', 'photo_delete', '<source>', '<photo_id>']
-    if len(parts) != 4:
-        await callback.answer("Не удалось разобрать команду удаления.", show_alert=True)
-        return
+    chat_id = message.chat.id
+    title = getattr(message.chat, "title", None)
+    chat_type = getattr(message.chat, "type", None)
 
-    _, _, source, pid = parts
+    lines: list[str] = []
+    lines.append("🆔 <b>ID этого чата</b>")
+    if title:
+        lines.append(f"Название: <b>{title}</b>")
+    if chat_type:
+        lines.append(f"Тип: <code>{chat_type}</code>")
+    lines.append(f"chat_id: <code>{chat_id}</code>")
+    lines.append("")
+    lines.append("Скопируй chat_id и вставь в .env как:")
+    lines.append(f"<code>MODERATION_CHAT_ID={chat_id}</code>")
+
     try:
-        photo_id = int(pid)
-    except ValueError:
-        await callback.answer("Некорректный идентификатор фотографии.", show_alert=True)
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if not photo:
-        await callback.answer("Эта фотография уже недоступна.", show_alert=True)
-    else:
-        # Помечаем фото как удалённое «из всех разделов»
-        try:
-            await mark_photo_deleted(photo_id)
-        except Exception:
-            # Если что-то пошло не так — всё равно пытаемся убрать её из модерации
-            pass
-
-        try:
-            await set_photo_moderation_status(photo_id, "deleted_by_moderator")
-        except Exception:
-            # Если поле статуса по какой-то причине не обновилось — не критично,
-            # выборка по is_deleted всё равно не будет её показывать.
-            pass
-
-        await callback.answer("Фотография удалена и больше не участвует в оценивании.", show_alert=True)
-
-    # Переходим к следующей работе в зависимости от источника
-    try:
-        if source == "queue":
-            await show_next_photo_for_moderation(callback)
-        elif source == "deep":
-            await show_next_photo_for_deep_check(callback)
-        else:
-            # Для всего остального считаем, что это самостоятельная проверка
-            await show_next_photo_for_self_check(callback)
+        await message.answer("\n".join(lines), parse_mode="HTML", disable_notification=True)
     except Exception:
-        # Если не получилось показать следующую карточку, просто выходим в меню модерации
-        try:
-            await callback.message.edit_text(
-                "Раздел модерации.",
-                reply_markup=build_moderator_menu(),
-            )
-        except TelegramBadRequest:
-            try:
-                await callback.message.bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text="Раздел модерации.",
-                    reply_markup=build_moderator_menu(),
-                )
-            except Exception:
-                pass
-
-
-@router.callback_query(F.data.startswith("mod:photo_delete_ban:"))
-async def moderator_photo_delete_and_ban(callback: CallbackQuery, state: FSMContext) -> None:
-    """
-    Удалить фотографию и запустить процесс бана пользователя.
-
-    Пока реализуем только удаление фото «отовсюду», а механику бана
-    (с выбором срока и причины) докручиваем отдельно.
-    """
-    tg_id = callback.from_user.id
-
-    if not await is_moderator_by_tg_id(tg_id):
-        await callback.answer(
-            "Этот раздел доступен только модераторам.",
-            show_alert=True,
-        )
-        return
-
-    parts = callback.data.split(":")
-    # ['mod', 'photo_delete_ban', '<source>', '<photo_id>']
-    if len(parts) != 4:
-        await callback.answer("Не удалось разобрать команду удаления.", show_alert=True)
-        return
-
-    _, _, source, pid = parts
-    try:
-        photo_id = int(pid)
-    except ValueError:
-        await callback.answer("Некорректный идентификатор фотографии.", show_alert=True)
-        return
-
-    photo = await get_photo_by_id(photo_id)
-    if not photo:
-        await callback.answer("Эта фотография уже недоступна.", show_alert=True)
-    else:
-        try:
-            await mark_photo_deleted(photo_id)
-        except Exception:
-            pass
-
-        try:
-            await set_photo_moderation_status(photo_id, "deleted_by_moderator")
-        except Exception:
-            pass
-
-        # TODO: здесь можно запомнить пользователя и перевести модератора
-        # в состояние ввода причины/срока бана (используя FSM).
-        await callback.answer(
-            "Фотография удалена. Логику бана пользователя дополним позднее.",
-            show_alert=True,
-        )
-
-    # Пытаемся продолжить модерацию в том же режиме
-    try:
-        if source == "queue":
-            await show_next_photo_for_moderation(callback)
-        elif source == "deep":
-            await show_next_photo_for_deep_check(callback)
-        else:
-            await show_next_photo_for_self_check(callback)
-    except Exception:
-        try:
-            await callback.message.edit_text(
-                "Раздел модерации.",
-                reply_markup=build_moderator_menu(),
-            )
-        except TelegramBadRequest:
-            try:
-                await callback.message.bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text="Раздел модерации.",
-                    reply_markup=build_moderator_menu(),
-                )
-            except Exception:
-                pass
+        pass
 
 
 @router.message(Command("moderator"))
@@ -875,11 +748,74 @@ async def moderator_photo_ok(callback: CallbackQuery) -> None:
     # Показываем следующую фотографию в соответствующем режиме
     if source == "self":
         await show_next_photo_for_self_check(callback)
+    elif source == "deep":
+        await show_next_photo_for_deep_check(callback)
     else:
+        # queue и любые неизвестные значения ведём в очередь жалоб
         await show_next_photo_for_moderation(callback)
 
     try:
         await callback.answer("Фотография возвращена в ленту.", show_alert=False)
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("mod:photo_block:"))
+async def moderator_photo_block(callback: CallbackQuery, state: FSMContext) -> None:
+    """Legacy button from report-threshold cards: disable/turn off a photo.
+
+    В старых уведомлениях из `handlers/rate.py` callback_data: `mod:photo_block:<photo_id>`.
+    Роутим это в тот же флоу, что и delete-with-reason (без бана), считаем source='queue'.
+    """
+    tg_id = callback.from_user.id
+
+    if not await is_moderator_by_tg_id(tg_id):
+        await callback.answer("Этот раздел доступен только модераторам.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    # Expected legacy format: mod:photo_block:<photo_id>
+    photo_id_str: str | None = None
+    if len(parts) == 3:
+        photo_id_str = parts[2]
+    elif len(parts) == 4:
+        # tolerate mod:photo_block:<source>:<photo_id>
+        photo_id_str = parts[3]
+    else:
+        await callback.answer("Некорректные данные для модерации.", show_alert=True)
+        return
+
+    try:
+        photo_id = int(photo_id_str)
+    except (TypeError, ValueError):
+        await callback.answer("Некорректный ID фотографии.", show_alert=True)
+        return
+
+    # Reuse the same FSM flow as delete (without ban)
+    await state.update_data(
+        mod_ban_photo_id=photo_id,
+        mod_ban_source="queue",
+        mod_ban_action="delete",
+        mod_ban_prompt_msg_id=callback.message.message_id,
+        mod_ban_prompt_chat_id=callback.message.chat.id,
+    )
+    await state.set_state(ModeratorStates.waiting_ban_reason)
+
+    text = (
+        "Напиши причину отключения (удаления) фотографии одним сообщением.\n\n"
+        "Эта причина будет показана автору фотографии."
+    )
+
+    try:
+        await callback.message.edit_caption(caption=text, reply_markup=None)
+    except TelegramBadRequest:
+        try:
+            await callback.message.edit_text(text, reply_markup=None)
+        except TelegramBadRequest:
+            await callback.message.bot.send_message(chat_id=callback.message.chat.id, text=text)
+
+    try:
+        await callback.answer()
     except TelegramBadRequest:
         pass
 

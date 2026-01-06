@@ -12,9 +12,21 @@ MASTER_ADMIN_ID = int(os.getenv("MASTER_ADMIN_ID"))
 SUPPORT_BOT_TOKEN = os.getenv("SUPPORT_BOT_TOKEN")
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID"))
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/supofglowshotbot")
+
 REQUIRED_CHANNEL_ID = os.getenv("@nyqcreative")
 REQUIRED_CHANNEL_LINK = os.getenv("https://t.me/nyqcreative")
 AD_CHANNEL_LINK = os.getenv("https://t.me/glowshotchannel")
+
+# ===== Moderation notifications =====
+# Optional: if set, all report notifications and threshold cards will be sent to this chat (group/supergroup).
+# If not set, the bot will fallback to sending DMs to each moderator from get_moderators().
+_MODERATION_CHAT_ID_RAW = (os.getenv("MODERATION_CHAT_ID") or "").strip()
+MODERATION_CHAT_ID = None
+if _MODERATION_CHAT_ID_RAW:
+    try:
+        MODERATION_CHAT_ID = int(_MODERATION_CHAT_ID_RAW)
+    except ValueError:
+        MODERATION_CHAT_ID = None
 
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)
