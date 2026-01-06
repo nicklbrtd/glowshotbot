@@ -105,7 +105,18 @@ def render_streak_text_from_dict(d: dict, lang: str) -> str:
     lines.append("")
 
     # tasks line
-    lines.append(f"❌/✅ Задания: ⭐️ {rated_today}/{DAILY_GOAL_RATE_COUNT} | 💬 {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | 📸 {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}")
+    def _mark(done: bool) -> str:
+        return "✅" if done else "❌"
+
+    rate_mark = _mark(rated_today >= DAILY_GOAL_RATE_COUNT)
+    comment_mark = _mark(commented_today >= DAILY_GOAL_COMMENT_COUNT)
+    upload_mark = _mark(uploaded_today >= DAILY_GOAL_UPLOAD_COUNT)
+
+    lines.append(
+        f"Задания: ⭐️ {rate_mark} {rated_today}/{DAILY_GOAL_RATE_COUNT} | "
+        f"💬 {comment_mark} {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | "
+        f"📸 {upload_mark} {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}"
+    )
     lines.append("")
 
     lines.append("Это Streak. Чтобы не терять огонек тебе нужно каждый день выполнять задания. Одного выполненного задания достаточно, чтобы зажечь его.")
