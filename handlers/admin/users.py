@@ -205,6 +205,31 @@ def _parse_premium_until(raw: str) -> str | None:
         raise ValueError("invalid")
 
 
+def _extend_until(current_until: str | None, days: int, *, now: datetime) -> str:
+    """
+    Продлевает текущий премиум на days, не укорачивая.
+    Если current_until пусто или истёк — считаем от now.
+    Если current_until == None (бессрочно) — остаётся бессрочно (возвращаем None).
+    """
+    if days <= 0:
+        raise ValueError("days must be positive")
+
+    if current_until is None:
+        return None  # бессрочно не укорачиваем
+
+    base = now
+    try:
+        dt = datetime.fromisoformat(str(current_until))
+        if dt > now:
+            base = dt
+    except Exception:
+        base = now
+
+    new_dt = base + timedelta(days=days)
+    new_dt = new_dt.replace(hour=23, minute=59, second=59, microsecond=0)
+    return new_dt.isoformat()
+
+
 
 
 async def _edit_premium_prompt_or_answer(
@@ -325,6 +350,7 @@ class PremiumAdminStates(StatesGroup):
     waiting_premium_until = State()
     waiting_identifier_for_revoke = State()
     waiting_fest_name = State()
+    waiting_fest_text = State()
     waiting_fest_days = State()
 
 
@@ -1175,6 +1201,43 @@ async def admin_premium_festive_name(message: Message, state: FSMContext):
         return
 
     await state.update_data(fest_name=fest_name)
+    await state.set_state(PremiumAdminStates.waiting_fest_text)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1, 1)
+
+    await _edit_premium_prompt_or_answer(
+        message,
+        state,
+        f"🎁 {html.escape(fest_name)}\n\nТеперь введи текст, который получат пользователи вместе с уведомлением.\n\n"
+        "Пример:\n"
+        "«Спасибо, что с нами! Дарим вам премиум в честь праздника.»",
+        kb.as_markup(),
+    )
+
+
+@router.message(PremiumAdminStates.waiting_fest_text, F.text)
+async def admin_premium_festive_text(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    fest_name = (data.get("fest_name") or "").strip()
+    if not fest_name:
+        await _premium_soft_clear(state)
+        await _edit_premium_prompt_or_answer(message, state, "Сессия потерялась. Открой «Премиум» заново.", build_premium_menu_kb())
+        return
+
+    await state.update_data(fest_text=raw)
     await state.set_state(PremiumAdminStates.waiting_fest_days)
 
     kb = InlineKeyboardBuilder()
@@ -1185,7 +1248,7 @@ async def admin_premium_festive_name(message: Message, state: FSMContext):
     await _edit_premium_prompt_or_answer(
         message,
         state,
-        f"🎉 {html.escape(fest_name)}\n\nТеперь введи срок премиума в днях (целое число > 0).",
+        f"🎁 {html.escape(fest_name)}\n\nТекст сохранён.\nТеперь введи срок премиума в днях (целое число > 0).",
         kb.as_markup(),
     )
 
@@ -1204,6 +1267,7 @@ async def admin_premium_festive_days(message: Message, state: FSMContext):
 
     data = await state.get_data()
     fest_name = (data.get("fest_name") or "").strip()
+    fest_text = (data.get("fest_text") or "").strip()
     if not fest_name:
         await _premium_soft_clear(state)
         await _edit_premium_prompt_or_answer(message, state, "Сессия потерялась. Открой «Премиум» заново.", build_premium_menu_kb())
@@ -1236,23 +1300,54 @@ async def admin_premium_festive_days(message: Message, state: FSMContext):
     updated = 0
     notified = 0
 
-    notice_text = (
-        f"🎉 <b>Вам выдан премиум «{html.escape(fest_name, quote=False)}»</b>\n\n"
-        f"Срок: <b>{days}</b> дн. (до {until_dt.strftime('%d.%m.%Y')})\n"
-        "Поздравляем!"
+    fest_text_clean = fest_text.strip()
+    extra_text = f"\n\n{fest_text_clean}" if fest_text_clean else ""
+    notice_text_tpl = (
+        "💎 <b>GlowShot Premium «{fest}»</b>\n\n"
+        "Срок: <b>{days}</b> дн. (до {until}){extra}"
     )
 
     for uid in tg_ids:
         try:
-            await set_user_premium_status(int(uid), True, premium_until=until_iso)
+            user_row = await get_user_by_tg_id(int(uid))
+        except Exception:
+            user_row = None
+
+        current_until = None
+        if user_row:
+            current_until = user_row.get("premium_until")
+
+        try:
+            new_until = _extend_until(current_until, days, now=now)
+        except Exception:
+            new_until = until_iso
+
+        try:
+            await set_user_premium_status(int(uid), True, premium_until=new_until)
             updated += 1
         except Exception:
             continue
 
+        # Уведомляем только тех, кому реально продлили (в т.ч. у кого срок был)
+        final_until_dt = until_dt
+        if new_until is None and current_until is None:
+            final_until_str = "бессрочно"
+        else:
+            try:
+                final_until_dt = datetime.fromisoformat(new_until) if new_until else until_dt
+            except Exception:
+                final_until_dt = until_dt
+            final_until_str = final_until_dt.strftime("%d.%m.%Y")
+
         try:
             await message.bot.send_message(
                 chat_id=int(uid),
-                text=notice_text,
+                text=notice_text_tpl.format(
+                    fest=html.escape(fest_name, quote=False),
+                    days=days,
+                    until=final_until_str,
+                    extra=html.escape(extra_text, quote=False),
+                ),
                 parse_mode="HTML",
             )
             notified += 1
@@ -1284,7 +1379,7 @@ async def admin_premium_grant(callback: CallbackQuery, state: FSMContext):
     await _premium_soft_clear(state)
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎉 Праздничный всем", callback_data="admin:premium:grant:festive")
+    kb.button(text="🎁 Всем", callback_data="admin:premium:grant:festive")
     kb.button(text="🎯 Выборочно", callback_data="admin:premium:grant:selective")
     kb.button(text="⬅️ Назад", callback_data="admin:premium")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
@@ -1333,8 +1428,10 @@ async def admin_premium_grant_festive(callback: CallbackQuery, state: FSMContext
     await state.set_state(PremiumAdminStates.waiting_fest_name)
 
     text = (
-        "🎉 <b>Праздничный премиум</b>\n\n"
-        "Введи название праздника (например, «Новый год»). После этого я спрошу срок в днях и выдам премиум всем активным пользователям с уведомлением."
+        "🎁 <b>Премиум для всех</b>\n\n"
+        "1) Введи название (например, «Новый год» или «Извинения»).\n"
+        "2) Затем я попрошу текст сообщения для пользователей.\n"
+        "3) Потом задам срок в днях и выдам премиум всем активным пользователям с твоим текстом."
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="admin:premium:grant")
@@ -1375,7 +1472,8 @@ async def admin_premium_grant_get_user(message: Message, state: FSMContext):
         "• число дней (например <code>30</code>)\n"
         "• дату окончания <code>31.12.2025</code>\n"
         "• или нажми кнопку <b>♾ Бессрочно</b>\n\n"
-        "Можно также написать словом: <code>навсегда</code> / <code>без срока</code> / <code>бессрочно</code>."
+        "Можно также написать словом: <code>навсегда</code> / <code>без срока</code> / <code>бессрочно</code>.\n\n"
+        "💡 Если указать число дней, они прибавятся к текущему премиуму, а не обнулят срок."
     )
 
     kb = InlineKeyboardBuilder()
@@ -1456,21 +1554,44 @@ async def admin_premium_grant_set_until(message: Message, state: FSMContext):
         return
 
     tg_id = int(u["tg_id"])
-    try:
-        premium_until = _parse_premium_until(raw)
-    except ValueError:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="♾ Бессрочно", callback_data="admin:premium:grant:forever")
-        kb.button(text="⬅️ Назад", callback_data="admin:premium")
-        kb.adjust(1)
 
-        await _edit_premium_prompt_or_answer(
-            message,
-            state,
-            "❌ Не понял срок.\n\nВведи <code>30</code> (дней) или <code>31.12.2025</code>, либо нажми <b>♾ Бессрочно</b>.",
-            kb.as_markup(),
-        )
-        return
+    premium_until: str | None
+    now = datetime.now()
+    if raw.isdigit():
+        days = int(raw)
+        if days <= 0:
+            kb = InlineKeyboardBuilder()
+            kb.button(text="♾ Бессрочно", callback_data="admin:premium:grant:forever")
+            kb.button(text="⬅️ Назад", callback_data="admin:premium")
+            kb.adjust(1)
+            await _edit_premium_prompt_or_answer(
+                message,
+                state,
+                "❌ Срок должен быть больше 0 дней.\n\nПопробуй ещё раз или нажми <b>♾ Бессрочно</b>.",
+                kb.as_markup(),
+            )
+            return
+        current_until = u.get("premium_until")
+        try:
+            premium_until = _extend_until(current_until, days, now=now)
+        except Exception:
+            premium_until = _extend_until(None, days, now=now)  # type: ignore[arg-type]
+    else:
+        try:
+            premium_until = _parse_premium_until(raw)
+        except ValueError:
+            kb = InlineKeyboardBuilder()
+            kb.button(text="♾ Бессрочно", callback_data="admin:premium:grant:forever")
+            kb.button(text="⬅️ Назад", callback_data="admin:premium")
+            kb.adjust(1)
+
+            await _edit_premium_prompt_or_answer(
+                message,
+                state,
+                "❌ Не понял срок.\n\nВведи <code>30</code> (дней) или <code>31.12.2025</code>, либо нажми <b>♾ Бессрочно</b>.",
+                kb.as_markup(),
+            )
+            return
 
     # ВАЖНО: await, иначе “пишет выдано, но не выдано”
     await set_user_premium_status(tg_id, True, premium_until=premium_until)
