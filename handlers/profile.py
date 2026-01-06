@@ -37,12 +37,14 @@ from database import (
     toggle_likes_notify_by_tg_id,
     toggle_comments_notify_by_tg_id,
     set_user_language_by_tg_id,
+    get_user_block_status_by_tg_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT
+from utils.time import get_moscow_now
 
 router = Router()
 
@@ -581,6 +583,17 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
         return
 
     lang = _get_lang(user)
+    block_status = await get_user_block_status_by_tg_id(callback.from_user.id)
+    is_blocked = bool(block_status.get("is_blocked"))
+    until_dt = None
+    raw_until = block_status.get("block_until")
+    if raw_until:
+        try:
+            until_dt = datetime.fromisoformat(str(raw_until))
+        except Exception:
+            until_dt = None
+    if is_blocked and until_dt is not None and until_dt <= get_moscow_now():
+        is_blocked = False
 
     await state.update_data(
         edit_msg_id=callback.message.message_id,
@@ -588,20 +601,31 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("profile.edit.btn.name", lang), callback_data="profile:edit_name")
-    kb.button(text=t("profile.edit.btn.age", lang), callback_data="profile:edit_age")
-    kb.button(text=t("profile.edit.btn.bio", lang), callback_data="profile:edit_bio")
-    kb.button(text=t("profile.edit.btn.gender", lang), callback_data="profile:edit_gender")
-    kb.button(text=t("profile.edit.btn.channel", lang), callback_data="profile:edit_channel")
-    kb.button(text=t("profile.edit.btn.city", lang), callback_data="profile:edit_city")
-    kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete")
-    kb.button(text=t("common.back", lang), callback_data="menu:profile")
-    kb.adjust(2, 2, 2, 1, 1)
+    text_lines: list[str] = [t("profile.edit.title", lang)]
 
-    text = (
-        f"{t('profile.edit.title', lang)}\n\n"
-        f"{t('profile.edit.choose', lang)}"
-    )
+    if is_blocked:
+        text_lines.append("")
+        text_lines.append("⛔ Аккаунт заблокирован модераторами.")
+        if until_dt is not None:
+            text_lines.append(f"Блокировка до {until_dt.strftime('%d.%m.%Y %H:%M')} (МСК).")
+        text_lines.append("Можно только удалить аккаунт.")
+        kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete")
+        kb.button(text=t("common.back", lang), callback_data="menu:profile")
+        kb.adjust(1, 1)
+    else:
+        kb.button(text=t("profile.edit.btn.name", lang), callback_data="profile:edit_name")
+        kb.button(text=t("profile.edit.btn.age", lang), callback_data="profile:edit_age")
+        kb.button(text=t("profile.edit.btn.bio", lang), callback_data="profile:edit_bio")
+        kb.button(text=t("profile.edit.btn.gender", lang), callback_data="profile:edit_gender")
+        kb.button(text=t("profile.edit.btn.channel", lang), callback_data="profile:edit_channel")
+        kb.button(text=t("profile.edit.btn.city", lang), callback_data="profile:edit_city")
+        kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete")
+        kb.button(text=t("common.back", lang), callback_data="menu:profile")
+        kb.adjust(2, 2, 2, 1, 1)
+        text_lines.append("")
+        text_lines.append(t("profile.edit.choose", lang))
+
+    text = "\n".join(text_lines)
 
     await callback.message.edit_text(
         text,

@@ -1332,6 +1332,19 @@ async def get_user_by_tg_id(tg_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def is_user_soft_deleted(tg_id: int) -> bool:
+    """
+    Проверяет, помечен ли пользователь как удалённый (is_deleted=1).
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT is_deleted FROM users WHERE tg_id=$1",
+            int(tg_id),
+        )
+    return bool(v)
+
+
 async def get_user_by_username(username: str) -> dict | None:
     """
     Ищет пользователя по username (без @). Регистр игнорируется.

@@ -6,8 +6,9 @@ from typing import Callable, Dict, Any, Awaitable
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import TelegramObject, Update
+from aiogram.types import TelegramObject, Update, Message, CallbackQuery
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.dispatcher.event.bases import SkipHandler
 
 from utils.time import get_moscow_now
 
@@ -17,6 +18,9 @@ from database import (
     log_bot_error,
     get_users_with_premium_expiring_tomorrow,
     mark_premium_expiry_reminder_sent,
+    get_user_block_status_by_tg_id,
+    set_user_block_status_by_tg_id,
+    is_user_soft_deleted,
 )
 def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -157,6 +161,160 @@ def _extract_chat_and_user_from_update(update: Update) -> tuple[int | None, int 
     return chat_id, tg_user_id
 
 
+def _format_block_notice(block: dict, until_dt) -> str:
+    reason = (block.get("block_reason") or "").strip()
+    text_lines: list[str] = ["⛔ Ваш аккаунт заблокирован модераторами."]
+    if until_dt is not None:
+        text_lines.append(f"Блокировка действует до {until_dt.strftime('%d.%m.%Y %H:%M')} (МСК).")
+    if reason:
+        text_lines.append(f"Причина: {reason}")
+    text_lines.append("")
+    text_lines.append("Доступно только: профиль (для удаления аккаунта) и /help.")
+    return "\n".join(text_lines)
+
+
+def _shorten(text: str, limit: int = 190) -> str:
+    if len(text) <= limit:
+        return text
+    suffix = "…"
+    return text[: max(0, limit - len(suffix))].rstrip() + suffix
+
+
+class BlockGuardMiddleware(BaseMiddleware):
+    """
+    Глобальная проверка блокировки пользователя.
+    Блокированному пользователю доступны только: /help и профиль (для удаления аккаунта).
+    После удаления аккаунта бот молчит.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        tg_user_id: int | None = None
+
+        try:
+            if isinstance(event, Update):
+                _, tg_user_id = _extract_chat_and_user_from_update(event)
+            elif hasattr(event, "from_user") and getattr(event, "from_user"):
+                tg_user_id = event.from_user.id  # type: ignore[attr-defined]
+        except Exception:
+            tg_user_id = None
+
+        if tg_user_id is None:
+            return await handler(event, data)
+
+        # Если аккаунт удалён — полностью игнорируем любые обращения.
+        try:
+            if await is_user_soft_deleted(int(tg_user_id)):
+                if isinstance(event, CallbackQuery):
+                    try:
+                        await event.answer()
+                    except Exception:
+                        pass
+                raise SkipHandler
+        except SkipHandler:
+            raise
+        except Exception:
+            pass
+
+        block = {}
+        try:
+            block = await get_user_block_status_by_tg_id(int(tg_user_id))
+        except Exception:
+            block = {}
+
+        is_blocked = bool(block.get("is_blocked"))
+        until_dt = None
+        until_raw = block.get("block_until")
+        if until_raw:
+            try:
+                until_dt = datetime.fromisoformat(str(until_raw))
+            except Exception:
+                until_dt = None
+
+        # Истёкшая блокировка: автоматически снимаем
+        if is_blocked and until_dt is not None and until_dt <= get_moscow_now():
+            try:
+                await set_user_block_status_by_tg_id(int(tg_user_id), is_blocked=False, reason=None, until_iso=None)
+            except Exception:
+                pass
+            is_blocked = False
+
+        if not is_blocked:
+            return await handler(event, data)
+
+        block_text = _format_block_notice(block, until_dt)
+        short_block_text = _shorten(block_text)
+
+        # Разрешённые случаи для заблокированных: /help и Help-кнопки, профиль+удаление.
+        def _is_profile_delete_callback(cb_data: str) -> bool:
+            return cb_data in {
+                "menu:profile",
+                "profile:edit",
+                "profile:delete",
+                "profile:delete_confirm",
+            }
+
+        # Update с message / callback внутри
+        if isinstance(event, Update):
+            if event.message:
+                text = (event.message.text or "").strip()
+                if text.startswith("/help"):
+                    return await handler(event, data)
+                try:
+                    await event.message.answer(block_text)
+                except Exception:
+                    pass
+                raise SkipHandler
+
+            if event.callback_query:
+                data_str = event.callback_query.data or ""
+                if data_str.startswith("help:") or _is_profile_delete_callback(data_str):
+                    try:
+                        await event.callback_query.answer(short_block_text, show_alert=True)
+                    except Exception:
+                        pass
+                    return await handler(event, data)
+                try:
+                    await event.callback_query.answer(short_block_text, show_alert=True)
+                except Exception:
+                    pass
+                raise SkipHandler
+
+            return await handler(event, data)
+
+        # Если middleware повешено на message/callback напрямую
+        if isinstance(event, Message):
+            text = (event.text or "").strip()
+            if text.startswith("/help"):
+                return await handler(event, data)
+            try:
+                await event.answer(block_text)
+            except Exception:
+                pass
+            raise SkipHandler
+
+        if isinstance(event, CallbackQuery):
+            data_str = event.data or ""
+            if data_str.startswith("help:") or _is_profile_delete_callback(data_str):
+                try:
+                    await event.answer(short_block_text, show_alert=True)
+                except Exception:
+                    pass
+                return await handler(event, data)
+            try:
+                await event.answer(short_block_text, show_alert=True)
+            except Exception:
+                pass
+            raise SkipHandler
+
+        return await handler(event, data)
+
+
+
 class ErrorsToDbMiddleware(BaseMiddleware):
     """
     Ловит любые исключения в хендлерах и пишет в bot_error_logs.
@@ -171,6 +329,9 @@ class ErrorsToDbMiddleware(BaseMiddleware):
     ) -> Any:
         try:
             return await handler(event, data)
+        except SkipHandler:
+            # Пропускаем обработку без логирования (нормальный флоу BlockGuard)
+            raise
         except Exception as e:
             tb = traceback.format_exc()
 
@@ -277,6 +438,9 @@ async def main() -> None:
     asyncio.create_task(premium_expiry_reminder_loop(bot))
 
     dp = Dispatcher()
+
+    # Глобальный блок: заблокированным доступны только /help и удаление аккаунта через профиль
+    dp.update.middleware(BlockGuardMiddleware())
 
     # Логирование ошибок в БД
     dp.update.middleware(ErrorsToDbMiddleware())
