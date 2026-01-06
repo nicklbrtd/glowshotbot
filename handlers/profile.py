@@ -126,6 +126,51 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     return many
 
 
+def _pick_rated_verb(user: dict | None, lang: str) -> str:
+    """Выбирает форму глагола для строки «Ты оценил/оценила»."""
+    if lang == "en":
+        return "rated"
+
+    gender_val = None
+    if user:
+        for k in (
+            "gender",
+            "sex",
+            "profile_gender",
+            "gender_code",
+            "gender_value",
+        ):
+            try:
+                v = user.get(k)
+            except Exception:
+                v = None
+            if v is not None:
+                gender_val = v
+                break
+
+    gender_s = str(gender_val).strip().lower() if gender_val is not None else ""
+
+    def _is_female(s: str) -> bool:
+        return (
+            s in {"f", "female", "woman", "girl", "ж", "жен", "женский", "♀", "девушка", "женщина"}
+            or "жен" in s
+            or "дев" in s
+        )
+
+    def _is_male(s: str) -> bool:
+        return (
+            s in {"m", "male", "man", "boy", "м", "муж", "мужской", "♂", "парень", "мужчина"}
+            or "муж" in s
+            or "пар" in s
+        )
+
+    if _is_female(gender_s):
+        return "оценила"
+    if _is_male(gender_s):
+        return "оценил"
+    return "оценил(а)"
+
+
 
 @router.callback_query(F.data.startswith("myresults:"))
 async def profile_my_results(callback: CallbackQuery):
@@ -185,11 +230,31 @@ async def build_profile_view(user: dict):
     avg_rating_text = "—"
     popular_photo_line = "—"
     weekly_top_position = "—"
+    rated_by_me_text = "—"
 
     user_id = user.get("id")
     tg_id = user.get("tg_id")
+    safe_user_id_int = None
+    safe_tg_id_int = None
+    try:
+        safe_user_id_int = int(user_id) if user_id is not None else None
+    except Exception:
+        safe_user_id_int = None
+    try:
+        safe_tg_id_int = int(tg_id) if tg_id is not None else None
+    except Exception:
+        safe_tg_id_int = None
+
+    rater_ids_for_given: list[int] = []
+    for rid in (safe_user_id_int, safe_tg_id_int):
+        if rid is None:
+            continue
+        if rid not in rater_ids_for_given:
+            rater_ids_for_given.append(rid)
+    ratings_given_count: int | None = 0 if rater_ids_for_given else None
 
     lang = _get_lang(user)
+    rated_verb = _pick_rated_verb(user, lang)
 
     # Streak badge (optional)
     streak_badge = ""
@@ -266,6 +331,16 @@ async def build_profile_view(user: dict):
         # Средняя оценка и количество оценок (умная/байесовская)
         try:
             summary = await get_user_rating_summary(user_id) or {}
+            if ratings_given_count is not None:
+                try:
+                    if safe_user_id_int in rater_ids_for_given:
+                        rater_ids_for_given.remove(safe_user_id_int)
+                except Exception:
+                    pass
+                try:
+                    ratings_given_count += int(summary.get("ratings_given") or 0)
+                except Exception:
+                    pass
 
             cnt = int(summary.get("ratings_received") or 0)
             avg_raw = summary.get("avg_received")
@@ -332,7 +407,20 @@ async def build_profile_view(user: dict):
             print("POPULAR PHOTO ERROR:", repr(e))
 
         # Позиция в топе недели
-            weekly_top_position = "—"
+        weekly_top_position = "—"
+
+    # Добавляем оценки, поставленные с альтернативного ID (например, tg_id)
+    if ratings_given_count is not None and rater_ids_for_given:
+        for rid in list(rater_ids_for_given):
+            try:
+                extra_summary = await get_user_rating_summary(rid) or {}
+                ratings_given_count += int(extra_summary.get("ratings_given") or 0)
+            except Exception:
+                pass
+        rater_ids_for_given.clear()
+
+    if ratings_given_count is not None:
+        rated_by_me_text = str(ratings_given_count)
 
     # GlowShot Premium status
     if lang == "en":
@@ -478,6 +566,7 @@ async def build_profile_view(user: dict):
     stats_lines = [
         t("profile.stats.total_photos", lang, value=total_photos),
         t("profile.stats.days_in_bot", lang, value=days_in_bot),
+        t("menu.rated_by_me", lang, verb=rated_verb, value=rated_by_me_text),
         streak_short_line or t("profile.stats.streak", lang, value="—"),
         t("profile.stats.avg_rating", lang, value=avg_rating_text),
         t("profile.stats.popular_photo", lang, value=popular_photo_line),
