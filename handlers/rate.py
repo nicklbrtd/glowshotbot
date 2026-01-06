@@ -992,29 +992,97 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 raise
         return
 
-    user = await get_user_by_tg_id(message.from_user.id)
-    await message.delete()
+    try:
+        user = await get_user_by_tg_id(message.from_user.id)
+    except Exception as e:
+        # If DB fails, don't leave the user hanging
+        try:
+            await log_bot_error(
+                chat_id=message.chat.id,
+                tg_user_id=message.from_user.id,
+                handler="rate_report_text:get_user_by_tg_id",
+                update_type="report",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+        await state.clear()
+        return
+
+    # Remove the user's message to keep the chat clean (expected behavior)
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     if user is None:
         await state.clear()
         return
-    
+
     reason_code = report_reason
-    reason_label = REPORT_REASON_LABELS.get(reason_code, "Другое")
 
-    await create_photo_report(
-        photo_id=photo_id,
-        user_id=user["id"],
-        reason=reason_code,
-        details=text,
-    )
+    # Create report + compute stats safely. If anything fails, show an error to the user instead of silence.
+    try:
+        await create_photo_report(
+            int(photo_id),
+            int(user["id"]),
+            str(reason_code),
+            str(text),
+        )
 
-    stats_dict = await get_photo_report_stats(photo_id)
-    stats = ReportStats(
-        photo_id=photo_id,
-        total_pending=stats_dict.get("total_pending", 0),
-        total_all=stats_dict.get("total_all", 0),
-    )
+        try:
+            stats_dict = await get_photo_report_stats(int(photo_id))
+        except Exception:
+            stats_dict = None
+
+        if not isinstance(stats_dict, dict):
+            stats_dict = {"total_pending": 0, "total_all": 0}
+
+    except Exception as e:
+        # Log and notify the reporter (edit the original report prompt message)
+        try:
+            await log_bot_error(
+                chat_id=message.chat.id,
+                tg_user_id=message.from_user.id,
+                handler="rate_report_text:create_photo_report",
+                update_type="report",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:rate")]]
+        )
+        try:
+            await message.bot.edit_message_caption(
+                chat_id=report_chat_id,
+                message_id=report_msg_id,
+                caption=(
+                    "⚠️ Не удалось отправить жалобу. Попробуй ещё раз чуть позже.\n\n"
+                    "Если проблема повторяется — напиши админу."
+                ),
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        except Exception:
+            # As a fallback, send a message (rare case when prompt msg can't be edited)
+            try:
+                await message.bot.send_message(
+                    chat_id=report_chat_id,
+                    text="⚠️ Не удалось отправить жалобу. Попробуй позже.",
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+
+        await state.clear()
+        return
 
 
     # Always mark photo under review after the first report
