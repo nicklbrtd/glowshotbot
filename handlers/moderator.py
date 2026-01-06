@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InputMediaPhoto
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
@@ -54,15 +54,11 @@ def build_moderator_menu() -> InlineKeyboardMarkup:
     Клавиатура раздела модерации.
 
     Здесь:
-    - очередь жалоб (фото со статусом under_review),
-    - детальная проверка (фото со статусом under_detailed_review),
     - самостоятельная проверка (любой активный контент),
     - раздел пользователей,
     - выход обратно в главное меню.
     """
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔍 Модерация жалоб", callback_data="mod:queue")
-    kb.button(text="🧪 Детальная проверка", callback_data="mod:deep")
     kb.button(text="🧾 Проверять самостоятельно", callback_data="mod:self")
     kb.button(text="👥 Пользователи", callback_data="mod:users")
     kb.button(text="⬅️ В меню", callback_data="menu:back")
@@ -108,44 +104,11 @@ def build_moderation_photo_keyboard(photo_id: int, source: str) -> InlineKeyboar
       - "self"   — фото из самостоятельной проверки.
     """
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="✅ Всё в порядке",
-        callback_data=f"mod:photo_ok:{source}:{photo_id}",
-    )
-    kb.button(
-        text="⏭ Пропустить",
-        callback_data=f"mod:photo_skip:{source}:{photo_id}",
-    )
-    if source == "queue":
-        kb.button(
-            text="🔍 На детальную проверку",
-            callback_data=f"mod:photo_deep:{photo_id}",
-        )
-        kb.button(
-            text="🗑 Удалить фотографию",
-            callback_data=f"mod:photo_delete:{source}:{photo_id}",
-        )
-        kb.button(
-            text="⛔ Удалить + бан",
-            callback_data=f"mod:photo_delete_ban:{source}:{photo_id}",
-        )
-    else:
-        kb.button(
-            text="👤 Профиль автора",
-            callback_data=f"mod:photo_profile:{photo_id}",
-        )
-        kb.button(
-            text="🗑 Удалить фотографию",
-            callback_data=f"mod:photo_delete:{source}:{photo_id}",
-        )
-        kb.button(
-            text="⛔ Удалить + бан",
-            callback_data=f"mod:photo_delete_ban:{source}:{photo_id}",
-        )
-    kb.button(
-        text="⬅️ Меню модерации",
-        callback_data="mod:menu",
-    )
+    kb.button(text="✅ Всё в порядке", callback_data=f"mod:photo_ok:{source}:{photo_id}")
+    kb.button(text="🗑 Удалить фотографию", callback_data=f"mod:photo_delete:{source}:{photo_id}")
+    kb.button(text="⛔ Бан + удаление", callback_data=f"mod:photo_delete_ban:{source}:{photo_id}")
+    kb.button(text="👤 Профиль автора", callback_data=f"mod:photo_profile:{photo_id}")
+    kb.button(text="⬅️ Назад", callback_data="mod:menu")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -369,6 +332,76 @@ async def _build_moderation_caption(
     return "\n".join(caption_lines)
 
 
+async def _build_self_check_caption(photo: dict) -> str:
+    """Более лаконичная карточка для режима «Проверять самостоятельно»."""
+    lines: list[str] = []
+    lines.append("📷 <b>Фотография на модерации</b>")
+    lines.append("")
+    lines.append(f"ID работы: <code>{photo['id']}</code>")
+
+    title = (photo.get("title") or "").strip() or "Без названия"
+    lines.append(f"Название: <b>{escape(title)}</b>")
+
+    category = (photo.get("category") or "photo").strip()
+    lines.append(f"Категория: <code>{escape(category)}</code>")
+
+    day_key = (photo.get("day_key") or "").strip() or "—"
+    lines.append(f"День публикации: <code>{escape(day_key)}</code>")
+
+    moder_status = (photo.get("moderation_status") or "—").strip()
+    lines.append(f"Статус модерации: <code>{escape(moder_status)}</code>")
+
+    author_line = "Автор: —"
+    link_line = None
+    try:
+        author = await get_user_by_id(int(photo.get("user_id") or 0))
+    except Exception:
+        author = None
+    if author:
+        uname = (author.get("username") or "").strip()
+        name = (author.get("name") or author.get("display_name") or "").strip()
+        tg_id = author.get("tg_id")
+        author_display = f"@{escape(uname)}" if uname else escape(name or "—")
+        tg_display = escape(str(tg_id) if tg_id else "—")
+        author_line = f"Автор: {author_display} / {tg_display}"
+        # ссылка из фото или из автора
+        raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or author.get("tg_channel_link") or "").strip()
+        if raw_link:
+            link_line = f"Ссылка: {escape(raw_link)}"
+    lines.append(author_line)
+
+    description = (photo.get("description") or "").strip()
+    if description:
+        lines.append(f"Описание: {escape(description)}")
+    else:
+        lines.append("Описание: —")
+
+    if link_line:
+        lines.append(link_line)
+
+    # Жалобы
+    try:
+        rs = await get_photo_report_stats(int(photo["id"]))
+        pending = int(rs.get("total_pending") or rs.get("pending") or 0)
+        lines.append(f"Жалобы: {pending}")
+    except Exception:
+        lines.append("Жалобы: —")
+
+    # Статистика рейтинга
+    try:
+        stats = await get_photo_stats(int(photo["id"]))
+        ratings_count = int(stats.get("ratings_count") or 0)
+        bayes = stats.get("bayes_score")
+        bayes_str = "—"
+        if bayes is not None:
+            bayes_str = f"{float(bayes):.2f}".rstrip("0").rstrip(".")
+        lines.append(f"Статистика: рейтинг {bayes_str}, оценок {ratings_count}")
+    except Exception:
+        lines.append("Статистика: —")
+
+    return "\n".join(lines)
+
+
 async def show_next_photo_for_moderation(callback: CallbackQuery) -> None:
     """
     Отправляет модератору следующую фотографию, которая ожидает проверки по жалобам.
@@ -449,27 +482,51 @@ async def show_next_photo_for_self_check(callback: CallbackQuery) -> None:
             )
         return
 
-    # Отправляем карточку с фото для самостоятельной проверки (source="self")
     chat_id = callback.message.chat.id
-    caption = await _build_moderation_caption(
-        photo,
-        show_reports=True,
-        show_stats=True,
-    )
+    caption = await _build_self_check_caption(photo)
 
     try:
-        await callback.message.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo["file_id"],
-            caption=caption,
-            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
-        )
-    except TelegramBadRequest:
-        await callback.message.bot.send_message(
-            chat_id=chat_id,
-            text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
-            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
-        )
+        if callback.message.photo:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(media=photo["file_id"], caption=caption, parse_mode="HTML"),
+                reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+            )
+        else:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo["file_id"],
+                caption=caption,
+                reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+                parse_mode="HTML",
+            )
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        try:
+            await callback.message.bot.send_photo(
+                chat_id=chat_id,
+                photo=photo["file_id"],
+                caption=caption,
+                reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+                parse_mode="HTML",
+            )
+        except Exception:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
+                    reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
 
 async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
     """
