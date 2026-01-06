@@ -27,6 +27,8 @@ from database import (
     streak_rollover_if_needed_by_tg_id,
     streak_record_action_by_tg_id,
     streak_toggle_notify_by_tg_id,
+    streak_toggle_visibility_by_tg_id,
+    streak_use_freeze_today,
 )
 from keyboards.common import build_back_kb
 from utils.i18n import t
@@ -79,7 +81,6 @@ def render_streak_text_from_dict(d: dict, lang: str) -> str:
     last = d.get("last_completed_day") or "—"
 
     goal_done = bool(d.get("goal_done_today"))
-    goal_line = t("streak.goal.done", lang) if goal_done else t("streak.goal.not_done", lang)
 
     rated_today = int(d.get("rated_today") or 0)
     commented_today = int(d.get("commented_today") or 0)
@@ -89,41 +90,35 @@ def render_streak_text_from_dict(d: dict, lang: str) -> str:
     need_comm = max(0, DAILY_GOAL_COMMENT_COUNT - commented_today)
     need_upl = max(0, DAILY_GOAL_UPLOAD_COUNT - uploaded_today)
 
-    how = (
-        t("streak.how.header", lang) + "\n"
-        + t("streak.how.upload", lang, value=need_upl) + "\n"
-        + t("streak.how.rate", lang, value=need_rate) + "\n"
-        + t("streak.how.comment", lang, value=need_comm) + "\n"
-    )
-
     notify_enabled = bool(d.get("notify_enabled"))
     nh = int(d.get("notify_hour") or 21)
     nm = int(d.get("notify_minute") or 0)
 
-    state = t("streak.notify.on", lang) if notify_enabled else t("streak.notify.off", lang)
+    lines: list[str] = []
+    lines.append("🔥 <b>GlowShot Streak</b>")
+    lines.append("")
 
-    return (
-        t("streak.title", lang) + "\n\n"
-        + t("streak.current", lang, value=streak) + "\n"
-        + t("streak.best", lang, value=best) + "\n"
-        + t("streak.freeze", lang, value=freeze) + "\n"
-        + t("streak.last_day", lang, value=last) + "\n\n"
-        + goal_line + "\n\n"
-        + t(
-            "streak.today",
-            lang,
-            rated=rated_today,
-            rated_goal=DAILY_GOAL_RATE_COUNT,
-            commented=commented_today,
-            comment_goal=DAILY_GOAL_COMMENT_COUNT,
-            uploaded=uploaded_today,
-            upload_goal=DAILY_GOAL_UPLOAD_COUNT,
-        )
-        + "\n\n"
-        + how
-        + t("streak.grace", lang, value=GRACE_HOURS) + "\n"
-        + t("streak.notify", lang, state=state, hh=f"{nh:02d}", mm=f"{nm:02d}")
-    )
+    # header stats
+    streak_state = "горит" if streak > 0 else "не горит"
+    lines.append(f"Текущая серия: <b>{streak}</b> ({streak_state})")
+    lines.append(f"Лучшая серия: <b>{best}</b>")
+    lines.append(f"Заморозки: <b>{freeze}</b>")
+    lines.append("")
+
+    # tasks line
+    lines.append(f"❌/✅ Задания: ⭐️ {rated_today}/{DAILY_GOAL_RATE_COUNT} | 💬 {commented_today}/{DAILY_GOAL_COMMENT_COUNT} | 📸 {uploaded_today}/{DAILY_GOAL_UPLOAD_COUNT}")
+    lines.append("")
+
+    lines.append("Это Streak. Чтобы не терять огонек тебе нужно каждый день выполнять задания. Одного выполненного задания достаточно, чтобы зажечь его.")
+    lines.append("Твой Streak виден людям при оценивании, но его можно скрыть кнопкой «Скрыть Streak».")
+    lines.append(f"Если ты не успел до полуночи, у тебя есть ещё {GRACE_HOURS} часов, чтобы закрыть день.")
+    lines.append("За 111 дней Streak ты получишь награду: 11 дней GlowShot Premium.")
+
+    state = "включены" if notify_enabled else "выключены"
+    lines.append("")
+    lines.append(f"Уведомления: {state} (время: {nh:02d}:{nm:02d})")
+
+    return "\n".join(lines)
 
 
 def build_streak_kb_from_dict(
@@ -132,17 +127,21 @@ def build_streak_kb_from_dict(
     *,
     refresh_cb: str,
     toggle_notify_cb: str,
+    toggle_visibility_cb: str,
+    freeze_cb: str,
     back_cb: str | None = None,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("streak.kb.refresh", lang), callback_data=refresh_cb)
+    kb.button(text="🙈 Скрыть Streak" if d.get("visible", True) else "👀 Показать Streak", callback_data=toggle_visibility_cb)
+    kb.button(text="🧊 Заморозка", callback_data=freeze_cb)
+    kb.button(text="🔄 Обновить", callback_data=refresh_cb)
     kb.button(
         text=(t("streak.kb.notify.on", lang) if bool(d.get("notify_enabled")) else t("streak.kb.notify.off", lang)),
         callback_data=toggle_notify_cb,
     )
     if back_cb:
         kb.button(text=t("common.back", lang), callback_data=back_cb)
-    kb.adjust(1)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -154,6 +153,8 @@ async def load_streak_status_dict(tg_id: int) -> dict:
 async def get_profile_streak_badge_and_line(tg_id: int) -> tuple[str, str]:
     try:
         s = await load_streak_status_dict(int(tg_id))
+        if not bool(s.get("visible", True)):
+            return "", ""
         user = await get_user_by_tg_id(int(tg_id))
         lang = _get_lang(user)
         cur_streak = int(s.get("streak") or 0)
@@ -200,6 +201,8 @@ async def profile_streak_open(callback: CallbackQuery):
             lang,
             refresh_cb="profile:streak:refresh",
             toggle_notify_cb="profile:streak:toggle_notify",
+            toggle_visibility_cb="profile:streak:toggle_visibility",
+            freeze_cb="profile:streak:freeze",
             back_cb="menu:profile",
         )
         try:
@@ -239,6 +242,8 @@ async def profile_streak_refresh(callback: CallbackQuery):
             lang,
             refresh_cb="profile:streak:refresh",
             toggle_notify_cb="profile:streak:toggle_notify",
+            toggle_visibility_cb="profile:streak:toggle_visibility",
+            freeze_cb="profile:streak:freeze",
             back_cb="menu:profile",
         )
         try:
@@ -265,6 +270,8 @@ async def profile_streak_toggle_notify(callback: CallbackQuery):
             lang,
             refresh_cb="profile:streak:refresh",
             toggle_notify_cb="profile:streak:toggle_notify",
+            toggle_visibility_cb="profile:streak:toggle_visibility",
+            freeze_cb="profile:streak:freeze",
             back_cb="menu:profile",
         )
         try:
@@ -274,3 +281,67 @@ async def profile_streak_toggle_notify(callback: CallbackQuery):
                 raise
     finally:
         await callback.answer(t("streak.toast.ok", lang))
+
+
+@router.callback_query(F.data == "profile:streak:toggle_visibility")
+async def profile_streak_toggle_visibility(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
+
+    try:
+        await streak_toggle_visibility_by_tg_id(int(tg_id))
+        status = await load_streak_status_dict(int(tg_id))
+        text = render_streak_text_from_dict(status, lang)
+        kb = build_streak_kb_from_dict(
+            status,
+            lang,
+            refresh_cb="profile:streak:refresh",
+            toggle_notify_cb="profile:streak:toggle_notify",
+            toggle_visibility_cb="profile:streak:toggle_visibility",
+            freeze_cb="profile:streak:freeze",
+            back_cb="menu:profile",
+        )
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+    finally:
+        await callback.answer()
+
+
+@router.callback_query(F.data == "profile:streak:freeze")
+async def profile_streak_freeze(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
+
+    try:
+        status = await streak_use_freeze_today(int(tg_id))
+        text = render_streak_text_from_dict(status, lang)
+        kb = build_streak_kb_from_dict(
+            status,
+            lang,
+            refresh_cb="profile:streak:refresh",
+            toggle_notify_cb="profile:streak:toggle_notify",
+            toggle_visibility_cb="profile:streak:toggle_visibility",
+            freeze_cb="profile:streak:freeze",
+            back_cb="menu:profile",
+        )
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+
+        used = bool(status.get("goal_done_today"))
+        if used:
+            await callback.answer("Заморозка применена.")
+        else:
+            await callback.answer("Сегодня уже закрыто или нет заморозок.", show_alert=True)
+    except Exception:
+        try:
+            await callback.answer("Не удалось применить заморозку.", show_alert=True)
+        except Exception:
+            pass

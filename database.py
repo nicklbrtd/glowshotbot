@@ -194,6 +194,8 @@ _STREAK_DAILY_COMMENTS = int(os.getenv("STREAK_DAILY_COMMENTS", "1"))
 _STREAK_DAILY_UPLOADS = int(os.getenv("STREAK_DAILY_UPLOADS", "1"))
 _STREAK_GRACE_HOURS = int(os.getenv("STREAK_GRACE_HOURS", "6"))
 _STREAK_MAX_NUDGES_PER_DAY = int(os.getenv("STREAK_MAX_NUDGES_PER_DAY", "2"))
+_STREAK_REWARD_THRESHOLD = 111
+_STREAK_REWARD_PREMIUM_DAYS = 11
 
 
 def _streak_target_day_key(now_dt: datetime) -> str:
@@ -221,8 +223,8 @@ async def streak_ensure_user_row(tg_id: int) -> None:
     async with p.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO user_streak (tg_id, created_at, updated_at)
-            VALUES ($1,$2,$2)
+            INSERT INTO user_streak (tg_id, visible, reward_111_given, created_at, updated_at)
+            VALUES ($1,1,0,$2,$2)
             ON CONFLICT (tg_id) DO NOTHING
             """,
             int(tg_id), now
@@ -260,6 +262,8 @@ async def streak_get_status_by_tg_id(tg_id: int) -> dict:
         "notify_enabled": bool(int(u["notify_enabled"] or 0)) if u else True,
         "notify_hour": int(u["notify_hour"] or 21) if u else 21,
         "notify_minute": int(u["notify_minute"] or 0) if u else 0,
+        "visible": bool(int(u["visible"] or 1)) if u else True,
+        "reward_111_given": bool(int(u["reward_111_given"] or 0)) if u else False,
         "rated_today": int(d["rated_count"] or 0) if d else 0,
         "commented_today": int(d["comment_count"] or 0) if d else 0,
         "uploaded_today": int(d["upload_count"] or 0) if d else 0,
@@ -281,6 +285,79 @@ async def streak_toggle_notify_by_tg_id(tg_id: int) -> bool:
             get_moscow_now_iso(),
         )
     return bool(int(v or 0))
+
+
+async def streak_toggle_visibility_by_tg_id(tg_id: int) -> bool:
+    """Toggle public visibility of streak badge."""
+    await streak_ensure_user_row(int(tg_id))
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "UPDATE user_streak SET visible = 1 - COALESCE(visible, 1), updated_at=$2 WHERE tg_id=$1 RETURNING visible",
+            int(tg_id),
+            get_moscow_now_iso(),
+        )
+    return bool(int(v or 0))
+
+
+def _extend_premium_until(current_until: str | None, days: int, *, now_dt: datetime) -> str | None:
+    """Extend premium by days. Forever stays forever (None)."""
+    if days <= 0:
+        raise ValueError("days must be positive")
+    if current_until is None:
+        return None
+
+    base = now_dt
+    try:
+        dt = datetime.fromisoformat(str(current_until))
+        if dt > now_dt:
+            base = dt
+    except Exception:
+        base = now_dt
+
+    new_dt = base + timedelta(days=days)
+    new_dt = new_dt.replace(hour=23, minute=59, second=59, microsecond=0)
+    return new_dt.isoformat()
+
+
+async def _grant_streak_reward_if_needed(
+    tg_id: int,
+    best_before: int,
+    best_after: int,
+) -> None:
+    """Grant reward once when crossing the threshold."""
+    if best_before >= _STREAK_REWARD_THRESHOLD:
+        return
+    if best_after < _STREAK_REWARD_THRESHOLD:
+        return
+
+    await streak_ensure_user_row(int(tg_id))
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT reward_111_given FROM user_streak WHERE tg_id=$1",
+            int(tg_id),
+        )
+        if not row or bool(int(row["reward_111_given"] or 0)):
+            return
+
+        user = await get_user_by_tg_id(int(tg_id))
+        if not user:
+            return
+
+        current_until = user.get("premium_until")
+        now_dt = get_moscow_now()
+        try:
+            new_until = _extend_premium_until(current_until, _STREAK_REWARD_PREMIUM_DAYS, now_dt=now_dt)
+        except Exception:
+            new_until = None if current_until is None else (get_moscow_now() + timedelta(days=_STREAK_REWARD_PREMIUM_DAYS)).isoformat()
+
+        await set_user_premium_status(int(tg_id), True, premium_until=new_until)
+        await conn.execute(
+            "UPDATE user_streak SET reward_111_given=1, updated_at=$2 WHERE tg_id=$1",
+            int(tg_id),
+            get_moscow_now_iso(),
+        )
 
 
 async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
@@ -343,6 +420,7 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
             streak = int(u["streak"] or 0) if u else 0
             best = int(u["best_streak"] or 0) if u else 0
             last_completed = str(u["last_completed_day"]) if u and u["last_completed_day"] else None
+            reward_flag = bool(int(u["reward_111_given"] or 0)) if u else False
 
             if last_completed != str(day_key):
                 if last_completed is None:
@@ -366,6 +444,10 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
                     int(tg_id), int(new_streak), int(new_best), str(day_key), now_iso
                 )
                 streak_changed = True
+                try:
+                    await _grant_streak_reward_if_needed(int(tg_id), best, new_best)
+                except Exception:
+                    pass
 
         u2 = await conn.fetchrow("SELECT * FROM user_streak WHERE tg_id=$1", int(tg_id))
 
@@ -379,6 +461,7 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
         "streak": int(u2["streak"] or 0) if u2 else 0,
         "best": int(u2["best_streak"] or 0) if u2 else 0,
         "freeze": int(u2["freeze_tokens"] or 0) if u2 else 0,
+        "visible": bool(int(u2["visible"] or 1)) if u2 else True,
     }
 
 
@@ -403,6 +486,95 @@ async def streak_add_freeze_by_tg_id(tg_id: int, amount: int = 1) -> int:
         )
 
     return int(v or 0)
+
+
+async def streak_use_freeze_today(tg_id: int) -> dict:
+    """
+    Использовать одну заморозку для закрытия сегодняшнего дня.
+    Если заморозок нет или день уже закрыт — возвращает текущее состояние без изменений.
+    """
+    await streak_ensure_user_row(int(tg_id))
+    p = _assert_pool()
+    now_dt = get_moscow_now()
+    day_key = _streak_target_day_key(now_dt)
+    now_iso = get_moscow_now_iso()
+
+    async with p.acquire() as conn:
+        u = await conn.fetchrow(
+            "SELECT streak, best_streak, freeze_tokens, last_completed_day, reward_111_given FROM user_streak WHERE tg_id=$1",
+            int(tg_id),
+        )
+        freeze_tokens = int(u["freeze_tokens"] or 0) if u else 0
+        best_before = int(u["best_streak"] or 0) if u else 0
+        last_completed = (u["last_completed_day"] or "").strip() if u else ""
+        streak_before = int(u["streak"] or 0) if u else 0
+
+        # Ensure daily row
+        await conn.execute(
+            """
+            INSERT INTO streak_daily (tg_id, day_key)
+            VALUES ($1,$2)
+            ON CONFLICT (tg_id, day_key) DO NOTHING
+            """,
+            int(tg_id),
+            str(day_key),
+        )
+        d = await conn.fetchrow(
+            "SELECT rated_count, comment_count, upload_count, goal_done FROM streak_daily WHERE tg_id=$1 AND day_key=$2",
+            int(tg_id),
+            str(day_key),
+        )
+        goal_done = bool(int(d["goal_done"] or 0)) if d else False
+
+        if goal_done or freeze_tokens <= 0:
+            return await streak_get_status_by_tg_id(int(tg_id))
+
+        # Spend freeze and mark day as done
+        await conn.execute(
+            "UPDATE user_streak SET freeze_tokens=GREATEST(freeze_tokens-1,0), updated_at=$2 WHERE tg_id=$1",
+            int(tg_id),
+            now_iso,
+        )
+        await conn.execute(
+            "UPDATE streak_daily SET goal_done=1 WHERE tg_id=$1 AND day_key=$2",
+            int(tg_id),
+            str(day_key),
+        )
+
+        # Update streak counters
+        new_streak = streak_before
+        if last_completed != str(day_key):
+            if not last_completed:
+                new_streak = 1
+            else:
+                try:
+                    last_d = datetime.fromisoformat(last_completed).date()
+                    cur_d = datetime.fromisoformat(str(day_key)).date()
+                    delta = (cur_d - last_d).days
+                except Exception:
+                    delta = 999
+                new_streak = (streak_before + 1) if delta == 1 else 1
+
+        new_best = max(best_before, int(new_streak))
+        await conn.execute(
+            """
+            UPDATE user_streak
+            SET streak=$2, best_streak=$3, last_completed_day=$4, updated_at=$5
+            WHERE tg_id=$1
+            """,
+            int(tg_id),
+            int(new_streak),
+            int(new_best),
+            str(day_key),
+            now_iso,
+        )
+
+    status = await streak_get_status_by_tg_id(int(tg_id))
+    try:
+        await _grant_streak_reward_if_needed(int(tg_id), best_before, int(status.get("best_streak") or best_before))
+    except Exception:
+        pass
+    return status
 
 
 async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
@@ -431,6 +603,7 @@ async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
         last_completed = (row["last_completed_day"] or "").strip()
         cur_streak = int(row["streak"] or 0)
         freeze = int(row["freeze_tokens"] or 0)
+        best_before = int(row["best_streak"] or 0)
 
         # Already completed today -> nothing to rollover
         if last_completed == today:
@@ -483,7 +656,12 @@ async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
                     get_moscow_now_iso(),
                 )
 
-    return await streak_get_status_by_tg_id(int(tg_id))
+    status = await streak_get_status_by_tg_id(int(tg_id))
+    try:
+        await _grant_streak_reward_if_needed(int(tg_id), best_before, int(status.get("best_streak") or best_before))
+    except Exception:
+        pass
+    return status
 
 
 async def count_today_photos_for_user(user_id: int, *, include_deleted: bool = False) -> int:
@@ -972,6 +1150,8 @@ async def ensure_schema() -> None:
               notify_enabled INTEGER NOT NULL DEFAULT 1,
               notify_hour INTEGER NOT NULL DEFAULT 21,
               notify_minute INTEGER NOT NULL DEFAULT 0,
+              visible INTEGER NOT NULL DEFAULT 1,
+              reward_111_given INTEGER NOT NULL DEFAULT 0,
 
               last_nudge_day TEXT,
               nudge_count INTEGER NOT NULL DEFAULT 0,
@@ -1022,6 +1202,8 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id TEXT;")
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_id TEXT;")
         await conn.execute("ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'pending';")
+        await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS visible INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS reward_111_given INTEGER NOT NULL DEFAULT 0;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")

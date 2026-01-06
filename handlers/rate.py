@@ -572,15 +572,19 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
                 photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
     streak_days = 0
+    streak_visible = True
     if author_tg_id:
         try:
             st = await streak_get_status_by_tg_id(int(author_tg_id))
-            streak_days = int(st.get("streak") or 0)
+            streak_visible = bool(st.get("visible", True))
+            streak_days = int(st.get("streak") or 0) if streak_visible else 0
         except Exception:
             streak_days = 0
+            streak_visible = True
 
     lines: list[str] = []
-    lines.append(f"💎 «{escape(title)}» • 🔥<b>{streak_days}</b> дней")
+    streak_part = f" • 🔥<b>{streak_days}</b> дней" if streak_visible else ""
+    lines.append(f"💎 «{escape(title)}»{streak_part}")
 
     # beta tester line
     if bool(photo.get("has_beta_award")):
