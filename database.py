@@ -1039,6 +1039,7 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_id ON ratings(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_photo_id ON comments(photo_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_photo_id ON photo_reports(photo_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_reports_user_created_at ON photo_reports(user_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_streak_updated_at ON user_streak(updated_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_tg_id ON streak_actions(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_streak_actions_created_at ON streak_actions(created_at);")
@@ -2698,6 +2699,29 @@ async def create_photo_report(user_id: int, photo_id: int, reason: str, text: st
             """,
             int(photo_id), int(user_id), str(reason), text, now
         )
+
+
+async def get_user_reports_since(user_id: int, since_iso: str, limit: int | None = None) -> list[str]:
+    """
+    Возвращает created_at всех жалоб пользователя, созданных начиная с since_iso (ISO-строка).
+    Используем для ограничения частоты отправки жалоб.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        query = """
+            SELECT created_at
+            FROM photo_reports
+            WHERE user_id=$1 AND created_at >= $2
+            ORDER BY created_at DESC
+        """
+        params: list[object] = [int(user_id), str(since_iso)]
+        if limit is not None:
+            query += " LIMIT $3"
+            params.append(int(limit))
+
+        rows = await conn.fetch(query, *params)
+
+    return [str(row["created_at"]) for row in rows]
 
 
 # =====================

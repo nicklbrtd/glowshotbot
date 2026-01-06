@@ -1,7 +1,8 @@
 from aiogram import Router, F
 import traceback
+from dataclasses import dataclass
 from datetime import date
-from utils.time import get_moscow_today
+from utils.time import get_moscow_today, get_moscow_now
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -13,8 +14,9 @@ from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.moderation import (
     get_report_reasons,
     REPORT_REASON_LABELS,
-    ReportStats,
-    decide_after_new_report,
+    REPORT_RATE_LIMIT_MAX,
+    REPORT_RATE_LIMIT_WINDOW,
+    evaluate_report_rate_limit,
 )
 
 from database import (
@@ -44,6 +46,7 @@ from database import (
     upsert_moderation_message_for_photo,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
+    get_user_reports_since,
 )
 from html import escape
 from config import MODERATION_CHAT_ID
@@ -184,10 +187,255 @@ def _moscow_day_key() -> str:
         return str(get_moscow_today())
 
 
+def _format_report_cooldown(seconds: int) -> str:
+    if seconds <= 0:
+        return "меньше минуты"
+    minutes, secs = divmod(seconds, 60)
+    parts: list[str] = []
+    if minutes:
+        parts.append(f"{minutes} мин")
+    if secs and minutes < 5:
+        parts.append(f"{secs} сек")
+    if not parts:
+        parts.append("меньше минуты")
+    return " ".join(parts)
+
+
+async def _get_report_rate_limit_status(user_id: int):
+    """
+    Возвращает статус по лимиту жалоб для пользователя.
+    Если что-то пошло не так с БД — возвращаем None, чтобы не блокировать пользователя.
+    """
+    try:
+        now = get_moscow_now()
+        since_iso = (now - REPORT_RATE_LIMIT_WINDOW).isoformat()
+        recent = await get_user_reports_since(int(user_id), since_iso, limit=REPORT_RATE_LIMIT_MAX)
+        return evaluate_report_rate_limit(recent, now=now)
+    except Exception:
+        return None
+
+
 class RateStates(StatesGroup):
     waiting_comment_text = State()
     waiting_report_text = State()
 
+
+@dataclass(slots=True)
+class RatingCard:
+    photo: dict | None
+    caption: str
+    keyboard: InlineKeyboardMarkup
+    photo_file_id: str | None
+
+
+async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_tg_id: int) -> RatingCard:
+    """Собрать карточку оценивания для конкретной фотографии (с учётом премиума, ачивок и т.д.)."""
+    photo = dict(photo)
+
+    author_user_id_raw = photo.get("user_id")
+    try:
+        author_user_id = int(author_user_id_raw) if author_user_id_raw else 0
+    except Exception:
+        author_user_id = 0
+
+    try:
+        has_beta_award = False
+        if author_user_id:
+            awards = await get_awards_for_user(author_user_id)
+            for award in awards:
+                code = (award.get("code") or "").strip()
+                title = (award.get("title") or "").strip().lower()
+                if code == "beta_tester" or "бета-тестер бота" in title or "бета тестер бота" in title:
+                    has_beta_award = True
+                    break
+        photo["has_beta_award"] = has_beta_award
+    except Exception:
+        photo["has_beta_award"] = False
+
+    try:
+        author_user = await get_user_by_id(author_user_id)
+    except Exception:
+        author_user = None
+
+    if author_user:
+        if not photo.get("user_tg_channel_link") and author_user.get("tg_channel_link"):
+            photo["user_tg_channel_link"] = author_user.get("tg_channel_link")
+
+        try:
+            tg_id = author_user.get("tg_id")
+            if tg_id:
+                photo["user_is_premium"] = await is_user_premium_active(int(tg_id))
+            else:
+                photo["user_is_premium"] = bool(author_user.get("is_premium"))
+        except Exception:
+            photo["user_is_premium"] = bool(author_user.get("is_premium"))
+
+    caption = await build_rate_caption(photo, viewer_tg_id=int(viewer_tg_id), show_details=False)
+
+    is_premium_rater = False
+    try:
+        rater_user = await get_user_by_id(int(rater_user_id))
+        if rater_user and rater_user.get("tg_id"):
+            is_premium_rater = await is_user_premium_active(rater_user["tg_id"])
+    except Exception:
+        is_premium_rater = False
+
+    kb = build_rate_keyboard(int(photo["id"]), is_premium=is_premium_rater, show_details=False)
+    file_id = photo.get("file_id")
+    file_id_str = str(file_id) if file_id is not None else None
+
+    return RatingCard(
+        photo=photo,
+        caption=caption,
+        keyboard=kb,
+        photo_file_id=file_id_str,
+    )
+
+
+async def _build_rating_card_for_photo(
+    photo_id: int,
+    rater_user_id: int,
+    viewer_tg_id: int,
+    prefix: str | None = None,
+) -> RatingCard | None:
+    try:
+        photo = await get_photo_by_id(int(photo_id))
+    except Exception:
+        photo = None
+
+    if photo is None:
+        return None
+
+    card = await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id)
+    if prefix:
+        card.caption = f"{prefix}\n\n{card.caption}"
+    return card
+
+
+async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> RatingCard:
+    photo = await get_random_photo_for_rating(rater_user_id)
+    if photo is None:
+        return RatingCard(
+            photo=None,
+            caption=build_no_photos_text(),
+            keyboard=build_no_photos_keyboard(),
+            photo_file_id=None,
+        )
+
+    return await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id)
+
+
+async def _apply_rating_card(
+    *,
+    bot,
+    chat_id: int,
+    message: Message | None,
+    message_id: int | None,
+    card: RatingCard,
+) -> None:
+    """Аккуратно применяет карточку оценивания к существующему сообщению или отправляет новое при ошибке."""
+    if card.photo_file_id is None:
+        # Текстовая карточка (нет фото)
+        try:
+            if message is not None:
+                if message.photo:
+                    await message.edit_caption(
+                        caption=card.caption,
+                        reply_markup=card.keyboard,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await message.edit_text(
+                        text=card.caption,
+                        reply_markup=card.keyboard,
+                        parse_mode="HTML",
+                    )
+                return
+        except Exception:
+            pass
+
+        if message_id is not None:
+            try:
+                await bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    caption=card.caption,
+                    reply_markup=card.keyboard,
+                    parse_mode="HTML",
+                )
+                return
+            except Exception:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=card.caption,
+                        reply_markup=card.keyboard,
+                        parse_mode="HTML",
+                    )
+                    return
+                except Exception:
+                    pass
+
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=card.caption,
+                reply_markup=card.keyboard,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+        return
+
+    media = InputMediaPhoto(media=card.photo_file_id, caption=card.caption, parse_mode="HTML")
+
+    if message is not None and message.photo:
+        try:
+            await message.edit_media(media=media, reply_markup=card.keyboard)
+            return
+        except Exception:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+    if message_id is not None:
+        try:
+            await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=message_id,
+                media=media,
+                reply_markup=card.keyboard,
+            )
+            return
+        except Exception:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=card.photo_file_id,
+            caption=card.caption,
+            reply_markup=card.keyboard,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=card.caption,
+                reply_markup=card.keyboard,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
 
 def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -406,131 +654,19 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
     """
     if await _deny_if_full_banned(callback=callback):
         return
-    photo = await get_random_photo_for_rating(user_id)
-    message = callback.message
+    card = await _build_next_rating_card(user_id, viewer_tg_id=int(callback.from_user.id))
+    await _apply_rating_card(
+        bot=callback.message.bot,
+        chat_id=callback.message.chat.id,
+        message=callback.message,
+        message_id=callback.message.message_id,
+        card=card,
+    )
 
-    # Проверяем, есть ли у оценивающего пользователя активный премиум
-    is_premium = False
     try:
-        user_for_rate = await get_user_by_id(user_id)
-        if user_for_rate and user_for_rate.get("tg_id"):
-            is_premium = await is_user_premium_active(user_for_rate["tg_id"])
-    except Exception:
-        is_premium = False
-
-    #### Нет фотографий для оценивания
-    if photo is None:
-        kb = build_no_photos_keyboard()
-        text = build_no_photos_text()
-
-        try:
-            if message.photo:
-                # Сообщение с фото — меняем только подпись
-                await message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
-            else:
-                # Обычное текстовое сообщение — меняем текст
-                await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            # Если не получилось отредактировать — удаляем текущее и отправляем новое
-            try:
-                await message.delete()
-            except Exception:
-                pass
-
-            try:
-                await message.bot.send_message(
-                    chat_id=message.chat.id,
-                    text=text,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-
         await callback.answer()
-        return
-
-    #### Фотография найдена
-    # Проверяем, есть ли у автора главная ачивка «Бета-тестер бота»
-    try:
-        has_beta_award = False
-        author_user_id = photo.get("user_id")
-        if author_user_id:
-            awards = await get_awards_for_user(author_user_id)
-            for award in awards:
-                code = (award.get("code") or "").strip()
-                title = (award.get("title") or "").strip().lower()
-                if code == "beta_tester" or "бета-тестер бота" in title or "бета тестер бота" in title:
-                    has_beta_award = True
-                    break
-        photo["has_beta_award"] = has_beta_award
-    except Exception:
-        # Если что-то пошло не так при загрузке наград — просто не показываем ачивку
-        photo["has_beta_award"] = False
-
-        # --- подтягиваем данные автора для оценивания (ссылка + активный премиум) ---
-    try:
-        author_user = await get_user_by_id(int(photo["user_id"]))
-        if author_user:
-            # Link for caption
-            if not photo.get("user_tg_channel_link"):
-                photo["user_tg_channel_link"] = author_user.get("tg_channel_link")
-
-            # IMPORTANT: caption shows link only if author has ACTIVE premium
-            try:
-                tg_id = author_user.get("tg_id")
-                if tg_id:
-                    photo["user_is_premium"] = await is_user_premium_active(int(tg_id))
-                else:
-                    photo["user_is_premium"] = bool(author_user.get("is_premium"))
-            except Exception:
-                photo["user_is_premium"] = bool(author_user.get("is_premium"))
     except Exception:
         pass
-
-    caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=False)
-    kb = build_rate_keyboard(photo["id"], is_premium=is_premium, show_details=False)
-    if message.photo:
-        try:
-            await message.edit_media(
-                media=InputMediaPhoto(media=photo["file_id"], caption=caption, parse_mode="HTML"),
-                reply_markup=kb,
-            )
-        except Exception:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            try:
-                await message.bot.send_photo(
-                    chat_id=message.chat.id,
-                    photo=photo["file_id"],
-                    caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
-    else:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        try:
-            await message.bot.send_photo(
-                chat_id=message.chat.id,
-                photo=photo["file_id"],
-                caption=caption,
-                reply_markup=kb,
-                parse_mode="HTML",
-                disable_notification=True,
-            )
-        except Exception:
-            pass
-
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("rate:comment:"))
@@ -680,21 +816,25 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
-    reasons = get_report_reasons()
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text=REPORT_REASON_LABELS[reason],
-                callback_data=f"rate:report_reason:{reason}:{photo_id}",
-            )
-        ]
-        for reason in reasons
-    ]
-    buttons.append(
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:rate")]
-    )
+    limit_status = await _get_report_rate_limit_status(int(user["id"]))
+    if limit_status is not None and not limit_status.allowed:
+        wait_text = _format_report_cooldown(limit_status.retry_after_seconds)
+        await callback.answer(
+            f"🚫 Лимит жалоб исчерпан.\nСледующую жалобу можно отправить через {wait_text}.",
+            show_alert=True,
+        )
+        return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    reasons = get_report_reasons()
+    builder = InlineKeyboardBuilder()
+    for reason in reasons:
+        builder.button(
+            text=REPORT_REASON_LABELS[reason],
+            callback_data=f"rate:report_reason:{reason}:{photo_id}",
+        )
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:rate"))
+    kb = builder.as_markup()
 
     await callback.message.edit_caption(
         caption=(
@@ -1021,6 +1161,56 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
+    limit_status = await _get_report_rate_limit_status(int(user["id"]))
+    if limit_status is not None and not limit_status.allowed:
+        wait_text = _format_report_cooldown(limit_status.retry_after_seconds)
+        prefix = (
+            "🚫 Лимит жалоб исчерпан.\n"
+            f"Следующую жалобу можно отправить через {wait_text}."
+        )
+
+        card = await _build_rating_card_for_photo(
+            int(photo_id),
+            int(user["id"]),
+            int(message.from_user.id),
+            prefix=prefix,
+        )
+
+        if card is not None:
+            await _apply_rating_card(
+                bot=message.bot,
+                chat_id=report_chat_id,
+                message=None,
+                message_id=report_msg_id,
+                card=card,
+            )
+        else:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:rate")]]
+            )
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=report_chat_id,
+                    message_id=report_msg_id,
+                    text=prefix,
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                try:
+                    await message.bot.send_message(
+                        chat_id=report_chat_id,
+                        text=prefix,
+                        reply_markup=kb,
+                        parse_mode="HTML",
+                        disable_notification=True,
+                    )
+                except Exception:
+                    pass
+
+        await state.clear()
+        return
+
     reason_code = report_reason
 
     # Create report + compute stats safely. If anything fails, show an error to the user instead of silence.
@@ -1160,44 +1350,15 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 except Exception:
                     pass
     
-    photo = await get_photo_by_id(photo_id)
-    if photo is not None:
-        caption = await build_rate_caption(photo, viewer_tg_id=int(message.from_user.id), show_details=False)
-
-        is_premium = False
-        try:
-            user_for_rate = await get_user_by_tg_id(message.from_user.id)
-            if user_for_rate and user_for_rate.get("tg_id"):
-                is_premium = await is_user_premium_active(user_for_rate["tg_id"])
-        except Exception:
-            is_premium = False
-
-        kb = build_rate_keyboard(photo_id, is_premium=is_premium, show_details=False)
-        try:
-            await message.bot.edit_message_caption(
-                chat_id=report_chat_id,
-                message_id=report_msg_id,
-                caption=caption,
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-        except Exception:
-            try:
-                await message.bot.delete_message(chat_id=report_chat_id, message_id=report_msg_id)
-            except Exception:
-                pass
-
-            try:
-                await message.bot.send_photo(
-                    chat_id=report_chat_id,
-                    photo=photo["file_id"],
-                    caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                    disable_notification=True,
-                )
-            except Exception:
-                pass
+    card = await _build_next_rating_card(int(user["id"]), viewer_tg_id=int(message.from_user.id))
+    card.caption = f"✅ Жалоба отправлена!\n\n{card.caption}"
+    await _apply_rating_card(
+        bot=message.bot,
+        chat_id=report_chat_id,
+        message=None,
+        message_id=report_msg_id,
+        card=card,
+    )
 
     await state.clear()
     return

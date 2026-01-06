@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Literal, Sequence
 
+from utils.time import get_moscow_now
+
 
 # ---- Причины жалоб ----
 
@@ -44,14 +46,14 @@ ReportReason = Literal[
 ]
 
 REPORT_REASON_LABELS: Final[dict[ReportReason, str]] = {
-    "selfie": "🤳 Селфи / портрет автора",
-    "porn": "🔞 Порнография / 18+ контент",
-    "stolen": "🖼️ Чужая фотография / ворованный контент",
+    "selfie": "🤳 Селфи / Портрет автора",
+    "porn": "🔞 18+ контент",
+    "stolen": "🖼️ Украденная фотография",
     "propaganda": "📢 Пропаганда",
-    "violence": "💣 Сцены насилия",
+    "violence": "💣 Непреемлемый контент",
     "hate": "🔥 Разжигание ненависти",
-    "illegal_ads": "🚫 Незаконная реклама / запрещённые товары и услуги",
-    "other": "📝 Другое (опишите в тексте)",
+    "illegal_ads": "🚫 Реклама",
+    "other": "📝 Другое",
 }
 
 
@@ -74,6 +76,12 @@ REPORT_THRESHOLD: Final[int] = 1
 # Порог количества активных жалоб, после которого фото считается требующим модерации
 # и должно быть скрыто из выдачи для обычных пользователей.
 # Отправка уведомлений и показ в интерфейсе модератору реализуются в хендлерах, а не здесь.
+
+# ---- Ограничение частоты жалоб ----
+
+REPORT_RATE_LIMIT_MAX: Final[int] = 2
+REPORT_RATE_LIMIT_WINDOW_MINUTES: Final[int] = 20
+REPORT_RATE_LIMIT_WINDOW: Final[timedelta] = timedelta(minutes=REPORT_RATE_LIMIT_WINDOW_MINUTES)
 
 
 @dataclass(slots=True)
@@ -107,6 +115,62 @@ def decide_after_new_report(stats: ReportStats) -> ModerationDecision:
     )
 
 
+@dataclass(slots=True)
+class ReportRateLimitStatus:
+    """Результат проверки лимита жалоб."""
+    allowed: bool
+    retry_after_seconds: int
+    remaining_quota: int
+
+
+def evaluate_report_rate_limit(
+    reports_created_at: Sequence[datetime | str],
+    now: datetime | None = None,
+) -> ReportRateLimitStatus:
+    """
+    Проверяет, можно ли отправить жалобу с учётом лимита REPORT_RATE_LIMIT_MAX за REPORT_RATE_LIMIT_WINDOW.
+
+    reports_created_at — список меток времени (datetime или ISO-строка) последних жалоб пользователя.
+    Возвращает статус: можно/нельзя, сколько осталось до разблокировки, сколько жалоб осталось в окне.
+    """
+    if now is None:
+        now = get_moscow_now()
+
+    window_start = now - REPORT_RATE_LIMIT_WINDOW
+
+    parsed: list[datetime] = []
+    for raw in reports_created_at:
+        try:
+            if isinstance(raw, datetime):
+                dt = raw
+            else:
+                dt = datetime.fromisoformat(str(raw))
+        except Exception:
+            continue
+        parsed.append(dt)
+
+    recent = [dt for dt in parsed if dt >= window_start]
+    recent.sort(reverse=True)
+
+    if len(recent) < REPORT_RATE_LIMIT_MAX:
+        return ReportRateLimitStatus(
+            allowed=True,
+            retry_after_seconds=0,
+            remaining_quota=REPORT_RATE_LIMIT_MAX - len(recent),
+        )
+
+    boundary = recent[REPORT_RATE_LIMIT_MAX - 1]
+    retry_after = int((boundary + REPORT_RATE_LIMIT_WINDOW - now).total_seconds())
+    if retry_after < 0:
+        retry_after = 0
+
+    return ReportRateLimitStatus(
+        allowed=False,
+        retry_after_seconds=retry_after,
+        remaining_quota=0,
+    )
+
+
 # ---- Баны на загрузку новых работ ----
 
 @dataclass(slots=True)
@@ -134,6 +198,11 @@ __all__ = [
     "ReportStats",
     "ModerationDecision",
     "decide_after_new_report",
+    "REPORT_RATE_LIMIT_MAX",
+    "REPORT_RATE_LIMIT_WINDOW",
+    "REPORT_RATE_LIMIT_WINDOW_MINUTES",
+    "ReportRateLimitStatus",
+    "evaluate_report_rate_limit",
     "UploadBan",
     "get_one_day_ban_until",
 ]
