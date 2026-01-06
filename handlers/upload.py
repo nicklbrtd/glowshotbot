@@ -54,6 +54,14 @@ router = Router()
 # Results v2 helpers (daily only)
 # =====================
 
+def _shorten_alert(text: str, limit: int = 180) -> str:
+    """Safely shrink text for callback alerts (Telegram limits ~200 chars)."""
+    if len(text) <= limit:
+        return text
+    suffix = "…"
+    return text[: max(0, limit - len(suffix))].rstrip() + suffix
+
+
 async def _get_daily_top_photos_v2(day_key: str, limit: int = 10) -> list[dict]:
     """Read daily top photos from results_v2 cache and return full photo dicts."""
     try:
@@ -475,10 +483,11 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
             lines.append(f"Причина: {blocked_reason}")
 
         text = "\n".join(lines)
+        alert_text = _shorten_alert(text)
 
         if isinstance(callback, CallbackQuery):
             # Делаем алерт, чтобы не плодить новые сообщения в чате.
-            await callback.answer(text, show_alert=True)
+            await callback.answer(alert_text, show_alert=True)
         else:
             # Для обычного Message просто отвечаем одним сообщением.
             await callback.answer(text)
