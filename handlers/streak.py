@@ -79,7 +79,6 @@ def render_streak_text_from_dict(d: dict, lang: str) -> str:
     best = int(d.get("best_streak") or 0)
     freeze = int(d.get("freeze_tokens") or 0)
     last = d.get("last_completed_day") or "—"
-
     goal_done = bool(d.get("goal_done_today"))
 
     rated_today = int(d.get("rated_today") or 0)

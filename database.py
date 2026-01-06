@@ -198,6 +198,13 @@ _STREAK_REWARD_THRESHOLD = 111
 _STREAK_REWARD_PREMIUM_DAYS = 11
 
 
+def _row_val(row, key: str, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
 def _streak_target_day_key(now_dt: datetime) -> str:
     """During grace window after midnight attribute actions to yesterday."""
     try:
@@ -255,19 +262,19 @@ async def streak_get_status_by_tg_id(tg_id: int) -> dict:
     return {
         "tg_id": int(tg_id),
         "today_key": str(today_key),
-        "streak": int(u["streak"] or 0) if u else 0,
-        "best_streak": int(u["best_streak"] or 0) if u else 0,
-        "freeze_tokens": int(u["freeze_tokens"] or 0) if u else 0,
-        "last_completed_day": str(u["last_completed_day"]) if u and u["last_completed_day"] else None,
-        "notify_enabled": bool(int(u["notify_enabled"] or 0)) if u else True,
-        "notify_hour": int(u["notify_hour"] or 21) if u else 21,
-        "notify_minute": int(u["notify_minute"] or 0) if u else 0,
-        "visible": bool(int(u["visible"] or 1)) if u else True,
-        "reward_111_given": bool(int(u["reward_111_given"] or 0)) if u else False,
-        "rated_today": int(d["rated_count"] or 0) if d else 0,
-        "commented_today": int(d["comment_count"] or 0) if d else 0,
-        "uploaded_today": int(d["upload_count"] or 0) if d else 0,
-        "goal_done_today": bool(int(d["goal_done"] or 0)) if d else False,
+        "streak": int(_row_val(u, "streak", 0) or 0) if u else 0,
+        "best_streak": int(_row_val(u, "best_streak", 0) or 0) if u else 0,
+        "freeze_tokens": int(_row_val(u, "freeze_tokens", 0) or 0) if u else 0,
+        "last_completed_day": str(_row_val(u, "last_completed_day")) if u and _row_val(u, "last_completed_day") else None,
+        "notify_enabled": bool(int(_row_val(u, "notify_enabled", 1) or 0)) if u else True,
+        "notify_hour": int(_row_val(u, "notify_hour", 21) or 21) if u else 21,
+        "notify_minute": int(_row_val(u, "notify_minute", 0) or 0) if u else 0,
+        "visible": bool(int(_row_val(u, "visible", 1) or 1)) if u else True,
+        "reward_111_given": bool(int(_row_val(u, "reward_111_given", 0) or 0)) if u else False,
+        "rated_today": int(_row_val(d, "rated_count", 0) or 0) if d else 0,
+        "commented_today": int(_row_val(d, "comment_count", 0) or 0) if d else 0,
+        "uploaded_today": int(_row_val(d, "upload_count", 0) or 0) if d else 0,
+        "goal_done_today": bool(int(_row_val(d, "goal_done", 0) or 0)) if d else False,
     }
 
 
@@ -417,10 +424,10 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
 
         if (not goal_before) and goal_after:
             u = await conn.fetchrow("SELECT * FROM user_streak WHERE tg_id=$1", int(tg_id))
-            streak = int(u["streak"] or 0) if u else 0
-            best = int(u["best_streak"] or 0) if u else 0
-            last_completed = str(u["last_completed_day"]) if u and u["last_completed_day"] else None
-            reward_flag = bool(int(u["reward_111_given"] or 0)) if u else False
+            streak = int(_row_val(u, "streak", 0) or 0) if u else 0
+            best = int(_row_val(u, "best_streak", 0) or 0) if u else 0
+            last_completed = str(_row_val(u, "last_completed_day")) if u and _row_val(u, "last_completed_day") else None
+            reward_flag = bool(int(_row_val(u, "reward_111_given", 0) or 0)) if u else False
 
             if last_completed != str(day_key):
                 if last_completed is None:
@@ -458,10 +465,10 @@ async def streak_record_action_by_tg_id(tg_id: int, action: str) -> dict:
         "uploaded": int(upl),
         "goal_done_now": bool(goal_after),
         "streak_changed": bool(streak_changed),
-        "streak": int(u2["streak"] or 0) if u2 else 0,
-        "best": int(u2["best_streak"] or 0) if u2 else 0,
-        "freeze": int(u2["freeze_tokens"] or 0) if u2 else 0,
-        "visible": bool(int(u2["visible"] or 1)) if u2 else True,
+        "streak": int(_row_val(u2, "streak", 0) or 0) if u2 else 0,
+        "best": int(_row_val(u2, "best_streak", 0) or 0) if u2 else 0,
+        "freeze": int(_row_val(u2, "freeze_tokens", 0) or 0) if u2 else 0,
+        "visible": bool(int(_row_val(u2, "visible", 1) or 1)) if u2 else True,
     }
 
 
@@ -504,10 +511,10 @@ async def streak_use_freeze_today(tg_id: int) -> dict:
             "SELECT streak, best_streak, freeze_tokens, last_completed_day, reward_111_given FROM user_streak WHERE tg_id=$1",
             int(tg_id),
         )
-        freeze_tokens = int(u["freeze_tokens"] or 0) if u else 0
-        best_before = int(u["best_streak"] or 0) if u else 0
-        last_completed = (u["last_completed_day"] or "").strip() if u else ""
-        streak_before = int(u["streak"] or 0) if u else 0
+        freeze_tokens = int(_row_val(u, "freeze_tokens", 0) or 0) if u else 0
+        best_before = int(_row_val(u, "best_streak", 0) or 0) if u else 0
+        last_completed = (str(_row_val(u, "last_completed_day", "")) or "").strip() if u else ""
+        streak_before = int(_row_val(u, "streak", 0) or 0) if u else 0
 
         # Ensure daily row
         await conn.execute(
@@ -600,10 +607,10 @@ async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
         if not row:
             return await streak_get_status_by_tg_id(int(tg_id))
 
-        last_completed = (row["last_completed_day"] or "").strip()
-        cur_streak = int(row["streak"] or 0)
-        freeze = int(row["freeze_tokens"] or 0)
-        best_before = int(row["best_streak"] or 0)
+        last_completed = (str(_row_val(row, "last_completed_day", "")) or "").strip()
+        cur_streak = int(_row_val(row, "streak", 0) or 0)
+        freeze = int(_row_val(row, "freeze_tokens", 0) or 0)
+        best_before = int(_row_val(row, "best_streak", 0) or 0)
 
         # Already completed today -> nothing to rollover
         if last_completed == today:
