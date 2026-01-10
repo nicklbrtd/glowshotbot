@@ -1067,6 +1067,17 @@ async def ensure_schema() -> None:
 
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS viewonly_views (
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (user_id, photo_id)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS activity_events (
               id BIGSERIAL PRIMARY KEY,
               user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
@@ -3005,7 +3016,7 @@ async def get_photo_author_tg_id(photo_id: int) -> int | None:
 
 # -------------------- rating flow --------------------
 
-async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
+async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | None:
     p = _assert_pool()
     async with p.acquire() as conn:
         row = await conn.fetchrow(
@@ -3028,6 +3039,85 @@ async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
             int(viewer_user_id)
         )
     return dict(row) if row else None
+
+
+async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT p.*,
+                   u.is_premium AS user_is_premium,
+                   u.premium_until AS user_premium_until,
+                   u.tg_channel_link AS user_tg_channel_link,
+                   u.tg_channel_link AS tg_channel_link
+            FROM photos p
+            JOIN users u ON u.id=p.user_id
+            WHERE p.is_deleted=0
+              AND p.moderation_status IN ('active')
+              AND COALESCE(p.ratings_enabled, 1)=0
+              AND p.user_id <> $1
+              AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM viewonly_views v
+                  WHERE v.photo_id=p.id AND v.user_id=$1
+              )
+            ORDER BY random()
+            LIMIT 1
+            """,
+            int(viewer_user_id)
+        )
+    return dict(row) if row else None
+
+
+async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
+    """
+    Возвращает либо обычное фото для оценивания, либо «передышку» (ratings_enabled=0).
+    Вероятность передышки ~10–15% на попытку.
+    """
+    prob = random.uniform(0.10, 0.15)
+
+    try_viewonly_first = random.random() < prob
+
+    if try_viewonly_first:
+        vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
+        if vo:
+            return vo
+
+    rated = await get_random_photo_for_rating_rateable(viewer_user_id)
+    if rated:
+        return rated
+
+    # Если обычных нет — попробуем передышку вне зависимости от вероятности
+    return await get_random_photo_for_rating_viewonly(viewer_user_id)
+
+
+async def mark_viewonly_seen(user_id: int, photo_id: int) -> None:
+    """Пометить фото-передышку как просмотренное, чтобы не показывать повторно."""
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO viewonly_views (user_id, photo_id, created_at)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (user_id, photo_id) DO NOTHING
+            """,
+            int(user_id),
+            int(photo_id),
+            now,
+        )
+
+
+async def has_viewonly_seen(user_id: int, photo_id: int) -> bool:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT 1 FROM viewonly_views WHERE user_id=$1 AND photo_id=$2",
+            int(user_id),
+            int(photo_id),
+        )
+    return bool(v)
 
 
 async def add_rating(user_id: int, photo_id: int, value: int) -> None:

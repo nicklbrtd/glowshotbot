@@ -47,6 +47,7 @@ from database import (
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
     get_user_reports_since,
+    mark_viewonly_seen,
 )
 from html import escape
 from config import MODERATION_CHAT_ID
@@ -305,7 +306,12 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
     except Exception:
         is_premium_rater = False
 
-    kb = build_rate_keyboard(int(photo["id"]), is_premium=is_premium_rater, show_details=False)
+    is_rateable = bool(photo.get("ratings_enabled", True))
+    if not is_rateable:
+        caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
+        kb = build_view_only_keyboard(int(photo["id"]))
+    else:
+        kb = build_rate_keyboard(int(photo["id"]), is_premium=is_premium_rater, show_details=False)
     file_id = photo.get("file_id")
     file_id_str = str(file_id) if file_id is not None else None
 
@@ -491,6 +497,15 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: b
     return kb.as_markup()
 
 
+def build_view_only_keyboard(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="➡️ Дальше", callback_data=f"rate:skip:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def build_comment_notification_keyboard() -> InlineKeyboardMarkup:
     """
     Клавиатура для уведомления об отзыве:
@@ -612,9 +627,9 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     if bool(photo.get("has_beta_award")):
         lines.append("••• 🏆 <b>Бета-тестер бота</b> •••")
 
-    # link line (если имеется)
+    # link line (если имеется) — только для премиум-автора
     raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
-    if raw_link:
+    if is_author_premium and raw_link:
         display = raw_link
         if raw_link.startswith("https://t.me/") or raw_link.startswith("http://t.me/"):
             username = raw_link.split("t.me/", 1)[1].strip("/").strip()
@@ -1806,6 +1821,13 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
+    photo = await get_photo_by_id(photo_id)
+    is_rateable = bool((photo or {}).get("ratings_enabled", True))
+    if not photo or photo.get("is_deleted"):
+        await callback.answer("Фото не найдено.", show_alert=True)
+        await show_next_photo_for_rating(callback, user["id"])
+        return
+
     tg_id = user.get("tg_id")
     is_premium = False
     if tg_id:
@@ -1813,6 +1835,19 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
             is_premium = await is_user_premium_active(tg_id)
         except Exception:
             is_premium = False
+
+    if not is_rateable:
+        await state.clear()
+        try:
+            await mark_viewonly_seen(int(user["id"]), photo_id)
+        except Exception:
+            pass
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        await show_next_photo_for_rating(callback, user["id"])
+        return
 
     # Если пользователь без премиума — ограничиваем 3 пропуска в день
     if not is_premium and tg_id:
