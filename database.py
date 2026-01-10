@@ -3988,9 +3988,20 @@ async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[i
     async with p.acquire() as conn:
         total = await conn.fetchval(
             """
-            SELECT COUNT(DISTINCT user_id)
-            FROM activity_events
-            WHERE user_id IS NOT NULL AND created_at >= $1
+            SELECT COUNT(*) FROM (
+              SELECT u.id
+              FROM users u
+              LEFT JOIN LATERAL (
+                SELECT 1 FROM activity_events ae
+                WHERE ae.user_id = u.id AND ae.created_at >= $1
+                LIMIT 1
+              ) ae ON TRUE
+              WHERE u.is_deleted=0
+                AND (
+                  ae IS NOT NULL
+                  OR COALESCE(u.updated_at, u.created_at) >= $1
+                )
+            ) t
             """,
             since_iso,
         )
@@ -3998,13 +4009,17 @@ async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[i
             """
             SELECT u.*
             FROM users u
-            JOIN (
-              SELECT DISTINCT user_id
-              FROM activity_events
-              WHERE user_id IS NOT NULL AND created_at >= $1
-            ) a ON a.user_id = u.id
+            LEFT JOIN LATERAL (
+              SELECT 1 FROM activity_events ae
+              WHERE ae.user_id = u.id AND ae.created_at >= $1
+              LIMIT 1
+            ) ae ON TRUE
             WHERE u.is_deleted=0
-            ORDER BY u.updated_at DESC NULLS LAST, u.created_at DESC, u.id DESC
+              AND (
+                ae IS NOT NULL
+                OR COALESCE(u.updated_at, u.created_at) >= $1
+              )
+            ORDER BY COALESCE(u.updated_at, u.created_at) DESC, u.id DESC
             OFFSET $2 LIMIT $3
             """,
             since_iso,
@@ -4027,9 +4042,20 @@ async def get_online_users_recent(window_minutes: int = 5, limit: int = 20, offs
     async with p.acquire() as conn:
         total = await conn.fetchval(
             """
-            SELECT COUNT(DISTINCT user_id)
-            FROM activity_events
-            WHERE user_id IS NOT NULL AND created_at >= $1
+            SELECT COUNT(*) FROM (
+              SELECT u.id
+              FROM users u
+              LEFT JOIN LATERAL (
+                SELECT 1 FROM activity_events ae
+                WHERE ae.user_id = u.id AND ae.created_at >= $1
+                LIMIT 1
+              ) ae ON TRUE
+              WHERE u.is_deleted=0
+                AND (
+                  ae IS NOT NULL
+                  OR COALESCE(u.updated_at, u.created_at) >= $1
+                )
+            ) t
             """,
             since_iso,
         )
@@ -4037,13 +4063,17 @@ async def get_online_users_recent(window_minutes: int = 5, limit: int = 20, offs
             """
             SELECT u.*
             FROM users u
-            JOIN (
-              SELECT DISTINCT user_id
-              FROM activity_events
-              WHERE user_id IS NOT NULL AND created_at >= $1
-            ) a ON a.user_id = u.id
+            LEFT JOIN LATERAL (
+              SELECT 1 FROM activity_events ae
+              WHERE ae.user_id = u.id AND ae.created_at >= $1
+              LIMIT 1
+            ) ae ON TRUE
             WHERE u.is_deleted=0
-            ORDER BY u.updated_at DESC NULLS LAST, u.created_at DESC, u.id DESC
+              AND (
+                ae IS NOT NULL
+                OR COALESCE(u.updated_at, u.created_at) >= $1
+              )
+            ORDER BY COALESCE(u.updated_at, u.created_at) DESC, u.id DESC
             OFFSET $2 LIMIT $3
             """,
             since_iso,
