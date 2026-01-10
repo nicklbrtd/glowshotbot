@@ -21,6 +21,7 @@ from database import (
     is_user_premium_active,
     get_user_by_tg_id,
     ensure_user_minimal_row,
+    get_user_premium_status,
 )
 
 # tickets[(user_id, ticket_id)] = информация о тикете (сообщение в чате поддержки и текст пользователя)
@@ -101,22 +102,27 @@ async def main():
                 await ensure_user_minimal_row(int(tg_id))
                 user = await get_user_by_tg_id(int(tg_id))
 
-            active = await is_user_premium_active(int(tg_id))
-            if active:
-                until = user.get("premium_until")
-                if until:
-                    return f"💎 Премиум: активен (до {until})"
-                return "💎 Премиум: активен"
+            status = await get_user_premium_status(int(tg_id))
+            is_flag = bool(status.get("is_premium"))
+            until_raw = status.get("premium_until")
 
-            # не активен: если флаг есть, но закончился — показываем истёк
-            had = bool(user and user.get("is_premium"))
-            if had and user and user.get("premium_until"):
-                return f"💤 Премиум: истёк ({user.get('premium_until')})"
-            if had:
-                return "💤 Премиум: нет (истёк)"
+            active = False
+            if is_flag:
+                if until_raw:
+                    try:
+                        active = datetime.fromisoformat(str(until_raw)) > datetime.now()
+                    except Exception:
+                        active = True
+                else:
+                    active = True
+
+            if active:
+                return f"💎 Премиум: активен{f' (до {until_raw})' if until_raw else ''}"
+            if is_flag:
+                return f"💤 Премиум: истёк{f' ({until_raw})' if until_raw else ''}"
             return "💤 Премиум: нет"
         except Exception:
-            return "💤 Премиум: неизвестно"
+            return "💤 Премиум: нет"
 
     @dp.message(CommandStart())
     async def start_menu(message: Message):
