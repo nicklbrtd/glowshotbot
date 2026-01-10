@@ -225,7 +225,7 @@ async def build_profile_view(user: dict):
             days = max(1, delta.days + 1)
             days_in_bot = str(days)
         except Exception:
-        days_in_bot = "—"
+            days_in_bot = "—"
 
     author_code = "—"
     tg_id = user.get("tg_id")
