@@ -56,7 +56,7 @@ def apply_text_watermark(image_bytes: bytes, text: str) -> bytes:
     - Масштабирует до max 1920px по длинной стороне.
     - Текст: bottom-right, с отступом ~3% от размера.
     - Размер шрифта: ~2% ширины (ограничение min/max) для максимально деликатного вида.
-    Возвращает байты JPEG с качеством ~92.
+    Возвращает байты JPEG с качеством 96 и subsampling=0.
     """
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
 
@@ -103,5 +103,5 @@ def apply_text_watermark(image_bytes: bytes, text: str) -> bytes:
 
     stamped = Image.alpha_composite(img, overlay).convert("RGB")
     out = io.BytesIO()
-    stamped.save(out, format="JPEG", quality=92, optimize=True)
+    stamped.save(out, format="JPEG", quality=96, subsampling=0, optimize=True)
     return out.getvalue()

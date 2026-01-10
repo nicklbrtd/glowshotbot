@@ -1,4 +1,5 @@
 import io
+from PIL import Image
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import datetime, timedelta
 from asyncpg.exceptions import UniqueViolationError
@@ -234,6 +235,21 @@ def _photo_ratings_enabled(photo: dict) -> bool:
 
 def _photo_public_id(photo: dict) -> str:
     return str(photo.get("file_id_public") or photo.get("file_id"))
+
+
+def _is_photo_quality_ok(image_bytes: bytes) -> tuple[bool, str | None]:
+    """Проверяем базовое качество: разрешение не меньше 1200x800 (любая ориентация)."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            w, h = img.size
+    except Exception:
+        return False, "Не удалось прочитать изображение."
+
+    min_side = min(w, h)
+    max_side = max(w, h)
+    if min_side < 800 or max_side < 1200:
+        return False, f"Слишком низкое разрешение ({w}×{h}). Минимум: 1200×800."
+    return True, None
 
 
 def build_my_photo_caption(photo: dict) -> str:
@@ -2255,7 +2271,18 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         tg_file = await bot.get_file(file_id)
         buff = io.BytesIO()
         await bot.download_file(tg_file.file_path, destination=buff)
-        wm_bytes = apply_text_watermark(buff.getvalue(), f"GlowShot • {author_code}")
+        img_bytes = buff.getvalue()
+        ok_quality, quality_msg = _is_photo_quality_ok(img_bytes)
+        if not ok_quality:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Фотография отклонена:\n{quality_msg}\n\nЗагрузи файл с более высоким качеством.",
+                disable_notification=True,
+            )
+            await state.clear()
+            return
+
+        wm_bytes = apply_text_watermark(img_bytes, f"GlowShot • {author_code}")
     except Exception as e:
         await bot.send_message(
             chat_id=chat_id,
