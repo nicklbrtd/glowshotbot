@@ -2271,6 +2271,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     # Отправляем ватермаркнутую версию, чтобы получить публичный file_id
     wm_stream = io.BytesIO(wm_bytes)
     wm_stream.name = "glowshot_wm.jpg"
+    wm_stream.seek(0)
     try:
         sent_draft = await bot.send_photo(
             chat_id=chat_id,
