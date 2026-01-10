@@ -499,10 +499,11 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: b
 
 def build_view_only_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="➡️ Дальше", callback_data=f"rate:skip:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"),
+        InlineKeyboardButton(text="➡️ Дальше", callback_data=f"rate:skip:{photo_id}"),
+    )
     kb.row(InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"))
-    kb.adjust(1)
     return kb.as_markup()
 
 
