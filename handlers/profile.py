@@ -39,6 +39,7 @@ from database import (
     toggle_user_allow_ratings_by_tg_id,
     set_user_language_by_tg_id,
     get_user_block_status_by_tg_id,
+    ensure_user_author_code,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -224,7 +225,15 @@ async def build_profile_view(user: dict):
             days = max(1, delta.days + 1)
             days_in_bot = str(days)
         except Exception:
-            days_in_bot = "—"
+        days_in_bot = "—"
+
+    author_code = "—"
+    tg_id = user.get("tg_id")
+    if tg_id:
+        try:
+            author_code = await ensure_user_author_code(int(tg_id))
+        except Exception:
+            author_code = "—"
 
     # Реальная статистика по фото
     total_photos = "—"
@@ -234,7 +243,6 @@ async def build_profile_view(user: dict):
     rated_by_me_text = "—"
 
     user_id = user.get("id")
-    tg_id = user.get("tg_id")
     safe_user_id_int = None
     safe_tg_id_int = None
     try:
@@ -507,6 +515,7 @@ async def build_profile_view(user: dict):
         t("profile.name_age", lang, name=name, age=age) if age else t("profile.name", lang, name=name),
         t("profile.rank", lang, rank=(rank_label or format_rank(0, lang=lang))),
         t("profile.gender_line", lang, gender=gender_icon),
+        f"🧾 Код автора: <code>{html.escape(str(author_code), quote=False)}</code>",
     ]
 
     # Локация (опционально + можно скрыть)

@@ -64,6 +64,11 @@ def _fmt_pub_date(day_key: str | None) -> str:
     except Exception:
         return s
 
+
+def _photo_public_id(photo: dict) -> str | None:
+    pid = photo.get("file_id_public") or photo.get("file_id")
+    return str(pid) if pid is not None else None
+
 def build_mod_report_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🗑 Удалить", callback_data=f"mod:report_delete:{photo_id}")
@@ -312,8 +317,7 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
         kb = build_view_only_keyboard(int(photo["id"]))
     else:
         kb = build_rate_keyboard(int(photo["id"]), is_premium=is_premium_rater, show_details=False)
-    file_id = photo.get("file_id")
-    file_id_str = str(file_id) if file_id is not None else None
+    file_id_str = _photo_public_id(photo)
 
     return RatingCard(
         photo=photo,

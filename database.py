@@ -6,8 +6,10 @@ import time
 from datetime import datetime, timedelta
 
 import asyncpg
+from asyncpg.exceptions import UniqueViolationError
 
 from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
+from utils.watermark import generate_author_code
 
 import traceback
 
@@ -884,6 +886,7 @@ async def ensure_schema() -> None:
               show_city INTEGER NOT NULL DEFAULT 1,
               show_country INTEGER NOT NULL DEFAULT 1,
               allow_ratings INTEGER NOT NULL DEFAULT 1,
+              author_code TEXT,
 
               is_admin INTEGER NOT NULL DEFAULT 0,
               is_moderator INTEGER NOT NULL DEFAULT 0,
@@ -912,6 +915,8 @@ async def ensure_schema() -> None:
               id BIGSERIAL PRIMARY KEY,
               user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               file_id TEXT NOT NULL,
+              file_id_original TEXT,
+              file_id_public TEXT,
               title TEXT,
               description TEXT,
               category TEXT DEFAULT 'photo',
@@ -1225,7 +1230,13 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS visible INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS reward_111_given INTEGER NOT NULL DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_ratings INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS author_code TEXT;")
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS users_author_code_uniq ON users(author_code) WHERE author_code IS NOT NULL;"
+        )
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS ratings_enabled INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_original TEXT;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_public TEXT;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -1590,6 +1601,60 @@ async def get_user_language_by_tg_id(tg_id: int) -> str:
     lang = (u.get("language") if u else None) or "ru"
     lang = str(lang).strip().lower()
     return lang if lang in {"ru", "en"} else "ru"
+
+
+async def ensure_user_author_code_by_user_id(user_id: int, *, salt: str | None = None) -> str:
+    """
+    Гарантирует наличие author_code у пользователя (по внутреннему id).
+    Если кода нет — генерирует детерминированно и сохраняет.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow("SELECT id, author_code FROM users WHERE id=$1", int(user_id))
+        if not row:
+            raise ValueError(f"user not found id={user_id}")
+        code = row.get("author_code")
+        if code:
+            return str(code)
+
+    salt_val = (salt or os.getenv("AUTHOR_CODE_SALT") or "default-author-salt").strip()
+    # Пытаемся несколько раз (на случай коллизии уникального индекса)
+    for attempt in range(5):
+        candidate = generate_author_code(int(user_id), f"{salt_val}:{attempt}")
+        try:
+            async with p.acquire() as conn:
+                res = await conn.execute(
+                    "UPDATE users SET author_code=$2, updated_at=$3 WHERE id=$1",
+                    int(user_id),
+                    candidate,
+                    get_moscow_now_iso(),
+                )
+                if res.startswith("UPDATE ") and not res.endswith(" 0"):
+                    return candidate
+        except UniqueViolationError:
+            continue
+
+    # Если не удалось записать — пробуем последний раз с рандомом
+    rnd_candidate = generate_author_code(int(user_id), f"{salt_val}:{time.time()}:{random.random()}")
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET author_code=$2, updated_at=$3 WHERE id=$1",
+            int(user_id),
+            rnd_candidate,
+            get_moscow_now_iso(),
+        )
+    return rnd_candidate
+
+
+async def ensure_user_author_code(tg_id: int, *, salt: str | None = None) -> str:
+    """
+    Гарантирует наличие author_code по tg_id (создаёт user row при необходимости).
+    """
+    await _ensure_user_row(int(tg_id))
+    user = await get_user_by_tg_id(int(tg_id))
+    if not user:
+        raise ValueError("user not found")
+    return await ensure_user_author_code_by_user_id(int(user["id"]), salt=salt)
 
 
 async def set_user_language_by_tg_id(tg_id: int, lang: str) -> None:
@@ -2745,6 +2810,9 @@ async def get_subscriptions_page(offset: int, limit: int) -> list[dict]:
 async def create_today_photo(
     user_id: int,
     file_id: str,
+    *,
+    file_id_public: str | None = None,
+    file_id_original: str | None = None,
     title: str | None = None,
     description: str | None = None,
     category: str | None = None,
@@ -2780,11 +2848,16 @@ async def create_today_photo(
             except Exception:
                 enabled = True
 
+        public_id = file_id_public or file_id
+        orig_id = file_id_original or file_id
+
         row = await conn.fetchrow(
             """
             INSERT INTO photos (
                 user_id,
                 file_id,
+                file_id_original,
+                file_id_public,
                 title,
                 description,
                 category,
@@ -2796,11 +2869,13 @@ async def create_today_photo(
                 is_deleted,
                 created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,0,$10)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'active',$10,0,$11)
             RETURNING id
             """,
             int(user_id),
-            str(file_id),
+            str(public_id),
+            str(orig_id),
+            str(public_id),
             title,
             description,
             category,

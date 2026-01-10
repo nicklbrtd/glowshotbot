@@ -1,9 +1,10 @@
+import io
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import datetime, timedelta
 from asyncpg.exceptions import UniqueViolationError
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -36,6 +37,7 @@ from database import (
     get_photo_skip_count_for_photo,
     get_comments_for_photo_sorted,
     streak_record_action_by_tg_id,
+    ensure_user_author_code,
 )
 
 from database_results import (
@@ -46,6 +48,7 @@ from database_results import (
 )
 
 from utils.time import get_moscow_now
+from utils.watermark import apply_text_watermark
 
 
 router = Router()
@@ -227,6 +230,10 @@ def _ready_wording(user: dict) -> str:
 
 def _photo_ratings_enabled(photo: dict) -> bool:
     return bool(photo.get("ratings_enabled", True))
+
+
+def _photo_public_id(photo: dict) -> str:
+    return str(photo.get("file_id_public") or photo.get("file_id"))
 
 
 def build_my_photo_caption(photo: dict) -> str:
@@ -646,7 +653,7 @@ async def _show_my_photo_section(
     # 2. Отправляем новое сообщение с фото, подписью и кнопками
     sent_photo = await service_message.bot.send_photo(
         chat_id=chat_id,
-        photo=photo["file_id"],
+        photo=_photo_public_id(photo),
         caption=caption,
         reply_markup=kb,
         disable_notification=True,
@@ -679,7 +686,7 @@ async def _edit_or_replace_my_photo_message(
     try:
         if msg.photo:
             await msg.edit_media(
-                media=InputMediaPhoto(media=photo["file_id"], caption=caption),
+                media=InputMediaPhoto(media=_photo_public_id(photo), caption=caption),
                 reply_markup=kb,
             )
             await _store_photo_message_id(state, msg.message_id, photo_id=photo["id"])
@@ -695,7 +702,7 @@ async def _edit_or_replace_my_photo_message(
 
     sent = await msg.bot.send_photo(
         chat_id=chat_id,
-        photo=photo["file_id"],
+        photo=_photo_public_id(photo),
         caption=caption,
         reply_markup=kb,
         disable_notification=True,
@@ -1729,7 +1736,7 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
             pass
         await callback.message.bot.send_photo(
             chat_id=callback.message.chat.id,
-            photo=photo["file_id"],
+            photo=_photo_public_id(photo),
             caption=caption,
             reply_markup=kb,
             disable_notification=True,
@@ -2029,7 +2036,7 @@ async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
         bot=callback.message.bot,
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
-        file_id=str(photo["file_id"]),
+        file_id=_photo_public_id(photo),
         caption=caption,
         reply_markup=kb,
     )
@@ -2112,7 +2119,7 @@ async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
         bot=callback.message.bot,
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
-        file_id=str(photo["file_id"]),
+        file_id=_photo_public_id(photo),
         caption=caption,
         reply_markup=kb,
     )
@@ -2153,10 +2160,10 @@ async def myphoto_edit_title_text(message: Message, state: FSMContext):
             bot=message.bot,
             chat_id=target_chat_id,
             message_id=target_msg_id,
-            file_id=str(photo["file_id"]),
-            caption=caption,
-            reply_markup=kb,
-        )
+        file_id=_photo_public_id(photo),
+        caption=caption,
+        reply_markup=kb,
+    )
 
 
 
@@ -2194,10 +2201,10 @@ async def myphoto_edit_desc_text(message: Message, state: FSMContext):
             bot=message.bot,
             chat_id=target_chat_id,
             message_id=target_msg_id,
-            file_id=str(photo["file_id"]),
-            caption=caption,
-            reply_markup=kb,
-        )
+        file_id=_photo_public_id(photo),
+        caption=caption,
+        reply_markup=kb,
+    )
 
 
 
@@ -2237,11 +2244,59 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             pass
         return
 
-    # Save photo in DB, handle unique violation
+    chat_id = upload_chat_id or fallback_chat_id
+
+    # Готовим авторский код
+    try:
+        author_code = await ensure_user_author_code(int(event.from_user.id))
+    except Exception:
+        author_code = "GS-UNKNOWN"
+
+    # Скачиваем оригинал и наносим водяной знак
+    try:
+        tg_file = await bot.get_file(file_id)
+        buff = io.BytesIO()
+        await bot.download_file(tg_file.file_path, destination=buff)
+        wm_bytes = apply_text_watermark(buff.getvalue(), f"GlowShot • {author_code}")
+    except Exception as e:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Не удалось обработать фотографию. Попробуй загрузить ещё раз.",
+            disable_notification=True,
+        )
+        print("WATERMARK ERROR:", repr(e))
+        await state.clear()
+        return
+
+    # Отправляем ватермаркнутую версию, чтобы получить публичный file_id
+    wm_stream = io.BytesIO(wm_bytes)
+    wm_stream.name = "glowshot_wm.jpg"
+    try:
+        sent_draft = await bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(wm_stream, filename="glowshot_wm.jpg"),
+            caption="Готовим карточку…",
+            disable_notification=True,
+        )
+    except Exception as e:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Не удалось загрузить обработанную фотографию. Попробуй ещё раз.",
+            disable_notification=True,
+        )
+        print("WATERMARK SEND ERROR:", repr(e))
+        await state.clear()
+        return
+
+    file_id_public = sent_draft.photo[-1].file_id
+
+    # Сохраняем фото в БД, handle unique violation
     try:
         photo_id = await create_today_photo(
             user_id=user_id,
-            file_id=file_id,
+            file_id=file_id_public,
+            file_id_public=file_id_public,
+            file_id_original=file_id,
             title=title,
         )
 
@@ -2255,7 +2310,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
 
     except UniqueViolationError:
         await bot.send_message(
-            chat_id=upload_chat_id or fallback_chat_id,
+            chat_id=chat_id,
             text=(
                 "Ты уже загружал(а) фотографию сегодня.\n\n"
                 "Если хочешь заменить — удали текущую в разделе «Моя фотография» и попробуй снова."
@@ -2263,6 +2318,10 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             disable_notification=True,
         )
         await state.clear()
+        try:
+            await sent_draft.delete()
+        except Exception:
+            pass
         return
 
     # Get photo object from DB
@@ -2277,41 +2336,34 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         await state.clear()
         return
 
-    chat_id = upload_chat_id or fallback_chat_id
-
     # Финальная карточка: стараемся НЕ плодить сообщения.
     caption = await build_my_photo_main_text(photo)
     kb = build_my_photo_keyboard(photo["id"], ratings_enabled=_photo_ratings_enabled(photo))
 
-    # 1) Если у нас есть сообщение мастера (это фото-сообщение от бота) — просто редактируем caption+кнопки.
-    if upload_msg_id and chat_id:
-        try:
-            await bot.edit_message_caption(
-                chat_id=chat_id,
-                message_id=upload_msg_id,
-                caption=caption,
-                reply_markup=kb,
-            )
-            await _store_photo_message_id(state, upload_msg_id, photo_id=photo["id"])
-            await state.clear()
-            return
-        except Exception:
-            pass
-
-    # 2) Фоллбек: удаляем старое сообщение (если есть) и отправляем новое.
-    if upload_msg_id and chat_id:
+    # Удаляем старое служебное сообщение, если осталось
+    if upload_msg_id and chat_id and upload_msg_id != sent_draft.message_id:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=upload_msg_id)
         except Exception:
             pass
 
-    sent_photo = await bot.send_photo(
-        chat_id=chat_id,
-        photo=photo["file_id"],
-        caption=caption,
-        reply_markup=kb,
-        disable_notification=True,
-    )
-    await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
+    # Обновляем отправленную ватермаркнутую карточку
+    try:
+        await bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=sent_draft.message_id,
+            caption=caption,
+            reply_markup=kb,
+        )
+        await _store_photo_message_id(state, sent_draft.message_id, photo_id=photo["id"])
+    except Exception:
+        sent_photo = await bot.send_photo(
+            chat_id=chat_id,
+            photo=_photo_public_id(photo),
+            caption=caption,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+        await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
     await state.clear()
     return
