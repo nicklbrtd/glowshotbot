@@ -2869,7 +2869,7 @@ async def create_today_photo(
                 is_deleted,
                 created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'active',$10,0,$11)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,0,$12)
             RETURNING id
             """,
             int(user_id),

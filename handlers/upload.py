@@ -2266,35 +2266,55 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         await state.clear()
         return
 
-    # Отправляем ватермаркнутую версию, чтобы получить публичный file_id
-    wm_stream = io.BytesIO(wm_bytes)
-    wm_stream.name = "glowshot_wm.jpg"
-    wm_stream.seek(0)
-    try:
-        sent_draft = await bot.send_photo(
-            chat_id=chat_id,
-            photo=BufferedInputFile(wm_stream.read(), filename="glowshot_wm.jpg"),
-            caption="Готовим карточку…",
-            disable_notification=True,
-        )
-    except Exception as e:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="Не удалось загрузить обработанную фотографию. Попробуй ещё раз.",
-            disable_notification=True,
-        )
-        print("WATERMARK SEND ERROR:", repr(e))
-        await state.clear()
-        return
+    # Отправляем ватермаркнутую версию, чтобы получить публичный file_id, стараясь переиспользовать текущее сообщение
+    media = InputMediaPhoto(media=BufferedInputFile(wm_bytes, filename="glowshot_wm.jpg"), caption="Готовим карточку…")
+    sent_msg_id: int | None = None
+    file_id_public: str | None = None
+    if upload_msg_id and chat_id:
+        try:
+            res = await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=upload_msg_id,
+                media=media,
+            )
+            # aiogram возвращает Message при успехе
+            if isinstance(res, Message):
+                file_id_public = res.photo[-1].file_id if res.photo else None
+                sent_msg_id = res.message_id
+            else:
+                sent_msg_id = upload_msg_id
+        except Exception:
+            sent_msg_id = None
 
-    file_id_public = sent_draft.photo[-1].file_id
+    if file_id_public is None:
+        try:
+            sent_draft = await bot.send_photo(
+                chat_id=chat_id,
+                photo=BufferedInputFile(wm_bytes, filename="glowshot_wm.jpg"),
+                caption="Готовим карточку…",
+                disable_notification=True,
+            )
+            file_id_public = sent_draft.photo[-1].file_id
+            sent_msg_id = sent_draft.message_id
+        except Exception as e:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Не удалось загрузить обработанную фотографию. Попробуй ещё раз.",
+                disable_notification=True,
+            )
+            print("WATERMARK SEND ERROR:", repr(e))
+            await state.clear()
+            return
+
+    if not sent_msg_id:
+        sent_msg_id = upload_msg_id or 0
 
     # Сохраняем фото в БД, handle unique violation
     try:
         photo_id = await create_today_photo(
             user_id=user_id,
-            file_id=file_id_public,
-            file_id_public=file_id_public,
+            file_id=file_id_public or file_id,
+            file_id_public=file_id_public or file_id,
             file_id_original=file_id,
             title=title,
         )
@@ -2318,7 +2338,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         )
         await state.clear()
         try:
-            await sent_draft.delete()
+            await bot.delete_message(chat_id=chat_id, message_id=sent_msg_id)
         except Exception:
             pass
         return
@@ -2339,22 +2359,15 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     caption = await build_my_photo_main_text(photo)
     kb = build_my_photo_keyboard(photo["id"], ratings_enabled=_photo_ratings_enabled(photo))
 
-    # Удаляем старое служебное сообщение, если осталось
-    if upload_msg_id and chat_id and upload_msg_id != sent_draft.message_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=upload_msg_id)
-        except Exception:
-            pass
-
     # Обновляем отправленную ватермаркнутую карточку
     try:
         await bot.edit_message_caption(
             chat_id=chat_id,
-            message_id=sent_draft.message_id,
+            message_id=sent_msg_id,
             caption=caption,
             reply_markup=kb,
         )
-        await _store_photo_message_id(state, sent_draft.message_id, photo_id=photo["id"])
+        await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
     except Exception:
         sent_photo = await bot.send_photo(
             chat_id=chat_id,

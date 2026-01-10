@@ -55,7 +55,7 @@ def apply_text_watermark(image_bytes: bytes, text: str) -> bytes:
     Наносит текстовый водяной знак (белый текст с тенью) на изображение.
     - Масштабирует до max 1920px по длинной стороне.
     - Текст: bottom-right, с отступом ~3% от размера.
-    - Размер шрифта: ~4% ширины (ограничение min/max).
+    - Размер шрифта: ~2% ширины (ограничение min/max) для максимально деликатного вида.
     Возвращает байты JPEG с качеством ~92.
     """
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
@@ -67,7 +67,7 @@ def apply_text_watermark(image_bytes: bytes, text: str) -> bytes:
         img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
         w, h = img.size
 
-    font_size = max(18, min(72, int(w * 0.04)))
+    font_size = max(10, min(36, int(w * 0.02)))
     font = _load_font(font_size)
 
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
