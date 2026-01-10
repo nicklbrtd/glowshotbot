@@ -15,7 +15,7 @@ from aiogram.types import (
 )
 
 from config import SUPPORT_BOT_TOKEN, SUPPORT_CHAT_ID
-from database import get_support_users, get_support_users_full
+from database import get_support_users, get_support_users_full, is_user_premium_active
 
 # tickets[(user_id, ticket_id)] = информация о тикете (сообщение в чате поддержки и текст пользователя)
 tickets: Dict[tuple[int, int], dict] = {}
@@ -87,6 +87,13 @@ async def main():
             "other": "Другое",
         }
         return mapping.get(code, code)
+
+    async def _premium_label(tg_id: int) -> str:
+        try:
+            active = await is_user_premium_active(int(tg_id))
+            return "💎 Премиум: активен" if active else "💤 Премиум: нет"
+        except Exception:
+            return "💤 Премиум: неизвестно"
 
     @dp.message(CommandStart())
     async def start_menu(message: Message):
@@ -470,11 +477,14 @@ async def main():
 
         ticket_id = message.message_id  # используем message_id как номер тикета
 
+        premium_line = await _premium_label(user.id)
+
         header = (
             "🆘 <b>Новый запрос!</b>\n\n"
             f"Тикет: #{ticket_id}\n"
             f"ID пользователя: <code>{user.id}</code>\n"
             f"Username: @{user.username if user.username else '—'}\n"
+            f"{premium_line}\n"
             f"Раздел: <b>{section}</b>\n\n"
             "Сообщение пользователя:\n"
             f"\n<b>Действия:</b> взять — /h {ticket_id} · закрыть — /hd {ticket_id}\n"
