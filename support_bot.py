@@ -15,7 +15,13 @@ from aiogram.types import (
 )
 
 from config import SUPPORT_BOT_TOKEN, SUPPORT_CHAT_ID
-from database import get_support_users, get_support_users_full, is_user_premium_active
+from database import (
+    get_support_users,
+    get_support_users_full,
+    is_user_premium_active,
+    get_user_by_tg_id,
+    ensure_user_minimal_row,
+)
 
 # tickets[(user_id, ticket_id)] = информация о тикете (сообщение в чате поддержки и текст пользователя)
 tickets: Dict[tuple[int, int], dict] = {}
@@ -90,8 +96,25 @@ async def main():
 
     async def _premium_label(tg_id: int) -> str:
         try:
+            user = await get_user_by_tg_id(int(tg_id))
+            if not user:
+                await ensure_user_minimal_row(int(tg_id))
+                user = await get_user_by_tg_id(int(tg_id))
+
             active = await is_user_premium_active(int(tg_id))
-            return "💎 Премиум: активен" if active else "💤 Премиум: нет"
+            if active:
+                until = user.get("premium_until")
+                if until:
+                    return f"💎 Премиум: активен (до {until})"
+                return "💎 Премиум: активен"
+
+            # не активен: если флаг есть, но закончился — показываем истёк
+            had = bool(user and user.get("is_premium"))
+            if had and user and user.get("premium_until"):
+                return f"💤 Премиум: истёк ({user.get('premium_until')})"
+            if had:
+                return "💤 Премиум: нет (истёк)"
+            return "💤 Премиум: нет"
         except Exception:
             return "💤 Премиум: неизвестно"
 
