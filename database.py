@@ -883,6 +883,7 @@ async def ensure_schema() -> None:
               language TEXT NOT NULL DEFAULT 'ru',
               show_city INTEGER NOT NULL DEFAULT 1,
               show_country INTEGER NOT NULL DEFAULT 1,
+              allow_ratings INTEGER NOT NULL DEFAULT 1,
 
               is_admin INTEGER NOT NULL DEFAULT 0,
               is_moderator INTEGER NOT NULL DEFAULT 0,
@@ -919,6 +920,7 @@ async def ensure_schema() -> None:
               tag TEXT,
               day_key TEXT,
               moderation_status TEXT NOT NULL DEFAULT 'active',
+              ratings_enabled INTEGER NOT NULL DEFAULT 1,
               is_deleted INTEGER NOT NULL DEFAULT 0,
               deleted_at TEXT,
               created_at TEXT NOT NULL
@@ -1211,6 +1213,8 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'pending';")
         await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS visible INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS reward_111_given INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_ratings INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS ratings_enabled INTEGER NOT NULL DEFAULT 1;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -1401,6 +1405,19 @@ async def add_rating_by_tg_id(
     now = get_moscow_now_iso()
     try:
         async with p.acquire() as conn:
+            # Проверяем, можно ли ставить оценки этому фото (не удалено, активно, оценки включены)
+            photo_row = await conn.fetchrow(
+                "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
+                int(photo_id),
+            )
+            if (
+                not photo_row
+                or int(photo_row.get("is_deleted") or 0) != 0
+                or str(photo_row.get("moderation_status") or "").lower() != "active"
+                or not bool(photo_row.get("ratings_enabled", 1))
+            ):
+                return False
+
             await conn.execute(
                 """
                 INSERT INTO ratings (photo_id, user_id, value, source, source_code, created_at)
@@ -1668,6 +1685,77 @@ async def set_user_country_visibility(user_id: int, show: bool) -> None:
             "UPDATE users SET show_country=$1, updated_at=$2 WHERE id=$3",
             1 if show else 0, get_moscow_now_iso(), int(user_id)
         )
+
+
+async def set_user_allow_ratings_by_tg_id(tg_id: int, allow: bool) -> dict | None:
+    """Включить/выключить оценки для пользователя и синхронно обновить все активные фото."""
+    await _ensure_user_row(int(tg_id))
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE users
+            SET allow_ratings=$2, updated_at=$3
+            WHERE tg_id=$1
+            RETURNING id, tg_id, allow_ratings
+            """,
+            int(tg_id),
+            1 if allow else 0,
+            now,
+        )
+
+        if row and row.get("id"):
+            try:
+                await conn.execute(
+                    """
+                    UPDATE photos
+                    SET ratings_enabled=$2
+                    WHERE user_id=$1 AND is_deleted=0
+                    """,
+                    int(row["id"]),
+                    1 if allow else 0,
+                )
+            except Exception:
+                # Не блокируем обновление пользователя, если массовое обновление фото не удалось
+                pass
+
+    return dict(row) if row else None
+
+
+async def toggle_user_allow_ratings_by_tg_id(tg_id: int) -> dict | None:
+    """Инвертировать флаг allow_ratings у пользователя и синхронизировать активные фото."""
+    await _ensure_user_row(int(tg_id))
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE users
+            SET allow_ratings = CASE WHEN allow_ratings=0 THEN 1 ELSE 0 END,
+                updated_at=$2
+            WHERE tg_id=$1
+            RETURNING id, tg_id, allow_ratings
+            """,
+            int(tg_id),
+            now,
+        )
+
+        if row and row.get("id") is not None:
+            try:
+                await conn.execute(
+                    """
+                    UPDATE photos
+                    SET ratings_enabled=$2
+                    WHERE user_id=$1 AND is_deleted=0
+                    """,
+                    int(row["id"]),
+                    1 if bool(row["allow_ratings"]) else 0,
+                )
+            except Exception:
+                pass
+
+    return dict(row) if row else None
 
 
 async def soft_delete_user(user_id: int) -> None:
@@ -2651,6 +2739,7 @@ async def create_today_photo(
     category: str | None = None,
     device_type: str | None = None,
     device_info: str | None = None,
+    ratings_enabled: bool | None = None,
 ) -> int:
     """Создать новую фотографию пользователя на текущий день (по Москве).
     Никакого авто-удаления. day_key — только ключ дня для лимитов/итогов.
@@ -2669,6 +2758,17 @@ async def create_today_photo(
         category = "photo"
 
     async with p.acquire() as conn:
+        enabled = ratings_enabled
+        if enabled is None:
+            try:
+                pref = await conn.fetchval(
+                    "SELECT allow_ratings FROM users WHERE id=$1",
+                    int(user_id),
+                )
+                enabled = bool(pref) if pref is not None else True
+            except Exception:
+                enabled = True
+
         row = await conn.fetchrow(
             """
             INSERT INTO photos (
@@ -2681,10 +2781,11 @@ async def create_today_photo(
                 device_info,
                 day_key,
                 moderation_status,
+                ratings_enabled,
                 is_deleted,
                 created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',0,$9)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,0,$10)
             RETURNING id
             """,
             int(user_id),
@@ -2695,6 +2796,7 @@ async def create_today_photo(
             device_type,
             device_info,
             day_key,
+            1 if enabled else 0,
             now_iso,
         )
 
@@ -2811,6 +2913,45 @@ async def update_photo_editable_fields(
         return bool(updated)
 
 
+async def set_photo_ratings_enabled(photo_id: int, enabled: bool, *, user_id: int | None = None) -> bool:
+    """Явно включить/выключить оценки для фото. Если указан user_id — проверяем владельца."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        if user_id is None:
+            res = await conn.execute(
+                "UPDATE photos SET ratings_enabled=$2 WHERE id=$1",
+                int(photo_id),
+                1 if enabled else 0,
+            )
+        else:
+            res = await conn.execute(
+                "UPDATE photos SET ratings_enabled=$2 WHERE id=$1 AND user_id=$3",
+                int(photo_id),
+                1 if enabled else 0,
+                int(user_id),
+            )
+    return res.startswith("UPDATE ") and not res.endswith(" 0")
+
+
+async def toggle_photo_ratings_enabled(photo_id: int, user_id: int) -> bool | None:
+    """Инвертировать флаг ratings_enabled. Возвращает новое значение или None, если фото не найдено."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE photos
+            SET ratings_enabled = CASE WHEN ratings_enabled=0 THEN 1 ELSE 0 END
+            WHERE id=$1 AND user_id=$2
+            RETURNING ratings_enabled
+            """,
+            int(photo_id),
+            int(user_id),
+        )
+    if not row:
+        return None
+    return bool(row["ratings_enabled"])
+
+
 async def mark_photo_deleted(photo_id: int) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -2878,6 +3019,7 @@ async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
             JOIN users u ON u.id=p.user_id
             WHERE p.is_deleted=0
               AND p.moderation_status IN ('active')
+              AND COALESCE(p.ratings_enabled, 1)=1
               AND p.user_id <> $1
               AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
             ORDER BY random()
@@ -2892,6 +3034,18 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
     p = _assert_pool()
     now = get_moscow_now_iso()
     async with p.acquire() as conn:
+        photo_row = await conn.fetchrow(
+            "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
+            int(photo_id),
+        )
+        if (
+            not photo_row
+            or int(photo_row.get("is_deleted") or 0) != 0
+            or str(photo_row.get("moderation_status") or "").lower() != "active"
+            or not bool(photo_row.get("ratings_enabled", 1))
+        ):
+            return
+
         await conn.execute(
             """
             INSERT INTO ratings (photo_id, user_id, value, created_at)
@@ -2922,6 +3076,18 @@ async def set_super_rating(user_id: int, photo_id: int) -> bool:
     p = _assert_pool()
     now = get_moscow_now_iso()
     async with p.acquire() as conn:
+        photo_row = await conn.fetchrow(
+            "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
+            int(photo_id),
+        )
+        if (
+            not photo_row
+            or int(photo_row.get("is_deleted") or 0) != 0
+            or str(photo_row.get("moderation_status") or "").lower() != "active"
+            or not bool(photo_row.get("ratings_enabled", 1))
+        ):
+            return False
+
         existed = await conn.fetchval(
             "SELECT 1 FROM super_ratings WHERE photo_id=$1 AND user_id=$2",
             int(photo_id), int(user_id)

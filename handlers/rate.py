@@ -213,6 +213,19 @@ def _format_report_cooldown(seconds: int) -> str:
     return " ".join(parts)
 
 
+def _plural_ru(value: int, one: str, few: str, many: str) -> str:
+    """Простейшее склонение русских слов по числу: 1 день, 3 дня, 5 дней."""
+    v = abs(value) % 100
+    if 11 <= v <= 19:
+        return many
+    v = v % 10
+    if v == 1:
+        return one
+    if 2 <= v <= 4:
+        return few
+    return many
+
+
 async def _get_report_rate_limit_status(user_id: int):
     """
     Возвращает статус по лимиту жалоб для пользователя.
@@ -582,9 +595,18 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             streak_days = 0
             streak_visible = True
 
+    is_author_premium = bool(photo.get("user_is_premium") or photo.get("user_premium_until"))
+    if not is_author_premium and author_tg_id:
+        try:
+            is_author_premium = await is_user_premium_active(int(author_tg_id))
+        except Exception:
+            is_author_premium = False
+
     lines: list[str] = []
-    streak_part = f" • 🔥<b>{streak_days}</b> дней" if streak_visible else ""
-    lines.append(f"💎 «{escape(title)}»{streak_part}")
+    day_word = _plural_ru(streak_days, "день", "дня", "дней")
+    streak_part = f" • 🔥<b>{streak_days}</b> {day_word}" if streak_visible else ""
+    premium_badge = "💎 " if is_author_premium else ""
+    lines.append(f"{premium_badge}«{escape(title)}»{streak_part}")
 
     # beta tester line
     if bool(photo.get("has_beta_award")):
@@ -1418,6 +1440,19 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     # Базовая оценка для супер-оценки — 10, а в статистике она станет 15
     value = 10
 
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
+        await callback.answer("Фото не найдено.", show_alert=True)
+        await show_next_photo_for_rating(callback, user["id"])
+        await state.clear()
+        return
+
+    if not bool(photo.get("ratings_enabled", True)):
+        await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
+        await show_next_photo_for_rating(callback, user["id"])
+        await state.clear()
+        return
+
     data = await state.get_data()
     comment_photo_id = data.get("photo_id")
     comment_text = data.get("comment_text")
@@ -1433,11 +1468,6 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
         )
 
         # 2) Пытаемся уведомить автора фотографии
-        try:
-            photo = await get_photo_by_id(photo_id)
-        except Exception:
-            photo = None
-
         if photo is not None:
             author_user_id = photo.get("user_id")
 
@@ -1484,16 +1514,15 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
         pass
         # notifications: accumulate likes for daily summary (best-effort)
     try:
-        photo_row = await get_photo_by_id(int(photo_id))
-        if photo_row:
-            author_user_id = photo_row.get("user_id")
-            if author_user_id and int(author_user_id) != int(user["id"]):
-                author = await get_user_by_id(int(author_user_id))
-                author_tg = (author or {}).get("tg_id")
-                if author_tg:
-                    prefs = await get_notify_settings_by_tg_id(int(author_tg))
-                    if bool(prefs.get("likes_enabled", True)):
-                        await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
+        photo_row = photo
+        author_user_id = photo_row.get("user_id") if photo_row else None
+        if author_user_id and int(author_user_id) != int(user["id"]):
+            author = await get_user_by_id(int(author_user_id))
+            author_tg = (author or {}).get("tg_id")
+            if author_tg:
+                prefs = await get_notify_settings_by_tg_id(int(author_tg))
+                if bool(prefs.get("likes_enabled", True)):
+                    await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
     except Exception:
         pass
     # Рефералька: проверяем, не пора ли выдать бонусы
@@ -1575,6 +1604,19 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
+        await callback.answer("Фото не найдено.", show_alert=True)
+        await show_next_photo_for_rating(callback, user["id"])
+        await state.clear()
+        return
+
+    if not bool(photo.get("ratings_enabled", True)):
+        await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
+        await show_next_photo_for_rating(callback, user["id"])
+        await state.clear()
+        return
+
     # Достаём возможный комментарий из FSM
     data = await state.get_data()
     comment_photo_id = data.get("photo_id")
@@ -1589,11 +1631,6 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
             text=comment_text,
             is_public=bool(is_public),
         )
-
-        try:
-            photo = await get_photo_by_id(photo_id)
-        except Exception:
-            photo = None
 
         if photo is not None:
             author_user_id = photo.get("user_id")
@@ -1636,16 +1673,14 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
         pass
         # notifications: accumulate likes for daily summary (best-effort)
     try:
-        photo_row = await get_photo_by_id(int(photo_id))
-        if photo_row:
-            author_user_id = photo_row.get("user_id")
-            if author_user_id and int(author_user_id) != int(user["id"]):
-                author = await get_user_by_id(int(author_user_id))
-                author_tg = (author or {}).get("tg_id")
-                if author_tg:
-                    prefs = await get_notify_settings_by_tg_id(int(author_tg))
-                    if bool(prefs.get("likes_enabled", True)):
-                        await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
+        author_user_id = photo.get("user_id") if photo else None
+        if author_user_id and int(author_user_id) != int(user["id"]):
+            author = await get_user_by_id(int(author_user_id))
+            author_tg = (author or {}).get("tg_id")
+            if author_tg:
+                prefs = await get_notify_settings_by_tg_id(int(author_tg))
+                if bool(prefs.get("likes_enabled", True)):
+                    await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
     except Exception:
         pass
     # Рефералка: проверяем, не пора ли выдать бонусы

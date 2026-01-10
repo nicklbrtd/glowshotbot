@@ -18,6 +18,7 @@ from database import (
     mark_photo_deleted,
     get_photo_by_id,
     update_photo_editable_fields,
+    toggle_photo_ratings_enabled,
     get_photo_stats,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
@@ -224,6 +225,10 @@ def _ready_wording(user: dict) -> str:
     return "готов(а)"
 
 
+def _photo_ratings_enabled(photo: dict) -> bool:
+    return bool(photo.get("ratings_enabled", True))
+
+
 def build_my_photo_caption(photo: dict) -> str:
     """Собрать подпись к фотографии в разделе «Моя фотография».
 
@@ -265,7 +270,7 @@ def build_my_photo_caption(photo: dict) -> str:
     return "\n".join(caption_lines)
 
 
-def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
+def build_my_photo_keyboard(photo_id: int, *, ratings_enabled: bool | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     rows.append([
@@ -277,6 +282,10 @@ def build_my_photo_keyboard(photo_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
     ])
 
+    state_label = "ВКЛ" if ratings_enabled is not False else "ВЫКЛ"
+    rows.append([
+        InlineKeyboardButton(text=f"⭐️ Оценки: {state_label}", callback_data=f"myphoto:ratings:{photo_id}"),
+    ])
 
     rows.append([
         InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
@@ -622,7 +631,10 @@ async def _show_my_photo_section(
     """
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"])
+    kb = build_my_photo_keyboard(
+        photo["id"],
+        ratings_enabled=_photo_ratings_enabled(photo),
+    )
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
     try:
@@ -658,7 +670,10 @@ async def _edit_or_replace_my_photo_message(
     chat_id = msg.chat.id
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"])
+    kb = build_my_photo_keyboard(
+        photo["id"],
+        ratings_enabled=_photo_ratings_enabled(photo),
+    )
 
     # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
     try:
@@ -1066,6 +1081,47 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:ratings:"))
+async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка.")
+        return
+
+    try:
+        photo_id = int(parts[2])
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if photo is None or photo.get("is_deleted"):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    new_state = await toggle_photo_ratings_enabled(photo_id, int(user["id"]))
+    if new_state is None:
+        await callback.answer("Не удалось переключить.", show_alert=True)
+        return
+
+    try:
+        photo = await get_photo_by_id(photo_id) or photo
+    except Exception:
+        pass
+
+    await _edit_or_replace_my_photo_message(callback, state, photo)
+    await callback.answer("Оценки включены" if new_state else "Оценки выключены")
+
 
 # ========= ДОБАВЛЕНИЕ ФОТО =========
 
@@ -1583,7 +1639,7 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ок")
         return
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"])
+    kb = build_my_photo_keyboard(photo["id"], ratings_enabled=_photo_ratings_enabled(photo))
     try:
         if callback.message.photo:
             await callback.message.edit_caption(caption=caption, reply_markup=kb)
@@ -1659,7 +1715,7 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
         return
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id)
+    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
 
     try:
         if callback.message.photo:
@@ -1967,7 +2023,7 @@ async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
         return
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id)
+    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
 
     await _edit_or_replace_caption_with_photo(
         bot=callback.message.bot,
@@ -2050,7 +2106,7 @@ async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
         return
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id)
+    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
 
     await _edit_or_replace_caption_with_photo(
         bot=callback.message.bot,
@@ -2087,7 +2143,7 @@ async def myphoto_edit_title_text(message: Message, state: FSMContext):
         return
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id)
+    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
 
     target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
     target_msg_id = int(data.get("edit_target_msg_id") or 0)
@@ -2128,7 +2184,7 @@ async def myphoto_edit_desc_text(message: Message, state: FSMContext):
         return
 
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id)
+    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
 
     target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
     target_msg_id = int(data.get("edit_target_msg_id") or 0)
@@ -2225,7 +2281,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
 
     # Финальная карточка: стараемся НЕ плодить сообщения.
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"])
+    kb = build_my_photo_keyboard(photo["id"], ratings_enabled=_photo_ratings_enabled(photo))
 
     # 1) Если у нас есть сообщение мастера (это фото-сообщение от бота) — просто редактируем caption+кнопки.
     if upload_msg_id and chat_id:

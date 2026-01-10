@@ -308,6 +308,10 @@ async def lr_set(callback: CallbackQuery):
         await callback.answer("❌ У автора сейчас нет активной фотографии.", show_alert=True)
         return
 
+    if not bool(photo.get("ratings_enabled", True)):
+        await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
+        return
+
     owner_user = await get_user_by_id(int(photo["user_id"]))
     if owner_user and int(owner_user.get("tg_id") or 0) == int(callback.from_user.id):
         await callback.answer("Нельзя оценивать свою фотографию.", show_alert=True)

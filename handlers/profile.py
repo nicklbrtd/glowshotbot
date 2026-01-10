@@ -36,6 +36,7 @@ from database import (
     get_notify_settings_by_tg_id,
     toggle_likes_notify_by_tg_id,
     toggle_comments_notify_by_tg_id,
+    toggle_user_allow_ratings_by_tg_id,
     set_user_language_by_tg_id,
     get_user_block_status_by_tg_id,
 )
@@ -1621,7 +1622,13 @@ async def profile_awards_menu(callback: CallbackQuery):
 
 # -------------------- Settings UI (notifications) --------------------
 
-def _kb_profile_settings(notify: dict, streak_status: dict | None, lang: str = "ru") -> InlineKeyboardMarkup:
+def _kb_profile_settings(
+    notify: dict,
+    streak_status: dict | None,
+    lang: str = "ru",
+    *,
+    ratings_allowed: bool = True,
+) -> InlineKeyboardMarkup:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
 
@@ -1630,6 +1637,10 @@ def _kb_profile_settings(notify: dict, streak_status: dict | None, lang: str = "
         streak_enabled = bool(streak_status.get("notify_enabled", True))
 
     kb = InlineKeyboardBuilder()
+    kb.button(
+        text=t("settings.btn.ratings.on" if ratings_allowed else "settings.btn.ratings.off", lang),
+        callback_data="profile:settings:toggle:ratings",
+    )
     kb.button(
         text=t("settings.btn.likes.on" if likes_enabled else "settings.btn.likes.off", lang),
         callback_data="profile:settings:toggle:likes"
@@ -1652,17 +1663,22 @@ def _render_profile_settings(
     notify: dict,
     streak_status: dict | None,
     lang: str = "ru",
+    *,
+    ratings_allowed: bool = True,
 ) -> str:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
     streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
 
+    ratings_line = "⭐️ " + (t("settings.state.on", lang) if ratings_allowed else t("settings.state.off", lang))
     likes_line = "❤️ " + (t("settings.state.on", lang) if likes_enabled else t("settings.state.off", lang))
     comm_line = "💬 " + (t("settings.state.on", lang) if comments_enabled else t("settings.state.off", lang))
     streak_line = "🔥 " + (t("settings.state.on", lang) if streak_enabled else t("settings.state.off", lang))
 
     return (
         f"{t('settings.title', lang)}\n\n"
+        f"{ratings_line}\n"
+        f"<blockquote>{t('settings.ratings.hint', lang)}</blockquote>\n\n"
         f"{likes_line}\n"
         f"<blockquote>{t('settings.likes.hint', lang)}</blockquote>\n\n"
         f"{comm_line}\n"
@@ -1684,10 +1700,21 @@ async def profile_settings_open(callback: CallbackQuery):
     notify = await get_notify_settings_by_tg_id(tg_id)
 
     streak_status = await get_profile_streak_status(tg_id)
+    ratings_allowed = bool((user or {}).get("allow_ratings", True))
 
     lang = _get_lang(user)
-    text = _render_profile_settings(notify, streak_status, lang)
-    kb = _kb_profile_settings(notify, streak_status, lang)
+    text = _render_profile_settings(
+        notify,
+        streak_status,
+        lang,
+        ratings_allowed=ratings_allowed,
+    )
+    kb = _kb_profile_settings(
+        notify,
+        streak_status,
+        lang,
+        ratings_allowed=ratings_allowed,
+    )
 
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -1810,11 +1837,22 @@ async def profile_settings_toggle_likes(callback: CallbackQuery):
 
     streak_status = await get_profile_streak_status(tg_id)
     lang = _get_lang(user)
+    ratings_allowed = bool((user or {}).get("allow_ratings", True))
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(notify, streak_status, lang),
-            reply_markup=_kb_profile_settings(notify, streak_status, lang),
+            _render_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
+            reply_markup=_kb_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:
@@ -1833,11 +1871,66 @@ async def profile_settings_toggle_comments(callback: CallbackQuery):
 
     streak_status = await get_profile_streak_status(tg_id)
     lang = _get_lang(user)
+    ratings_allowed = bool((user or {}).get("allow_ratings", True))
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(notify, streak_status, lang),
-            reply_markup=_kb_profile_settings(notify, streak_status, lang),
+            _render_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
+            reply_markup=_kb_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+    await callback.answer(t("settings.toast.ok", lang))
+
+
+@router.callback_query(F.data == "profile:settings:toggle:ratings")
+async def profile_settings_toggle_ratings(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
+
+    toggled = await toggle_user_allow_ratings_by_tg_id(tg_id)
+    if toggled is None:
+        await callback.answer("Не удалось переключить.", show_alert=True)
+        return
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    ratings_allowed = bool((user or toggled or {}).get("allow_ratings", True))
+
+    notify = await get_notify_settings_by_tg_id(tg_id)
+    streak_status = await get_profile_streak_status(tg_id)
+    lang = _get_lang(user)
+
+    try:
+        await callback.message.edit_text(
+            _render_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
+            reply_markup=_kb_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:
@@ -1855,11 +1948,22 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
     streak_status = await toggle_profile_streak_notify_and_status(tg_id)
     notify = await get_notify_settings_by_tg_id(tg_id)
     lang = _get_lang(user)
+    ratings_allowed = bool((user or {}).get("allow_ratings", True))
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(notify, streak_status, lang),
-            reply_markup=_kb_profile_settings(notify, streak_status, lang),
+            _render_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
+            reply_markup=_kb_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:

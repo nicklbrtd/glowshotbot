@@ -39,6 +39,7 @@ EN = {
     "settings.title": "⚙️ <b>Settings</b>",
     "settings.likes.hint": "Likes won't spam you. We aggregate them and send one calm summary per day.",
     "settings.comments.hint": "Comments are usually rare, so they arrive instantly. You can disable them.",
+    "settings.ratings.hint": "Disable ratings if you want to share a photo without asking for scores.",
     "settings.streak.hint": "Streak reminders work only if your streak has already started.",
 
     "settings.lang.btn": "🌐 Language",
@@ -134,6 +135,8 @@ EN = {
     # Settings toggles
     "settings.state.on": "<b>ON</b>",
     "settings.state.off": "<b>OFF</b>",
+    "settings.btn.ratings.on": "⭐️ ON",
+    "settings.btn.ratings.off": "⭐️ OFF",
     "settings.btn.likes.on": "❤️ ON",
     "settings.btn.likes.off": "❤️ OFF",
     "settings.btn.comments.on": "💬 ON",
