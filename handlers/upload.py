@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from asyncpg.exceptions import UniqueViolationError
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -1145,7 +1145,6 @@ async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
         pass
 
     # Reuse existing My Photo entry handler to render proper UI.
-    callback.data = "myphoto:open"
     await my_photo_menu(callback, state)
 
 
@@ -1183,7 +1182,6 @@ async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
         return
 
     # From any other wizard state (or no state) — just return to My Photo section
-    callback.data = "myphoto:open"
     await my_photo_menu(callback, state)
 
 
@@ -2275,7 +2273,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     try:
         sent_draft = await bot.send_photo(
             chat_id=chat_id,
-            photo=InputFile(wm_stream, filename="glowshot_wm.jpg"),
+            photo=BufferedInputFile(wm_stream.read(), filename="glowshot_wm.jpg"),
             caption="Готовим карточку…",
             disable_notification=True,
         )
