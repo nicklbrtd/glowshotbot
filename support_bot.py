@@ -98,22 +98,29 @@ async def main():
     async def _premium_label(tg_id: int) -> str:
         try:
             status = await get_user_premium_status(int(tg_id)) or {}
-        except Exception:
-            status = {}
+            is_flag = bool(status.get("is_premium"))
+            until_raw = status.get("premium_until")
 
-        try:
-            active = await is_user_premium_active(int(tg_id))
-        except Exception:
             active = False
+            try:
+                active = await is_user_premium_active(int(tg_id))
+            except Exception:
+                active = False
 
-        is_flag = bool(status.get("is_premium"))
-        until_raw = status.get("premium_until")
+            # Дополнительная проверка по дате, если флаг не обновился
+            if not active and until_raw:
+                try:
+                    active = datetime.fromisoformat(str(until_raw)) > datetime.now()
+                except Exception:
+                    pass
 
-        if active:
-            return f"💎 Премиум: активен{f' (до {until_raw})' if until_raw else ''}"
-        if is_flag:
-            return f"💤 Премиум: истёк{f' ({until_raw})' if until_raw else ''}"
-        return "💤 Премиум: нет"
+            if active:
+                return f"💎 Премиум: активен{f' (до {until_raw})' if until_raw else ''}"
+            if is_flag or until_raw:
+                return f"💤 Премиум: истёк{f' ({until_raw})' if until_raw else ''}"
+            return "💤 Премиум: нет"
+        except Exception:
+            return "💤 Премиум: нет"
 
     @dp.message(CommandStart())
     async def start_menu(message: Message):
