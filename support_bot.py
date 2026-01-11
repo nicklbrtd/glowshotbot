@@ -97,32 +97,23 @@ async def main():
 
     async def _premium_label(tg_id: int) -> str:
         try:
-            user = await get_user_by_tg_id(int(tg_id))
-            if not user:
-                await ensure_user_minimal_row(int(tg_id))
-                user = await get_user_by_tg_id(int(tg_id))
-
-            status = await get_user_premium_status(int(tg_id))
-            is_flag = bool(status.get("is_premium"))
-            until_raw = status.get("premium_until")
-
-            active = False
-            if is_flag:
-                if until_raw:
-                    try:
-                        active = datetime.fromisoformat(str(until_raw)) > datetime.now()
-                    except Exception:
-                        active = True
-                else:
-                    active = True
-
-            if active:
-                return f"💎 Премиум: активен{f' (до {until_raw})' if until_raw else ''}"
-            if is_flag:
-                return f"💤 Премиум: истёк{f' ({until_raw})' if until_raw else ''}"
-            return "💤 Премиум: нет"
+            status = await get_user_premium_status(int(tg_id)) or {}
         except Exception:
-            return "💤 Премиум: нет"
+            status = {}
+
+        try:
+            active = await is_user_premium_active(int(tg_id))
+        except Exception:
+            active = False
+
+        is_flag = bool(status.get("is_premium"))
+        until_raw = status.get("premium_until")
+
+        if active:
+            return f"💎 Премиум: активен{f' (до {until_raw})' if until_raw else ''}"
+        if is_flag:
+            return f"💤 Премиум: истёк{f' ({until_raw})' if until_raw else ''}"
+        return "💤 Премиум: нет"
 
     @dp.message(CommandStart())
     async def start_menu(message: Message):
@@ -516,7 +507,6 @@ async def main():
             f"{premium_line}\n"
             f"Раздел: <b>{section}</b>\n\n"
             "Сообщение пользователя:\n"
-            f"\n<b>Действия:</b> взять — /h {ticket_id} · закрыть — /hd {ticket_id}\n"
         )
 
         # Админские кнопки: Ответить / Завершить
@@ -538,9 +528,9 @@ async def main():
         # 1) Шлём заголовок в чат поддержки
         # Текст выводим здесь, а вложения — отдельным forward'ом ниже
         if message.text:
-            body = header + message.text
+            body = header + message.text + "\n\n" + f"<b>Действия:</b> взять — /h {ticket_id} · закрыть — /hd {ticket_id}\n"
         else:
-            body = header + "📎 Вложение"
+            body = header + "📎 Вложение\n\n" + f"<b>Действия:</b> взять — /h {ticket_id} · закрыть — /hd {ticket_id}\n"
 
         sent = await message.bot.send_message(
             chat_id=SUPPORT_CHAT_ID,
