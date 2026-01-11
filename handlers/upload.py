@@ -1348,7 +1348,7 @@ async def myphoto_got_photo(message: Message, state: FSMContext):
         photo=file_id,
         caption=(
             f"{draft_text}\n\n"
-            "Теперь напиши название этой работы.\n\nМожешь нажать «Назад», чтобы заменить фото, или «Отмена»."
+            "Теперь напиши название этой работы.\n\n"
         ),
         reply_markup=build_upload_wizard_kb(back_to="photo"),
         disable_notification=True,
