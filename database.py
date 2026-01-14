@@ -3657,7 +3657,11 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
     """Calculate rank points for a user.
 
     Strategy is defined in utils.ranks (pure math):
-      photo_points = bayes_score * log1p(ratings_count)
+      photo_points = bayes_score * log1p(ratings_count)  # база
+      + небольшой бонус за оценки других фото
+      + бонус за осмысленные комментарии (с дневным лимитом)
+      + бонус за streak активности
+      - мягкий штраф за подтверждённые жалобы
 
     We intentionally DO NOT filter by is_deleted here.
     That way a user cannot "reset" rank by deleting photos.
@@ -3671,11 +3675,40 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
     if limit_photos <= 0:
         limit_photos = 10
 
-    from utils.ranks import photo_points as _photo_points, points_to_int as _points_to_int
+    from utils.ranks import (
+        photo_points as _photo_points,
+        points_to_int as _points_to_int,
+        ratings_activity_points as _ratings_bonus,
+        comments_activity_points as _comments_bonus,
+        reports_penalty as _reports_penalty,
+        streak_bonus_points as _streak_bonus,
+    )
+    from utils.time import get_moscow_now
 
     prior = _bayes_prior_weight()
 
+    # Смотрим активность за последние N дней для бонусов/штрафов
+    activity_window_days = 30
+    comment_min_len = 15
+    ratings_daily_cap = 40   # антиспам: сколько оценок в день засчитываем
+    comments_daily_cap = 8   # антиспам: сколько комментов в день засчитываем
+
+    now_dt = get_moscow_now()
+    since_dt = now_dt - timedelta(days=activity_window_days)
+    since_iso = since_dt.isoformat()
+
+    # tg_id нужен для streak-бонуса
+    tg_id: int | None = None
+
     async with p.acquire() as conn:
+        # Узнаем tg_id пользователя (для streak)
+        user_row = await conn.fetchrow("SELECT tg_id FROM users WHERE id=$1", int(user_id))
+        if user_row and user_row.get("tg_id"):
+            try:
+                tg_id = int(user_row.get("tg_id"))
+            except Exception:
+                tg_id = None
+
         global_mean, _global_cnt = await _get_global_rating_mean(conn)
 
         rows = await conn.fetch(
@@ -3703,6 +3736,84 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
         s = float(row["sum_values"] or 0.0)
         bayes = _bayes_score(sum_values=s, n=n, global_mean=global_mean, prior=prior)
         total_points += _photo_points(bayes_score=bayes, ratings_count=n)
+
+    # -------- Бонус за оценки других фото (anti-spam по дням) --------
+    ratings_rows = []
+    try:
+        async with p.acquire() as conn:
+            ratings_rows = await conn.fetch(
+                "SELECT created_at FROM ratings WHERE user_id=$1 AND created_at >= $2",
+                int(user_id),
+                since_iso,
+            )
+    except Exception:
+        ratings_rows = []
+
+    ratings_per_day: dict[str, int] = {}
+    for r in ratings_rows or []:
+        day_key = str(r["created_at"])[:10]
+        ratings_per_day[day_key] = ratings_per_day.get(day_key, 0) + 1
+    effective_ratings = sum(min(count, ratings_daily_cap) for count in ratings_per_day.values())
+    ratings_points = _ratings_bonus(effective_ratings)
+
+    # -------- Бонус за комментарии (считаем только достаточной длины + дневной лимит) --------
+    comments_rows = []
+    try:
+        async with p.acquire() as conn:
+            comments_rows = await conn.fetch(
+                "SELECT created_at, text FROM comments WHERE user_id=$1 AND created_at >= $2",
+                int(user_id),
+                since_iso,
+            )
+    except Exception:
+        comments_rows = []
+
+    comments_per_day: dict[str, int] = {}
+    for r in comments_rows or []:
+        try:
+            txt = str(r["text"] or "").strip()
+        except Exception:
+            txt = ""
+        if len(txt) < comment_min_len:
+            continue
+        day_key = str(r["created_at"])[:10]
+        comments_per_day[day_key] = comments_per_day.get(day_key, 0) + 1
+    effective_comments = sum(min(count, comments_daily_cap) for count in comments_per_day.values())
+    comments_points = _comments_bonus(effective_comments)
+
+    # -------- Штраф за подтверждённые жалобы --------
+    resolved_reports = 0
+    try:
+        async with p.acquire() as conn:
+            resolved_reports = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM photo_reports
+                WHERE user_id=$1
+                  AND created_at >= $2
+                  AND status IN ('approved','accepted','resolved','done','action_taken','confirmed')
+                """,
+                int(user_id),
+                since_iso,
+            )
+    except Exception:
+        resolved_reports = 0
+    reports_points = _reports_penalty(int(resolved_reports or 0))
+
+    # -------- Бонус за streak --------
+    streak_points = 0.0
+    if tg_id:
+        try:
+            streak_status = await streak_get_status_by_tg_id(int(tg_id))
+            streak_days = int(streak_status.get("streak") or 0)
+            streak_points = _streak_bonus(streak_days)
+        except Exception:
+            streak_points = 0.0
+
+    total_points += ratings_points
+    total_points += comments_points
+    total_points += streak_points
+    total_points -= reports_points
 
     return _points_to_int(total_points)
 

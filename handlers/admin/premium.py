@@ -989,4 +989,3 @@ async def user_premium_notice_seen(callback: CallbackQuery):
         await callback.answer("Ок")
     except Exception:
         pass
-

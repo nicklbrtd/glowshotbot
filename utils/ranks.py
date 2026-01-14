@@ -1,36 +1,37 @@
-"""User ranks (tiers) for GlowShot.
+"""Ранги пользователей (тиеры) для GlowShot.
 
-This module is intentionally DB-agnostic.
-It defines:
-- Rank tiers (code, title, emoji)
-- Thresholds (points -> rank)
-- Helpers to pick a rank from points and format it
+Модуль намеренно не зависит от БД.
+Задаёт:
+- уровни рангов (код, заголовок, эмодзи);
+- пороги (очки -> ранг);
+- хелперы для выбора ранга по очкам и форматирования.
 
-The DB layer should calculate "rank_points" (int) and then use this module
-for mapping points -> tier.
+Слой БД должен вычислять "rank_points" (int) и использовать этот модуль
+для сопоставления очков -> рангу.
 
-Why points?
-- Stable across UI changes
-- Easy to cache in users table
-- Allows tuning thresholds without touching analytics queries
+Почему очки?
+- стабильны при изменениях интерфейса;
+- легко кешировать в таблице пользователей;
+- позволяют настраивать пороги без правки аналитических запросов.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable, Mapping
 
 
 @dataclass(frozen=True, slots=True)
 class Rank:
-    """A user tier (localized via i18n)."""
+    """Уровень пользователя (локализуется через i18n)."""
 
     code: str
     i18n_key: str
     emoji: str
 
     def label(self, lang: str = "ru") -> str:
-        """Human label for UI using i18n."""
+        """Человекочитаемый текст для интерфейса через i18n."""
         # local import to avoid heavy imports at module import time
         from utils.i18n import t
 
@@ -43,7 +44,7 @@ class Rank:
         return f"{self.emoji} {title}".strip()
 
 
-# --- Default tiers ---
+# --- Базовые ранги ---
 RANK_BEGINNER = Rank(code="beginner", i18n_key="rank.beginner", emoji="🟢")
 RANK_AMATEUR = Rank(code="amateur", i18n_key="rank.amateur", emoji="🔵")
 RANK_EXPERT = Rank(code="expert", i18n_key="rank.expert", emoji="🟣")
@@ -55,9 +56,9 @@ DEFAULT_RANKS: tuple[Rank, ...] = (
 )
 
 
-# --- Default thresholds ---
-# Meaning: points >= threshold -> that rank
-# IMPORTANT: thresholds must be ascending.
+# --- Базовые пороги ---
+# Смысл: points >= threshold -> этот ранг
+# Важно: пороги должны быть по возрастанию.
 DEFAULT_THRESHOLDS: tuple[tuple[int, Rank], ...] = (
     (0, RANK_BEGINNER),
     (120, RANK_AMATEUR),
@@ -85,14 +86,14 @@ def _normalize_thresholds(thresholds: Iterable[tuple[int, Rank]]) -> list[tuple[
 
 
 def rank_from_points(points: int | None, thresholds: Iterable[tuple[int, Rank]] = DEFAULT_THRESHOLDS) -> Rank:
-    """Pick rank tier based on points.
+    """Выбрать уровень ранга по количеству очков.
 
     Args:
-        points: rank points (int). None/negative treated as 0.
-        thresholds: iterable of (min_points, Rank), ascending.
+        points: очки ранга (int). None/отрицательные считаются как 0.
+        thresholds: итерируемый (min_points, Rank) по возрастанию.
 
     Returns:
-        Rank for the given points.
+        Rank для переданных очков.
     """
 
     pts = int(points or 0)
@@ -115,17 +116,52 @@ def format_rank(
     thresholds: Iterable[tuple[int, Rank]] = DEFAULT_THRESHOLDS,
     lang: str = "ru",
 ) -> str:
-    """Return a short UI string like '🟣 Expert' / '🟣 Эксперт'."""
+    """Вернёт короткий текст для интерфейса вроде '🟣 Expert' / '🟣 Эксперт'."""
     return rank_from_points(points, thresholds=thresholds).label(lang)
 
 
+def rank_progress_bar(points: int | None, thresholds: Iterable[tuple[int, Rank]] = DEFAULT_THRESHOLDS, segments: int = 5) -> str:
+    """
+    Текстовая полоска прогресса ранга вида «▓▓▓░░».
+    - points: текущие очки ранга
+    - thresholds: список (min_points, Rank) по возрастанию
+    - segments: всего сегментов (визуально 5)
+    Правила: минимум 1 заполненный сегмент, максимум segments-1, если есть следующий ранг.
+    Для максимального ранга возвращает все сегменты заполненными.
+    """
+    segs = max(int(segments or 5), 2)
+    pts = max(int(points or 0), 0)
+    th = _normalize_thresholds(thresholds)
+
+    current_min = th[0][0]
+    next_min: int | None = None
+    for idx, (min_pts, _rank) in enumerate(th):
+        if pts >= min_pts:
+            current_min = min_pts
+            if idx + 1 < len(th):
+                next_min = th[idx + 1][0]
+        else:
+            break
+
+    if next_min is None:
+        # Уже на максимальном ранге — показываем полную полоску
+        return "▓" * segs
+
+    span = max(next_min - current_min, 1)
+    rel = (pts - current_min) / span
+    filled = int(round(rel * segs))
+    filled = max(1, min(segs - 1, filled))
+    empty = max(segs - filled, 0)
+    return ("▓" * filled) + ("░" * empty)
+
+
 def thresholds_from_mapping(mapping: Mapping[str, int], ranks: Iterable[Rank] = DEFAULT_RANKS) -> list[tuple[int, Rank]]:
-    """Build thresholds from a {rank_code: min_points} mapping.
+    """Построить пороги из отображения {rank_code: min_points}.
 
     Example:
         thresholds_from_mapping({"beginner": 0, "amateur": 150, "expert": 300})
 
-    Unknown codes are ignored.
+    Неизвестные коды игнорируются.
     """
 
     by_code = {r.code: r for r in ranks}
@@ -138,21 +174,21 @@ def thresholds_from_mapping(mapping: Mapping[str, int], ranks: Iterable[Rank] = 
     return _normalize_thresholds(out)
 
 
-# --- Optional: points model helper (pure math) ---
+# --- Необязательно: помощник для расчёта очков (чистая математика) ---
 
 def photo_points(*, bayes_score: float | None, ratings_count: int | None) -> float:
-    """Compute contribution of a single photo to rank points.
+    """Считаем вклад одной фотографии в очки ранга.
 
-    This is DB-agnostic pure math. The DB layer can sum this across last N photos.
+    Это чистая математика, не завязанная на БД. Слой БД может суммировать результат по последним N фото.
 
-    Strategy:
+    Стратегия:
       points = bayes_score * log1p(ratings_count)
 
-    - Requires both a score and some ratings.
-    - Heavily downweights tiny rating counts.
+    - Нужен и счёт, и ненулевое число оценок.
+    - Сильно занижает вклад при малом числе оценок.
 
     Returns:
-        float points contribution (>=0).
+        float — вклад в очки (>=0).
     """
 
     if bayes_score is None:
@@ -173,7 +209,7 @@ def photo_points(*, bayes_score: float | None, ratings_count: int | None) -> flo
 
 
 def points_to_int(points: float | None) -> int:
-    """Convert float points to stable int for storage/caching."""
+    """Преобразовать float-очки в стабильный int для хранения/кеша."""
     try:
         p = float(points or 0.0)
     except Exception:
@@ -181,3 +217,38 @@ def points_to_int(points: float | None) -> int:
     if p < 0:
         p = 0.0
     return int(round(p))
+
+
+# --- Вспомогательные бонусы/штрафы для активности ---
+
+def ratings_activity_points(effective_ratings: int, *, weight: float = 0.4) -> float:
+    """
+    Небольшой стабильный бонус за оценки других фото.
+    - effective_ratings: уже ограниченный антиспам-капом объём.
+    """
+    return weight * math.sqrt(max(0, effective_ratings))
+
+
+def comments_activity_points(effective_comments: int, *, weight: float = 0.6) -> float:
+    """
+    Бонус за осмысленные комментарии (после фильтра длины и дневного лимита).
+    """
+    return weight * math.sqrt(max(0, effective_comments))
+
+
+def reports_penalty(resolved_reports: int, *, weight: float = 6.0, cap: float = 80.0) -> float:
+    """
+    Мягкий штраф за подтверждённые жалобы.
+    - weight: сколько очков снимаем за каждую.
+    - cap: максимальный суммарный штраф.
+    """
+    penalty = max(0, resolved_reports) * weight
+    return min(penalty, cap)
+
+
+def streak_bonus_points(streak_days: int, *, weight: float = 0.4, cap_days: int = 30) -> float:
+    """
+    Небольшой бонус за серию активности (streak).
+    Ограничен по дням, чтобы не доминировать над качеством фото.
+    """
+    return weight * min(max(0, streak_days), cap_days)

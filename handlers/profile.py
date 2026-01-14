@@ -45,7 +45,7 @@ from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
-from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT
+from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT, rank_progress_bar
 from utils.time import get_moscow_now
 
 router = Router()
@@ -273,6 +273,7 @@ async def build_profile_view(user: dict):
 
     # Rank (cached)
     rank_label = None
+    rank_points_value: int | None = None
     if tg_id:
         try:
             r_raw = await get_user_rank_by_tg_id(int(tg_id))
@@ -304,7 +305,8 @@ async def build_profile_view(user: dict):
             # Prefer points (best, fully localizable)
             rank_points = r.get("rank_points") or r.get("points") or r.get("rank_pts")
             if rank_points is not None:
-                rk = rank_from_points(int(rank_points))
+                rank_points_value = int(rank_points)
+                rk = rank_from_points(rank_points_value)
                 rank_label = f"{rk.emoji} {t(rk.i18n_key, lang)}".strip()
             else:
                 # Prefer code if available
@@ -327,6 +329,13 @@ async def build_profile_view(user: dict):
 
         except Exception:
             rank_label = None
+
+    # Полоска прогресса до следующего ранга (текстом)
+    progress_bar = rank_progress_bar(rank_points_value or 0)
+    if lang == "en":
+        progress_line = f"Next rank: {progress_bar}"
+    else:
+        progress_line = f"До следующего ранга: {progress_bar}"
 
     if user_id:
         # Всего загружено фото
@@ -514,6 +523,7 @@ async def build_profile_view(user: dict):
         f"{t('profile.title', lang)}{premium_badge}{streak_badge}",
         t("profile.name_age", lang, name=name, age=age) if age else t("profile.name", lang, name=name),
         t("profile.rank", lang, rank=(rank_label or format_rank(0, lang=lang))),
+        progress_line,
         t("profile.gender_line", lang, gender=gender_icon),
         f"🧾 Код автора: <code>{html.escape(str(author_code), quote=False)}</code>",
     ]
