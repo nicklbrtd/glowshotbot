@@ -44,6 +44,7 @@ def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
 
 
 # Channel required to use the bot (subscription gate)
+SUBSCRIPTION_GATE_ENABLED = os.getenv("SUBSCRIPTION_GATE_ENABLED", "false").lower() == "true"
 REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
 REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/nyqcreative")
 
@@ -96,6 +97,9 @@ def _normalize_chat_id(value: str) -> str:
 
 
 async def is_user_subscribed(bot, user_id: int) -> bool:
+    if not SUBSCRIPTION_GATE_ENABLED:
+        return True
+
     try:
         member = await bot.get_chat_member(chat_id=_normalize_chat_id(str(REQUIRED_CHANNEL_ID)), user_id=user_id)
     except TelegramBadRequest:
@@ -283,7 +287,15 @@ async def cmd_start(message: Message, state: FSMContext):
             pass
         return
 
-    if await is_user_subscribed(message.bot, message.from_user.id):
+    if SUBSCRIPTION_GATE_ENABLED and not await is_user_subscribed(message.bot, message.from_user.id):
+        sub_kb = build_subscribe_keyboard(lang)
+        await message.answer(
+            t("start.subscribe.prompt", lang),
+            reply_markup=sub_kb,
+            disable_notification=True,
+            parse_mode="HTML",
+        )
+    else:
         # флаги ролей
         is_admin = _get_flag(user, "is_admin")
         is_moderator = _get_flag(user, "is_moderator")
@@ -345,15 +357,6 @@ async def cmd_start(message: Message, state: FSMContext):
         if sent_message is not None:
             data["menu_msg_id"] = sent_message.message_id
             await state.set_data(data)
-    else:
-        lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
-        sub_kb = build_subscribe_keyboard(lang)
-        await message.answer(
-            t("start.subscribe.prompt", lang),
-            reply_markup=sub_kb,
-            disable_notification=True,
-            parse_mode="HTML",
-        )
     try:
         await message.delete()
     except Exception:
@@ -365,15 +368,48 @@ async def subscription_check(callback: CallbackQuery):
     user = await db.get_user_by_tg_id(user_id)
     lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
 
-    if await is_user_subscribed(callback.bot, user_id):
-        # достаём пользователя и флаги ролей
-        user = await db.get_user_by_tg_id(user_id)
-        is_admin = _get_flag(user, "is_admin")
-        is_moderator = _get_flag(user, "is_moderator")
-        is_premium = await db.is_user_premium_active(user_id)
-        menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
+    if SUBSCRIPTION_GATE_ENABLED and not await is_user_subscribed(callback.bot, user_id):
+        await callback.answer(
+            t("start.subscribe.not_yet", lang),
+            show_alert=True,
+        )
+        return
+
+    # достаём пользователя и флаги ролей
+    user = await db.get_user_by_tg_id(user_id)
+    is_admin = _get_flag(user, "is_admin")
+    is_moderator = _get_flag(user, "is_moderator")
+    is_premium = await db.is_user_premium_active(user_id)
+    menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
+    try:
+        await callback.message.edit_text(
+            menu_text,
+            reply_markup=build_main_menu(
+                is_admin=is_admin,
+                is_moderator=is_moderator,
+                is_premium=is_premium,
+                lang=lang,
+            ),
+            link_preview_options=NO_PREVIEW,
+            parse_mode="HTML",
+        )
+    except Exception:
         try:
-            await callback.message.edit_text(
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=menu_text,
+                reply_markup=build_main_menu(
+                    is_admin=is_admin,
+                    is_moderator=is_moderator,
+                    is_premium=is_premium,
+                    lang=lang,
+                ),
+                disable_notification=True,
+                link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
+            )
+        except Exception:
+            await callback.message.answer(
                 menu_text,
                 reply_markup=build_main_menu(
                     is_admin=is_admin,
@@ -381,43 +417,17 @@ async def subscription_check(callback: CallbackQuery):
                     is_premium=is_premium,
                     lang=lang,
                 ),
+                disable_notification=True,
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
             )
-        except Exception:
-            try:
-                await callback.message.bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text=menu_text,
-                    reply_markup=build_main_menu(
-                        is_admin=is_admin,
-                        is_moderator=is_moderator,
-                        is_premium=is_premium,
-                        lang=lang,
-                    ),
-                    disable_notification=True,
-                    link_preview_options=NO_PREVIEW,
-                    parse_mode="HTML",
-                )
-            except Exception:
-                await callback.message.answer(
-                    menu_text,
-                    reply_markup=build_main_menu(
-                        is_admin=is_admin,
-                        is_moderator=is_moderator,
-                        is_premium=is_premium,
-                        lang=lang,
-                    ),
-                    disable_notification=True,
-                    link_preview_options=NO_PREVIEW,
-                    parse_mode="HTML",
-                )
-        await callback.answer(t("start.subscribe.thanks", lang), show_alert=False)
-    else:
-        await callback.answer(
-            t("start.subscribe.not_yet", lang),
-            show_alert=True,
-        )
+    try:
+        if SUBSCRIPTION_GATE_ENABLED:
+            await callback.answer(t("start.subscribe.thanks", lang), show_alert=False)
+        else:
+            await callback.answer()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "menu:back")

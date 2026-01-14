@@ -72,6 +72,16 @@ def _today_key() -> str:
         return d.isoformat()
     except Exception:
         return str(d)
+
+
+def _week_key() -> str:
+    """Week key (Monday date) in Moscow timezone, ISO string."""
+    d = get_moscow_today()
+    monday = d - timedelta(days=d.weekday())
+    try:
+        return monday.isoformat()
+    except Exception:
+        return str(monday)
 # -------------------- Notifications settings (likes/comments) --------------------
 
 async def _ensure_notify_tables(conn: asyncpg.Connection) -> None:
@@ -1066,6 +1076,20 @@ async def ensure_schema() -> None:
               day_key TEXT NOT NULL,
               skips_used INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idea_requests (
+              id BIGSERIAL PRIMARY KEY,
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              week_key TEXT NOT NULL,
+              count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(user_id, week_key)
             );
             """
         )
@@ -3290,6 +3314,46 @@ async def update_daily_skip_info(user_id: int, skips_used: int) -> None:
             """,
             int(user_id), day_key, int(skips_used), now
         )
+
+
+async def get_weekly_idea_requests(user_id: int, week_key: str | None = None) -> int:
+    p = _assert_pool()
+    wk = week_key or _week_key()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT count FROM idea_requests WHERE user_id=$1 AND week_key=$2",
+            int(user_id),
+            str(wk),
+        )
+    if not row:
+        return 0
+    try:
+        return int(row["count"] or 0)
+    except Exception:
+        return 0
+
+
+async def increment_weekly_idea_requests(user_id: int, week_key: str | None = None) -> int:
+    p = _assert_pool()
+    wk = week_key or _week_key()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        val = await conn.fetchval(
+            """
+            INSERT INTO idea_requests (user_id, week_key, count, created_at, updated_at)
+            VALUES ($1,$2,1,$3,$3)
+            ON CONFLICT (user_id, week_key)
+            DO UPDATE SET count=idea_requests.count+1, updated_at=$3
+            RETURNING count
+            """,
+            int(user_id),
+            str(wk),
+            now,
+        )
+    try:
+        return int(val or 0)
+    except Exception:
+        return 0
 
 
 # -------------------- reports / moderation --------------------

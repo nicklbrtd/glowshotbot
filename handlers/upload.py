@@ -1,4 +1,5 @@
 import io
+import random
 from PIL import Image
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import datetime, timedelta
@@ -39,6 +40,8 @@ from database import (
     get_comments_for_photo_sorted,
     streak_record_action_by_tg_id,
     ensure_user_author_code,
+    get_weekly_idea_requests,
+    increment_weekly_idea_requests,
 )
 
 from database_results import (
@@ -227,6 +230,106 @@ def _ready_wording(user: dict) -> str:
     if g in {"ж", "жен", "женский", "female", "woman", "девушка"}:
         return "готова"
     return "готов(а)"
+
+
+def _selfie_wording(user: dict) -> str:
+    g = (user.get("gender") or "").strip().lower()
+    if g in {"м", "муж", "мужской", "male", "man", "парень"}:
+        return "Селфи и кадры, где изображён ты сам"
+    if g in {"ж", "жен", "женский", "female", "woman", "девушка"}:
+        return "Селфи и кадры, где изображена ты сама"
+    return "Селфи и кадры, где изображен(а) ты сам(а)"
+
+
+IDEA_POOL: list[dict[str, str]] = [
+    {"title": "Отражения", "hint": "Лужи, окна, зеркала, витрины"},
+    {"title": "Тени и силуэты", "hint": "Низкое солнце, лестницы, велосипеды"},
+    {"title": "Минимализм", "hint": "Один объект, пустой фон, чистые линии"},
+    {"title": "Городская геометрия", "hint": "Лестницы, мосты, разметка на дорогах"},
+    {"title": "Свет в тумане", "hint": "Фонари, пар, подсветка в дымке"},
+    {"title": "Неон и вывески", "hint": "Мокрый асфальт, витрины, огни ночного города"},
+    {"title": "Сверху вниз", "hint": "Эскалаторы, балконы, вид с лестницы"},
+    {"title": "Макро деталей", "hint": "Текстуры ткани, листьев, ржавчины, дерева"},
+    {"title": "Повторы и ритмы", "hint": "Окна, балконы, стулья, плитка"},
+    {"title": "Цветовой контраст", "hint": "Красный на зелёном, синий на оранжевом"},
+    {"title": "Движение", "hint": "Длинная выдержка, транспорт, метро, трассы"},
+    {"title": "Домашний уют", "hint": "Лампа, книги, чай, тёплые пледы"},
+    {"title": "Ночной город", "hint": "Гирлянды, фарлайты, отражения в окнах"},
+    {"title": "Природные фактуры", "hint": "Мох, камни, кора, песок"},
+    {"title": "Ретро настроение", "hint": "Старые вывески, плёночный стиль, винтажные предметы"},
+    {"title": "Вода в кадре", "hint": "Брызги, дождь, фонтан, стекло с каплями"},
+    {"title": "Спорт и динамика", "hint": "Бег, велосипед, мяч, размытие движения"},
+    {"title": "Монохром", "hint": "Чёрно-белое, жёсткие тени, высокая контрастность"},
+    {"title": "Симметрия", "hint": "Мосты, тоннели, отражения, арки"},
+    {"title": "Сквозь что-то", "hint": "Дверные проёмы, решётки, листья на переднем плане"},
+    {"title": "Тёплый vs холодный свет", "hint": "Лампы vs окно, вечернее и дневное освещение"},
+    {"title": "Графика и шрифты", "hint": "Граффити, афиши, таблички, вывески"},
+    {"title": "Микродетали города", "hint": "Кнопки лифта, домофоны, ручки дверей"},
+    {"title": "Кухонные сцены", "hint": "Пар, специи, овощи, фактура посуды"},
+    {"title": "Пространство и глубина", "hint": "Длинные коридоры, линии перспективы, туннели"},
+]
+
+
+def _current_week_key() -> str:
+    now = get_moscow_now()
+    monday = now.date() - timedelta(days=now.weekday())
+    return monday.isoformat()
+
+
+def _get_daily_idea() -> tuple[str, str]:
+    if not IDEA_POOL:
+        return "Свободная тема", "Придумай свой сюжет и покажи его в кадре"
+    today = get_moscow_now().date()
+    idx = today.toordinal() % len(IDEA_POOL)
+    idea = IDEA_POOL[idx]
+    return idea["title"], idea["hint"]
+
+
+def _pick_random_idea(exclude_title: str | None = None) -> tuple[str, str]:
+    if not IDEA_POOL:
+        return _get_daily_idea()
+    pool = [i for i in IDEA_POOL if (exclude_title is None or i["title"] != exclude_title)]
+    if not pool:
+        pool = IDEA_POOL
+    idea = random.choice(pool)
+    return idea["title"], idea["hint"]
+
+
+def _build_upload_intro_text(
+    user: dict,
+    *,
+    idea_label: str,
+    idea_title: str,
+    idea_hint: str,
+) -> str:
+    ready = _ready_wording(user)
+    selfie = _selfie_wording(user)
+    lines: list[str] = [
+        "📸 <b>Загрузить фотографию!</b>",
+        "",
+        f"💡 <b>{idea_label}:</b> {idea_title}",
+        f"🔍 Попробуй: {idea_hint}.",
+        "",
+        "🚫 <b>Что нельзя загружать:</b>",
+        f"• {selfie};",
+        "• Рекламные фотографии;",
+        "• Чужие снимки;",
+        "• Откровенный или триггерный контент.",
+        "",
+        "🛡 Модерация вправе удалить вашу фотографию и ограничить доступ к боту при нарушении правил.",
+        "",
+        f"Когда будешь {ready} — жми «Загрузить».",
+    ]
+    return "\n".join(lines)
+
+
+def build_upload_intro_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎲 Сгенерировать идею", callback_data="myphoto:idea")
+    kb.button(text="📤 Загрузить", callback_data="myphoto:add")
+    kb.button(text="⬅️ Назад", callback_data="menu:back")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def _photo_ratings_enabled(photo: dict) -> bool:
@@ -820,30 +923,21 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                 photo = candidate
 
     if photo is None:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="📤 Загрузить", callback_data="myphoto:add")
-        kb.button(text="⬅️ В меню", callback_data="menu:back")
-        kb.adjust(1)
+        kb = build_upload_intro_kb()
 
-        ready = _ready_wording(user)
-        text = (
-            "📸 <b>Загрузить фотографию!</b>\n\n"
-            "Здесь оценивают кадры, а не твою внешность.\n\n"
-            "<b>Правила загрузки:</b>\n"
-            "• Можно загрузить только один кадр в день;\n"
-            "• Селфи / фотографии, где изображён(а) ты сам(а) — нельзя;\n"
-            "• Без рекламы: названия, ссылки и прочее;\n"
-            "• Только свои фотографии;\n"
-            "• Без откровенного контента и насилия.\n\n"
-            "Администрация вправе удалить контент и ограничить доступ к боту при нарушении правил.\n\n"
-            f"Когда будешь {ready} — жми «Загрузить»."
+        idea_title, idea_hint = _get_daily_idea()
+        text = _build_upload_intro_text(
+            user,
+            idea_label="Идея дня",
+            idea_title=idea_title,
+            idea_hint=idea_hint,
         )
 
         try:
             if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
+                await callback.message.edit_caption(caption=text, reply_markup=kb)
             else:
-                await callback.message.edit_text(text, reply_markup=kb.as_markup())
+                await callback.message.edit_text(text, reply_markup=kb)
         except Exception:
             try:
                 await callback.message.delete()
@@ -853,7 +947,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             await callback.message.bot.send_message(
                 chat_id=callback.message.chat.id,
                 text=text,
-                reply_markup=kb.as_markup(),
+                reply_markup=kb,
                 disable_notification=True,
             )
 
@@ -916,6 +1010,72 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     )
 
     await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:idea")
+async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    limit_per_week = 5 if is_premium_user else 1
+    week_key = _current_week_key()
+    try:
+        current = await get_weekly_idea_requests(user["id"], week_key)
+    except Exception:
+        current = 0
+
+    if current >= limit_per_week:
+        await callback.answer(
+            f"Лимит идей на неделю: {limit_per_week}. Попробуй после понедельника.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        new_count = await increment_weekly_idea_requests(user["id"], week_key)
+    except Exception:
+        new_count = current + 1
+
+    daily_title, _ = _get_daily_idea()
+    idea_title, idea_hint = _pick_random_idea(exclude_title=daily_title)
+    text = _build_upload_intro_text(
+        user,
+        idea_label="Новая идея",
+        idea_title=idea_title,
+        idea_hint=idea_hint,
+    )
+    kb = build_upload_intro_kb()
+
+    try:
+        if callback.message and getattr(callback.message, "photo", None):
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    remaining = max(limit_per_week - new_count, 0)
+    if remaining > 0:
+        await callback.answer(f"Новая идея готова! Осталось {remaining} на неделю.")
+    else:
+        await callback.answer("Новая идея готова! Лимит на неделю исчерпан.")
 
 
 # ========= Навигация по своим фотографиям =========
