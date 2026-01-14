@@ -1719,33 +1719,12 @@ def _kb_profile_settings(
     *,
     ratings_allowed: bool = True,
 ) -> InlineKeyboardMarkup:
-    likes_enabled = bool((notify or {}).get("likes_enabled", True))
-    comments_enabled = bool((notify or {}).get("comments_enabled", True))
-
-    streak_enabled = True
-    if streak_status is not None:
-        streak_enabled = bool(streak_status.get("notify_enabled", True))
-
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text=t("settings.btn.ratings.on" if ratings_allowed else "settings.btn.ratings.off", lang),
-        callback_data="profile:settings:toggle:ratings",
-    )
-    kb.button(
-        text=t("settings.btn.likes.on" if likes_enabled else "settings.btn.likes.off", lang),
-        callback_data="profile:settings:toggle:likes"
-    )
-    kb.button(
-        text=t("settings.btn.comments.on" if comments_enabled else "settings.btn.comments.off", lang),
-        callback_data="profile:settings:toggle:comments"
-    )
-    kb.button(
-        text=t("settings.btn.streak.on" if streak_enabled else "settings.btn.streak.off", lang),
-        callback_data="profile:settings:toggle:streak"
-    )
-    kb.button(text=t("settings.lang.btn", lang), callback_data="profile:settings:language")
+    kb.button(text=t("settings.btn.ratings", lang), callback_data="profile:settings:toggle:ratings")
+    kb.button(text=t("settings.btn.notifications", lang), callback_data="profile:settings:notifications")
+    kb.button(text=t("settings.lang.btn", lang), callback_data="profile:settings:toggle:lang")
     kb.button(text=t("common.back", lang), callback_data="menu:profile")
-    kb.adjust(1)
+    kb.adjust(2, 1, 1)
     return kb.as_markup()
 
 
@@ -1756,26 +1735,73 @@ def _render_profile_settings(
     *,
     ratings_allowed: bool = True,
 ) -> str:
+    def _lang_label(code: str) -> str:
+        if code.startswith("ru"):
+            return "🇷🇺 Русский"
+        return "🇬🇧 English"
+
+    ratings_line = "⭐️ " + (t("settings.state.on", lang) if ratings_allowed else t("settings.state.off", lang))
+    lang_label = _lang_label(lang)
+
+    return (
+        f"{t('settings.title', lang)}\n\n"
+        f"{ratings_line}\n"
+        f"{t('settings.ratings.hint', lang)}\n\n"
+        f"🌐 {t('settings.lang.line', lang, value=lang_label)}\n"
+        f"{t('settings.lang.hint', lang, value=lang_label)}\n\n"
+        f"🔔 {t('settings.notifications.hint', lang)}"
+    )
+
+
+def _render_notifications_settings(
+    notify: dict,
+    streak_status: dict | None,
+    lang: str = "ru",
+) -> str:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
     streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
 
-    ratings_line = "⭐️ " + (t("settings.state.on", lang) if ratings_allowed else t("settings.state.off", lang))
     likes_line = "❤️ " + (t("settings.state.on", lang) if likes_enabled else t("settings.state.off", lang))
     comm_line = "💬 " + (t("settings.state.on", lang) if comments_enabled else t("settings.state.off", lang))
     streak_line = "🔥 " + (t("settings.state.on", lang) if streak_enabled else t("settings.state.off", lang))
 
     return (
-        f"{t('settings.title', lang)}\n\n"
-        f"{ratings_line}\n"
-        f"<blockquote>{t('settings.ratings.hint', lang)}</blockquote>\n\n"
+        f"🔔 <b>{t('settings.notifications.title', lang)}</b>\n\n"
         f"{likes_line}\n"
-        f"<blockquote>{t('settings.likes.hint', lang)}</blockquote>\n\n"
+        f"{t('settings.likes.hint', lang)}\n\n"
         f"{comm_line}\n"
-        f"<blockquote>{t('settings.comments.hint', lang)}</blockquote>\n\n"
+        f"{t('settings.comments.hint', lang)}\n\n"
         f"{streak_line}\n"
-        f"<blockquote>{t('settings.streak.hint', lang)}</blockquote>"
+        f"{t('settings.streak.hint', lang)}"
     )
+
+
+def _kb_notifications_settings(
+    notify: dict,
+    streak_status: dict | None,
+    lang: str = "ru",
+) -> InlineKeyboardMarkup:
+    likes_enabled = bool((notify or {}).get("likes_enabled", True))
+    comments_enabled = bool((notify or {}).get("comments_enabled", True))
+    streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
+
+    kb = InlineKeyboardBuilder()
+    kb.button(
+        text=t("settings.btn.likes", lang) + (" ✅" if likes_enabled else " ❌"),
+        callback_data="profile:settings:toggle:likes",
+    )
+    kb.button(
+        text=t("settings.btn.comments", lang) + (" ✅" if comments_enabled else " ❌"),
+        callback_data="profile:settings:toggle:comments",
+    )
+    kb.button(
+        text=t("settings.btn.streak", lang) + (" ✅" if streak_enabled else " ❌"),
+        callback_data="profile:settings:toggle:streak",
+    )
+    kb.button(text=t("common.back", lang), callback_data="profile:settings")
+    kb.adjust(2, 1, 1)
+    return kb.as_markup()
 
 
 @router.callback_query(F.data == "profile:settings")
@@ -1815,105 +1841,67 @@ async def profile_settings_open(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data == "profile:settings:language")
-async def profile_settings_language(callback: CallbackQuery):
+@router.callback_query(F.data == "profile:settings:notifications")
+async def profile_settings_notifications(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
+    notify = await get_notify_settings_by_tg_id(tg_id)
+    streak_status = await get_profile_streak_status(tg_id)
     lang = _get_lang(user)
 
-    kb = InlineKeyboardBuilder()
-
-    ru_text = ("✅ " if lang == "ru" else "") + t("lang.ru", lang)
-    en_text = ("✅ " if lang == "en" else "") + t("lang.en", lang)
-
-    kb.button(text=ru_text, callback_data="profile:settings:language:ru")
-    kb.button(text=en_text, callback_data="profile:settings:language:en")
-    kb.button(text=t("common.back", lang), callback_data="profile:settings")
-    kb.adjust(2, 1)
-
-    text = (
-        f"{t('settings.lang.title', lang)}\n\n"
-        f"{t('settings.lang.current', lang, value=t('lang.' + lang, lang))}\n\n"
-        f"{t('settings.lang.pick', lang)}"
-    )
+    text = _render_notifications_settings(notify, streak_status, lang)
+    kb = _kb_notifications_settings(notify, streak_status, lang)
 
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=kb.as_markup(),
-            parse_mode="HTML",
-        )
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except TelegramBadRequest as e:
-    # не плодим новые сообщения, если текст не меняется
-        if "message is not modified" in str(e):
-            pass
-        else:
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb.as_markup(),
-                parse_mode="HTML",
-                disable_notification=True,
-            )
-
+        if "message is not modified" not in str(e):
+            raise
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("profile:settings:language:"))
-async def profile_settings_language_set(callback: CallbackQuery):
-    parts = (callback.data or "").split(":")
-    code = parts[-1] if parts else "ru"
-    if code not in ("ru", "en"):
-        code = "ru"
-
+@router.callback_query(F.data == "profile:settings:toggle:lang")
+async def profile_settings_toggle_lang(callback: CallbackQuery):
     tg_id = int(callback.from_user.id)
     current_user = await get_user_by_tg_id(tg_id)
     current_lang = _get_lang(current_user)
-
-    if code == current_lang:
-        await callback.answer(t("settings.lang.already", current_lang))
-        return
+    new_lang = "en" if current_lang == "ru" else "ru"
 
     try:
-        await set_user_language_by_tg_id(tg_id, code)
+        await set_user_language_by_tg_id(tg_id, new_lang)
     except Exception:
         await callback.answer(t("settings.lang.save_error", current_lang), show_alert=True)
         return
 
-    # Сразу обновляем экран выбора языка уже на новом языке
     user = await get_user_by_tg_id(tg_id)
     lang = _get_lang(user)
-
-    kb = InlineKeyboardBuilder()
-    ru_text = ("✅ " if lang == "ru" else "") + t("lang.ru", lang)
-    en_text = ("✅ " if lang == "en" else "") + t("lang.en", lang)
-    kb.button(text=ru_text, callback_data="profile:settings:language:ru")
-    kb.button(text=en_text, callback_data="profile:settings:language:en")
-    kb.button(text=t("common.back", lang), callback_data="profile:settings")
-    kb.adjust(2, 1)
-
-    text = (
-        f"{t('settings.lang.title', lang)}\n\n"
-        f"{t('settings.lang.current', lang, value=t('lang.' + lang, lang))}\n\n"
-        f"{t('settings.lang.pick', lang)}"
-    )
+    notify = await get_notify_settings_by_tg_id(tg_id)
+    streak_status = await get_profile_streak_status(tg_id)
+    ratings_allowed = bool((user or {}).get("allow_ratings", True))
 
     try:
         await callback.message.edit_text(
-            text,
-            reply_markup=kb.as_markup(),
+            _render_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
+            reply_markup=_kb_profile_settings(
+                notify,
+                streak_status,
+                lang,
+                ratings_allowed=ratings_allowed,
+            ),
             parse_mode="HTML",
         )
     except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            pass
-        else:
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb.as_markup(),
-                parse_mode="HTML",
-                disable_notification=True,
-            )
+        if "message is not modified" not in str(e):
+            raise
 
     await callback.answer(t("settings.lang.saved", lang))
 
@@ -1931,17 +1919,15 @@ async def profile_settings_toggle_likes(callback: CallbackQuery):
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(
+            _render_notifications_settings(
                 notify,
                 streak_status,
                 lang,
-                ratings_allowed=ratings_allowed,
             ),
-            reply_markup=_kb_profile_settings(
+            reply_markup=_kb_notifications_settings(
                 notify,
                 streak_status,
                 lang,
-                ratings_allowed=ratings_allowed,
             ),
             parse_mode="HTML",
         )
@@ -1965,17 +1951,15 @@ async def profile_settings_toggle_comments(callback: CallbackQuery):
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(
+            _render_notifications_settings(
                 notify,
                 streak_status,
                 lang,
-                ratings_allowed=ratings_allowed,
             ),
-            reply_markup=_kb_profile_settings(
+            reply_markup=_kb_notifications_settings(
                 notify,
                 streak_status,
                 lang,
-                ratings_allowed=ratings_allowed,
             ),
             parse_mode="HTML",
         )
@@ -2038,21 +2022,18 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
     streak_status = await toggle_profile_streak_notify_and_status(tg_id)
     notify = await get_notify_settings_by_tg_id(tg_id)
     lang = _get_lang(user)
-    ratings_allowed = bool((user or {}).get("allow_ratings", True))
 
     try:
         await callback.message.edit_text(
-            _render_profile_settings(
+            _render_notifications_settings(
                 notify,
                 streak_status,
                 lang,
-                ratings_allowed=ratings_allowed,
             ),
-            reply_markup=_kb_profile_settings(
+            reply_markup=_kb_notifications_settings(
                 notify,
                 streak_status,
                 lang,
-                ratings_allowed=ratings_allowed,
             ),
             parse_mode="HTML",
         )

@@ -41,8 +41,16 @@ EN = {
     "settings.comments.hint": "Comments are usually rare, so they arrive instantly. You can disable them.",
     "settings.ratings.hint": "Disable ratings if you want to share a photo without asking for scores.",
     "settings.streak.hint": "Streak reminders work only if your streak has already started.",
-
+    "settings.notifications.hint": "Notifications for likes, comments, and streak.",
+    "settings.notifications.title": "Notifications",
     "settings.lang.btn": "🌐 Language",
+    "settings.lang.line": "Language: {value}",
+    "settings.lang.hint": "You currently use {value}.",
+    "settings.btn.ratings": "⭐️ Ratings",
+    "settings.btn.notifications": "🔔 Notifications",
+    "settings.btn.likes": "❤️ Likes",
+    "settings.btn.comments": "💬 Comments",
+    "settings.btn.streak": "🔥 Streak",
 
     # Profile stats
     "profile.stats.total_photos": "Total uploads: {value}",
