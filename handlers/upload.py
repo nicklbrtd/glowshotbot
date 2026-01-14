@@ -295,6 +295,18 @@ def _pick_random_idea(exclude_title: str | None = None) -> tuple[str, str]:
     return idea["title"], idea["hint"]
 
 
+async def _idea_counters(user: dict, is_premium_user: bool) -> tuple[int, int, int]:
+    """Return (limit, current_used, remaining) for weekly idea requests."""
+    limit = 7 if is_premium_user else 3
+    current = 0
+    try:
+        current = await get_weekly_idea_requests(user["id"], _current_week_key())
+    except Exception:
+        current = 0
+    remaining = max(limit - current, 0)
+    return limit, current, remaining
+
+
 def _build_upload_intro_text(
     user: dict,
     *,
@@ -323,9 +335,18 @@ def _build_upload_intro_text(
     return "\n".join(lines)
 
 
-def build_upload_intro_kb() -> InlineKeyboardMarkup:
+def build_upload_intro_kb(*, remaining: int | None = None, limit: int | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎲 Сгенерировать идею", callback_data="myphoto:idea")
+    remaining_safe = None
+    if remaining is not None:
+        try:
+            remaining_safe = max(int(remaining), 0)
+        except Exception:
+            remaining_safe = None
+    idea_btn_text = "🎲 Сгенерировать идею"
+    if remaining_safe is not None:
+        idea_btn_text += f" ({remaining_safe})"
+    kb.button(text=idea_btn_text, callback_data="myphoto:idea")
     kb.button(text="📤 Загрузить", callback_data="myphoto:add")
     kb.button(text="⬅️ Назад", callback_data="menu:back")
     kb.adjust(1)
@@ -923,7 +944,8 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                 photo = candidate
 
     if photo is None:
-        kb = build_upload_intro_kb()
+        limit, current, remaining = await _idea_counters(user, is_premium_user)
+        kb = build_upload_intro_kb(remaining=remaining, limit=limit)
 
         idea_title, idea_hint = _get_daily_idea()
         text = _build_upload_intro_text(
@@ -1025,14 +1047,10 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
     except Exception:
         is_premium_user = False
 
-    limit_per_week = 5 if is_premium_user else 1
+    limit_per_week, current_used, remaining_before = await _idea_counters(user, is_premium_user)
     week_key = _current_week_key()
-    try:
-        current = await get_weekly_idea_requests(user["id"], week_key)
-    except Exception:
-        current = 0
 
-    if current >= limit_per_week:
+    if current_used >= limit_per_week:
         await callback.answer(
             f"Лимит идей на неделю: {limit_per_week}. Попробуй после понедельника.",
             show_alert=True,
@@ -1042,7 +1060,7 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
     try:
         new_count = await increment_weekly_idea_requests(user["id"], week_key)
     except Exception:
-        new_count = current + 1
+        new_count = current_used + 1
 
     daily_title, _ = _get_daily_idea()
     idea_title, idea_hint = _pick_random_idea(exclude_title=daily_title)
@@ -1052,7 +1070,8 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
         idea_title=idea_title,
         idea_hint=idea_hint,
     )
-    kb = build_upload_intro_kb()
+    remaining_after = max(limit_per_week - new_count, 0)
+    kb = build_upload_intro_kb(remaining=remaining_after, limit=limit_per_week)
 
     try:
         if callback.message and getattr(callback.message, "photo", None):
@@ -1071,9 +1090,8 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
             disable_notification=True,
         )
 
-    remaining = max(limit_per_week - new_count, 0)
-    if remaining > 0:
-        await callback.answer(f"Новая идея готова! Осталось {remaining} на неделю.")
+    if remaining_after > 0:
+        await callback.answer(f"Новая идея готова! Осталось {remaining_after} на неделю.")
     else:
         await callback.answer("Новая идея готова! Лимит на неделю исчерпан.")
 
@@ -1735,40 +1753,30 @@ async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
         is_premium_user = False
 
     can_upload, remaining = await _can_user_upload_now(user, is_premium_user, is_admin)
+
+    # Удаляем старое сообщение с фотографией, чтобы не мелькала старая картинка
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
     if can_upload:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="📤 Загрузить", callback_data="myphoto:add")
-        kb.button(text="⬅️ В меню", callback_data="menu:back")
-        kb.adjust(1, 1)
-        ready = _ready_wording(user)
-        text = (
-            "📸 <b>Загрузить фотографию!</b>\n\n"
-            "Здесь оценивают кадры, а не твою внешность.\n\n"
-            "<b>Правила загрузки:</b>\n"
-            "• Можно загрузить только один кадр в день;\n"
-            "• Селфи / фотографии, где изображён(а) ты сам(а) — нельзя;\n"
-            "• Без рекламы: названия, ссылки и прочее;\n"
-            "• Только свои фотографии;\n"
-            "• Без откровенного контента и насилия.\n\n"
-            "Администрация вправе удалить контент и ограничить доступ к боту при нарушении правил.\n\n"
-            f"Когда будешь {ready} — жми «Загрузить»."
+        idea_title, idea_hint = _get_daily_idea()
+        limit, current_used, remaining = await _idea_counters(user, is_premium_user)
+        text = _build_upload_intro_text(
+            user,
+            idea_label="Идея дня",
+            idea_title=idea_title,
+            idea_hint=idea_hint,
         )
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=kb.as_markup())
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb.as_markup(),
-                disable_notification=True,
-            )
+        kb = build_upload_intro_kb(remaining=remaining, limit=limit)
+
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
         await callback.answer("Фотография удалена.")
         return
     else:
@@ -1780,22 +1788,12 @@ async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
             f"Загрузить новую фотографию можно {remaining}.\n\n"
             "Подождите, либо купите подписку GlowShot Premium и забудьте про лимиты."
         )
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=kb.as_markup())
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb.as_markup(),
-                disable_notification=True,
-            )
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb.as_markup(),
+            disable_notification=True,
+        )
         await callback.answer("Фотография удалена.")
         return
 
