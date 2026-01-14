@@ -241,7 +241,10 @@ RU = {
 
     # Main menu buttons
     "kb.main.myphoto": "📸 Моя фотография",
+    "kb.main.myphoto.empty": "📤 Загрузить",
+    "kb.main.myphoto.filled": "📸 Моя фотография",
     "kb.main.rate": "🔥 Оценивать",
+    "kb.main.rate.empty": "🕓 Оценивать",
     "kb.main.results": "🏁 Итоги",
     "kb.main.profile": "👤 Профиль",
     "kb.main.moderator": "🛡 Модератор",

@@ -241,7 +241,10 @@ EN = {
 
     # Main menu buttons
     "kb.main.myphoto": "📸 My photo",
+    "kb.main.myphoto.empty": "📤 Upload",
+    "kb.main.myphoto.filled": "📸 My photo",
     "kb.main.rate": "🔥 Rate",
+    "kb.main.rate.empty": "🕓 Rate",
     "kb.main.results": "🏁 Results",
     "kb.main.profile": "👤 Profile",
     "kb.main.moderator": "🛡 Moderator",

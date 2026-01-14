@@ -674,15 +674,15 @@ async def profile_back_to_profile(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data == "profile:edit")
-async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    if user is None:
-        await callback.answer("User not found", show_alert=True)
-        return
-
+async def _build_profile_edit_screen(callback_or_msg, user: dict, state: FSMContext | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    """
+    Собирает текст и клавиатуру меню редактирования профиля.
+    Сохраняет message_id/chat_id в state, если передан FSMContext.
+    """
     lang = _get_lang(user)
-    block_status = await get_user_block_status_by_tg_id(callback.from_user.id)
+    from_user = getattr(callback_or_msg, "from_user", None)
+    tg_id = getattr(from_user, "id", None) or user.get("tg_id")
+    block_status = await get_user_block_status_by_tg_id(tg_id)
     is_blocked = bool(block_status.get("is_blocked"))
     until_dt = None
     raw_until = block_status.get("block_until")
@@ -693,11 +693,6 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
             until_dt = None
     if is_blocked and until_dt is not None and until_dt <= get_moscow_now():
         is_blocked = False
-
-    await state.update_data(
-        edit_msg_id=callback.message.message_id,
-        edit_chat_id=callback.message.chat.id,
-    )
 
     kb = InlineKeyboardBuilder()
     text_lines: list[str] = [t("profile.edit.title", lang)]
@@ -726,9 +721,30 @@ async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
 
     text = "\n".join(text_lines)
 
+    if state is not None and getattr(callback_or_msg, "message", None):
+        try:
+            await state.update_data(
+                edit_msg_id=callback_or_msg.message.message_id,
+                edit_chat_id=callback_or_msg.message.chat.id,
+            )
+        except Exception:
+            pass
+
+    return text, kb.as_markup()
+
+
+@router.callback_query(F.data == "profile:edit")
+async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("User not found", show_alert=True)
+        return
+
+    text, markup = await _build_profile_edit_screen(callback, user, state)
+
     await callback.message.edit_text(
         text,
-        reply_markup=kb.as_markup(),
+        reply_markup=markup,
         parse_mode="HTML",
     )
     await callback.answer()
@@ -913,7 +929,7 @@ async def profile_set_city(message: Message, state: FSMContext):
         await state.clear()
         await message.delete()
         user = await get_user_by_tg_id(message.from_user.id)
-        text, markup = await build_profile_view(user)
+        text, markup = await _build_profile_edit_screen(message, user)
         await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup, parse_mode="HTML")
         return
 
@@ -951,7 +967,7 @@ async def profile_set_city(message: Message, state: FSMContext):
     await state.clear()
     await message.delete()
     user = await get_user_by_tg_id(message.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(message, user)
     await message.bot.edit_message_text(chat_id=edit_chat_id, message_id=edit_msg_id, text=text, reply_markup=markup, parse_mode="HTML")
 
 
@@ -1038,7 +1054,7 @@ async def profile_set_channel(message: Message, state: FSMContext):
         await message.delete()
 
         user = await get_user_by_tg_id(message.from_user.id)
-        text, markup = await build_profile_view(user)
+        text, markup = await _build_profile_edit_screen(message, user)
         await message.bot.edit_message_text(
             chat_id=edit_chat_id,
             message_id=edit_msg_id,
@@ -1107,7 +1123,7 @@ async def profile_set_channel(message: Message, state: FSMContext):
     await message.delete()
 
     user = await get_user_by_tg_id(message.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(message, user)
     await message.bot.edit_message_text(
         chat_id=edit_chat_id,
         message_id=edit_msg_id,
@@ -1167,7 +1183,7 @@ async def profile_set_name(message: Message, state: FSMContext):
     await message.delete()
 
     user = await get_user_by_tg_id(message.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(message, user)
     await message.bot.edit_message_text(
         chat_id=edit_chat_id,
         message_id=edit_msg_id,
@@ -1211,7 +1227,7 @@ async def profile_set_gender(callback: CallbackQuery):
         await update_user_gender(int(u["id"]), gender)
 
     user = await get_user_by_tg_id(callback.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(callback, user)
     user_lang = _get_lang(u)
 
     await callback.message.edit_text(
@@ -1257,7 +1273,7 @@ async def profile_age_clear(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
     user = await get_user_by_tg_id(callback.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(callback, user)
     await callback.message.bot.edit_message_text(
         chat_id=edit_chat_id,
         message_id=edit_msg_id,
@@ -1313,7 +1329,7 @@ async def profile_set_age(message: Message, state: FSMContext):
     await message.delete()
 
     user = await get_user_by_tg_id(message.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(message, user)
     await message.bot.edit_message_text(
         chat_id=edit_chat_id,
         message_id=edit_msg_id,
@@ -1389,7 +1405,7 @@ async def profile_set_bio(message: Message, state: FSMContext):
     await message.delete()
 
     user = await get_user_by_tg_id(message.from_user.id)
-    text, markup = await build_profile_view(user)
+    text, markup = await _build_profile_edit_screen(message, user)
     await message.bot.edit_message_text(
         chat_id=edit_chat_id,
         message_id=edit_msg_id,

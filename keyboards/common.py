@@ -11,11 +11,25 @@ def build_main_menu(
     is_moderator: bool = False,
     is_premium: bool = False,
     lang: str = "ru",
+    has_photo: bool | None = None,
+    has_rate_targets: bool | None = None,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     # Базовые пользовательские кнопки
-    kb.button(text=t("kb.main.myphoto", lang), callback_data="myphoto:open")
-    kb.button(text=t("kb.main.rate", lang), callback_data="rate:start")
+    if has_photo is True:
+        myphoto_text = t("kb.main.myphoto.filled", lang)
+    elif has_photo is False:
+        myphoto_text = t("kb.main.myphoto.empty", lang)
+    else:
+        myphoto_text = t("kb.main.myphoto", lang)
+
+    if has_rate_targets is False:
+        rate_text = t("kb.main.rate.empty", lang)
+    else:
+        rate_text = t("kb.main.rate", lang)
+
+    kb.button(text=myphoto_text, callback_data="myphoto:open")
+    kb.button(text=rate_text, callback_data="rate:start")
     kb.button(text=t("kb.main.results", lang), callback_data="results:menu")
     kb.button(text=t("kb.main.profile", lang), callback_data="profile:open")
 

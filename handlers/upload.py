@@ -320,7 +320,7 @@ def _build_upload_intro_text(
         "📸 <b>Загрузить фотографию!</b>",
         "",
         f"💡 <b>{idea_label}:</b> {idea_title}",
-        f"🔍 Попробуй: {idea_hint}.",
+        f"🔍 <b>Попробуй:</b> {idea_hint}.",
         "",
         "🚫 <b>Что нельзя загружать:</b>",
         f"• {selfie};",
@@ -463,13 +463,11 @@ def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="✍️ Описание", callback_data=f"myphoto:edit:desc:{photo_id}"))
     kb.row(InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     return kb.as_markup()
 
 def build_edit_cancel_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     return kb.as_markup()
 
 def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
@@ -480,7 +478,6 @@ def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
     )
     kb.row(InlineKeyboardButton(text="📸 Другое", callback_data=f"myphoto:device:set:{photo_id}:other"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     return kb.as_markup()
 
 def build_tag_kb(photo_id: int) -> InlineKeyboardMarkup:
@@ -488,8 +485,95 @@ def build_tag_kb(photo_id: int) -> InlineKeyboardMarkup:
     for tag_key, label in EDIT_TAGS:
         kb.row(InlineKeyboardButton(text=label, callback_data=f"myphoto:tag:set:{photo_id}:{tag_key}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     return kb.as_markup()
+
+
+def _build_edit_menu_text(photo: dict) -> str:
+    title = (photo.get("title") or "Без названия").strip()
+    device_type = (photo.get("device_type") or "").strip()
+    desc = (photo.get("description") or "").strip()
+    tag = (photo.get("tag") or "").strip()
+
+    tag_label = "🚫 Без тега" if tag == "" else tag
+    for k, lbl in EDIT_TAGS:
+        if k == tag:
+            tag_label = lbl
+            break
+
+    title_safe = _esc_html(title)
+    emoji = _device_emoji(device_type)
+
+    if emoji:
+        header = f"<code>\"{title_safe}\"</code> ({emoji})"
+    else:
+        header = f"<code>\"{title_safe}\"</code> (устройство не указано)"
+
+    tag_line = _tag_label(tag)
+
+    text = "✏️ <b>Редактирование</b>\n\n"
+    text += f"<b>{header}</b>\n"
+    text += f"Тег: <b>{_esc_html(tag_line)}</b>\n\n"
+    text += "Описание:\n"
+    if desc:
+        text += _quote(_shorten(desc, 240))
+    else:
+        text += "<i>можно добавить</i>"
+    return text
+
+
+async def _render_myphoto_edit_menu(
+    *,
+    bot,
+    chat_id: int,
+    message_id: int,
+    photo: dict,
+    had_photo: bool | None = None,
+) -> tuple[int, bool]:
+    """Показать меню редактирования для фото, возвращает (message_id, is_photo_message)."""
+    text = _build_edit_menu_text(photo)
+    kb = build_edit_menu_kb(int(photo["id"]))
+
+    # 1) пробуем редактировать как caption, если знаем что там фото
+    if had_photo:
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+            return message_id, True
+        except Exception:
+            pass
+
+    # 2) пробуем как текст
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        return message_id, False
+    except Exception:
+        pass
+
+    # 3) фоллбек: удалить старое и отправить новое текстовое сообщение
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=kb,
+        disable_notification=True,
+        parse_mode="HTML",
+    )
+    return sent.message_id, False
 
 
 # ===== Stats keyboard and avg formatting helpers =====
@@ -2070,50 +2154,29 @@ async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
     if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-
-    title = (photo.get("title") or "Без названия").strip()
-    device_type = (photo.get("device_type") or "").strip()
-    desc = (photo.get("description") or "").strip()
-    tag = (photo.get("tag") or "").strip()
     # Remember which message we should update after text edits
     try:
         await state.update_data(
             edit_target_chat_id=callback.message.chat.id,
-            edit_target_msg_id=callback.message.message_id
+            edit_target_msg_id=callback.message.message_id,
+            edit_target_is_photo=bool(callback.message.photo),
         )
     except Exception:
         pass
 
-    tag_label = "🚫 Без тега" if tag == "" else tag
-    for k, lbl in EDIT_TAGS:
-        if k == tag:
-            tag_label = lbl
-            break
+    new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
+        bot=callback.message.bot,
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id,
+        photo=photo,
+        had_photo=bool(callback.message.photo),
+    )
 
-    title_safe = _esc_html(title)
-    emoji = _device_emoji(device_type)
-
-    if emoji:
-        header = f"<code>\"{title_safe}\"</code> ({emoji})"
-    else:
-        header = f"<code>\"{title_safe}\"</code> (устройство не указано)"
-
-    tag_line = _tag_label(tag)
-
-    text = "✏️ <b>Редактирование</b>\n\n"
-    text += f"<b>{header}</b>\n"
-    text += f"Тег: <b>{_esc_html(tag_line)}</b>\n\n"
-    text += "Описание:\n"
-    if desc:
-        text += _quote(_shorten(desc, 240))
-    else:
-        text += "<i>можно добавить</i>"
-
-    kb = build_edit_menu_kb(photo_id)
-    if callback.message.photo:
-        await callback.message.edit_caption(caption=text, reply_markup=kb)
-    else:
-        await callback.message.edit_text(text, reply_markup=kb)
+    await state.update_data(
+        edit_target_chat_id=callback.message.chat.id,
+        edit_target_msg_id=new_msg_id,
+        edit_target_is_photo=is_photo_msg,
+    )
 
     await callback.answer()
 
@@ -2142,7 +2205,8 @@ async def myphoto_edit_title(callback: CallbackQuery, state: FSMContext):
     try:
         await state.update_data(
             edit_target_chat_id=callback.message.chat.id,
-            edit_target_msg_id=callback.message.message_id
+            edit_target_msg_id=callback.message.message_id,
+            edit_target_is_photo=bool(callback.message.photo),
         )
     except Exception:
         pass
@@ -2196,21 +2260,22 @@ async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer("Сохранено ✅")
 
-    # Refresh main photo card in the same message
+    # Refresh edit menu in the same message
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted"):
         return
 
-    caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
-
-    await _edit_or_replace_caption_with_photo(
+    new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
         bot=callback.message.bot,
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
-        file_id=_photo_public_id(photo),
-        caption=caption,
-        reply_markup=kb,
+        photo=photo,
+        had_photo=bool(callback.message.photo),
+    )
+    await state.update_data(
+        edit_target_chat_id=callback.message.chat.id,
+        edit_target_msg_id=new_msg_id,
+        edit_target_is_photo=is_photo_msg,
     )
 
 
@@ -2231,7 +2296,8 @@ async def myphoto_edit_desc(callback: CallbackQuery, state: FSMContext):
     try:
         await state.update_data(
             edit_target_chat_id=callback.message.chat.id,
-            edit_target_msg_id=callback.message.message_id
+            edit_target_msg_id=callback.message.message_id,
+            edit_target_is_photo=bool(callback.message.photo),
         )
     except Exception:
         pass
@@ -2284,16 +2350,17 @@ async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
     if not photo or photo.get("is_deleted"):
         return
 
-    caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
-
-    await _edit_or_replace_caption_with_photo(
+    new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
         bot=callback.message.bot,
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
-        file_id=_photo_public_id(photo),
-        caption=caption,
-        reply_markup=kb,
+        photo=photo,
+        had_photo=bool(callback.message.photo),
+    )
+    await state.update_data(
+        edit_target_chat_id=callback.message.chat.id,
+        edit_target_msg_id=new_msg_id,
+        edit_target_is_photo=is_photo_msg,
     )
 
 
@@ -2315,27 +2382,30 @@ async def myphoto_edit_title_text(message: Message, state: FSMContext):
         return
 
     await update_photo_editable_fields(photo_id, int(user["id"]), title=title)
-    await state.clear()
 
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted"):
         return
 
-    caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
-
     target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
     target_msg_id = int(data.get("edit_target_msg_id") or 0)
+    had_photo = bool(data.get("edit_target_is_photo"))
 
     if target_msg_id:
-        await _edit_or_replace_caption_with_photo(
+        new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
             bot=message.bot,
             chat_id=target_chat_id,
             message_id=target_msg_id,
-        file_id=_photo_public_id(photo),
-        caption=caption,
-        reply_markup=kb,
-    )
+            photo=photo,
+            had_photo=had_photo,
+        )
+        await state.update_data(
+            edit_target_chat_id=target_chat_id,
+            edit_target_msg_id=new_msg_id,
+            edit_target_is_photo=is_photo_msg,
+        )
+
+    await state.clear()
 
 
 
@@ -2354,29 +2424,59 @@ async def myphoto_edit_desc_text(message: Message, state: FSMContext):
     await message.delete()
 
     desc = "" if txt == "—" else txt
-    await update_photo_editable_fields(photo_id, int(user["id"]), description=desc)
 
-    await state.clear()
+    if desc and (has_links_or_usernames(desc) or has_promo_channel_invite(desc)):
+        await state.clear()
+        edit_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
+        edit_msg_id = int(data.get("edit_target_msg_id") or 0)
+        had_photo = bool(data.get("edit_target_is_photo"))
+        if edit_msg_id:
+            try:
+                if had_photo:
+                    await message.bot.edit_message_caption(
+                        chat_id=edit_chat_id,
+                        message_id=edit_msg_id,
+                        caption="Описание не должно содержать ссылки или рекламу. Пришли другой текст.",
+                        reply_markup=build_edit_cancel_kb(photo_id),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await message.bot.edit_message_text(
+                        chat_id=edit_chat_id,
+                        message_id=edit_msg_id,
+                        text="Описание не должно содержать ссылки или рекламу. Пришли другой текст.",
+                        reply_markup=build_edit_cancel_kb(photo_id),
+                        parse_mode="HTML",
+                    )
+            except Exception:
+                pass
+        return
+
+    await update_photo_editable_fields(photo_id, int(user["id"]), description=desc)
 
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted"):
         return
 
-    caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
-
     target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
     target_msg_id = int(data.get("edit_target_msg_id") or 0)
+    had_photo = bool(data.get("edit_target_is_photo"))
 
     if target_msg_id:
-        await _edit_or_replace_caption_with_photo(
+        new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
             bot=message.bot,
             chat_id=target_chat_id,
             message_id=target_msg_id,
-        file_id=_photo_public_id(photo),
-        caption=caption,
-        reply_markup=kb,
-    )
+            photo=photo,
+            had_photo=had_photo,
+        )
+        await state.update_data(
+            edit_target_chat_id=target_chat_id,
+            edit_target_msg_id=new_msg_id,
+            edit_target_is_photo=is_photo_msg,
+        )
+
+    await state.clear()
 
 
 

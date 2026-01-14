@@ -128,6 +128,41 @@ def build_subscribe_keyboard(lang: str) -> InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+
+async def _build_dynamic_main_menu(
+    *,
+    user: dict | None,
+    lang: str,
+    is_admin: bool,
+    is_moderator: bool,
+    is_premium: bool,
+) -> InlineKeyboardMarkup:
+    has_photo = False
+    has_rate_targets = True
+
+    try:
+        if user and user.get("id"):
+            photos = await db.get_active_photos_for_user(int(user["id"]))
+            has_photo = bool(photos)
+    except Exception:
+        has_photo = False
+
+    try:
+        if user and user.get("id"):
+            candidate = await db.get_random_photo_for_rating(int(user["id"]))
+            has_rate_targets = candidate is not None
+    except Exception:
+        has_rate_targets = True
+
+    return build_main_menu(
+        is_admin=is_admin,
+        is_moderator=is_moderator,
+        is_premium=is_premium,
+        lang=lang,
+        has_photo=has_photo,
+        has_rate_targets=has_rate_targets,
+    )
+
 async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, lang: str) -> str:
     """Формирует текст главного меню (персональный)."""
 
@@ -203,11 +238,12 @@ async def cmd_start(message: Message, state: FSMContext):
             is_moderator = False
 
         menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium, lang=lang)
-        reply_kb = build_main_menu(
+        reply_kb = await _build_dynamic_main_menu(
+            user=user,
+            lang=lang,
             is_admin=is_admin,
             is_moderator=is_moderator,
             is_premium=is_premium,
-            lang=lang,
         )
 
         # Отправляем статус оплаты отдельным сообщением (не мешаем меню)
@@ -300,6 +336,13 @@ async def cmd_start(message: Message, state: FSMContext):
         is_admin = _get_flag(user, "is_admin")
         is_moderator = _get_flag(user, "is_moderator")
         is_premium = await db.is_user_premium_active(message.from_user.id)
+        main_kb = await _build_dynamic_main_menu(
+            user=user,
+            lang=lang,
+            is_admin=is_admin,
+            is_moderator=is_moderator,
+            is_premium=is_premium,
+        )
 
         chat_id = message.chat.id
         data = await state.get_data()
@@ -315,12 +358,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     menu_text,
                     chat_id=chat_id,
                     message_id=menu_msg_id,
-                    reply_markup=build_main_menu(
-                        is_admin=is_admin,
-                        is_moderator=is_moderator,
-                        is_premium=is_premium,
-                        lang=lang,
-                    ),
+                    reply_markup=main_kb,
                     link_preview_options=NO_PREVIEW,
                     parse_mode="HTML",
                 )
@@ -328,12 +366,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 # Если редактирование не удалось (сообщение удалено/устарело) — отправляем новое
                 sent_message = await message.answer(
                     menu_text,
-                    reply_markup=build_main_menu(
-                        is_admin=is_admin,
-                        is_moderator=is_moderator,
-                        is_premium=is_premium,
-                        lang=lang,  
-                    ),
+                    reply_markup=main_kb,
                     disable_notification=True,
                     link_preview_options=NO_PREVIEW,
                     parse_mode="HTML",
@@ -342,12 +375,7 @@ async def cmd_start(message: Message, state: FSMContext):
             # Меню ещё ни разу не показывалось — отправляем новое сообщение
             sent_message = await message.answer(
                 menu_text,
-                reply_markup=build_main_menu(
-                    is_admin=is_admin,
-                    is_moderator=is_moderator,
-                    is_premium=is_premium,
-                    lang=lang,
-                ),
+                reply_markup=main_kb,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
@@ -381,15 +409,17 @@ async def subscription_check(callback: CallbackQuery):
     is_moderator = _get_flag(user, "is_moderator")
     is_premium = await db.is_user_premium_active(user_id)
     menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
+    main_kb = await _build_dynamic_main_menu(
+        user=user,
+        lang=lang,
+        is_admin=is_admin,
+        is_moderator=is_moderator,
+        is_premium=is_premium,
+    )
     try:
         await callback.message.edit_text(
             menu_text,
-            reply_markup=build_main_menu(
-                is_admin=is_admin,
-                is_moderator=is_moderator,
-                is_premium=is_premium,
-                lang=lang,
-            ),
+            reply_markup=main_kb,
             link_preview_options=NO_PREVIEW,
             parse_mode="HTML",
         )
@@ -398,12 +428,7 @@ async def subscription_check(callback: CallbackQuery):
             await callback.message.bot.send_message(
                 chat_id=callback.message.chat.id,
                 text=menu_text,
-                reply_markup=build_main_menu(
-                    is_admin=is_admin,
-                    is_moderator=is_moderator,
-                    is_premium=is_premium,
-                    lang=lang,
-                ),
+                reply_markup=main_kb,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
@@ -411,12 +436,7 @@ async def subscription_check(callback: CallbackQuery):
         except Exception:
             await callback.message.answer(
                 menu_text,
-                reply_markup=build_main_menu(
-                    is_admin=is_admin,
-                    is_moderator=is_moderator,
-                    is_premium=is_premium,
-                    lang=lang,
-                ),
+                reply_markup=main_kb,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
@@ -446,6 +466,13 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
     is_admin = _get_flag(user, "is_admin")
     is_moderator = _get_flag(user, "is_moderator")
     is_premium = await db.is_user_premium_active(callback.from_user.id)
+    main_kb = await _build_dynamic_main_menu(
+        user=user,
+        lang=lang,
+        is_admin=is_admin,
+        is_moderator=is_moderator,
+        is_premium=is_premium,
+    )
 
     menu_msg_id = None
 
@@ -454,12 +481,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
     try:
         await callback.message.edit_text(
             menu_text,
-            reply_markup=build_main_menu(
-                is_admin=is_admin,
-                is_moderator=is_moderator,
-                is_premium=is_premium,
-                lang=lang,
-            ),
+            reply_markup=main_kb,
             link_preview_options=NO_PREVIEW,
             parse_mode="HTML",
         )
@@ -470,12 +492,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
             sent = await callback.message.bot.send_message(
                 chat_id=chat_id,
                 text=menu_text,
-                reply_markup=build_main_menu(
-                    is_admin=is_admin,
-                    is_moderator=is_moderator,
-                    is_premium=is_premium,
-                    lang=lang,
-                ),
+                reply_markup=main_kb,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
@@ -483,12 +500,7 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         except Exception:
             sent = await callback.message.answer(
                 menu_text,
-                reply_markup=build_main_menu(
-                    is_admin=is_admin,
-                    is_moderator=is_moderator,
-                    is_premium=is_premium,
-                    lang=lang,
-                ),
+                reply_markup=main_kb,
                 disable_notification=True,
                 link_preview_options=NO_PREVIEW,
                 parse_mode="HTML",
