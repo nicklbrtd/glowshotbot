@@ -271,7 +271,21 @@ async def results_menu(callback: CallbackQuery):
         "• 🏷 Итоги по тегам <i>(Premium)</i>\n\n"
         "<i>Пока раздел в разработке.</i>"
     )
-    await _show_text(callback, text, kb)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    try:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 

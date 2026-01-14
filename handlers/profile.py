@@ -628,18 +628,19 @@ async def profile_menu(callback: CallbackQuery):
 
     text, markup = await build_profile_view(user)
 
-    # Профиль — всегда текстовый. Меню-сообщение НЕ удаляем.
+    # Для перехода из меню — удаляем старое сообщение и отправляем новое.
     try:
-        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        await callback.message.delete()
     except Exception:
-        # Если это меню-картинка или нельзя редактировать — просто отправляем профиль отдельным сообщением.
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=markup,
-            parse_mode="HTML",
-            disable_notification=True,
-        )
+        pass
+
+    await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text,
+        reply_markup=markup,
+        parse_mode="HTML",
+        disable_notification=True,
+    )
 
     await callback.answer()
 
@@ -658,24 +659,17 @@ async def profile_back_to_profile(callback: CallbackQuery):
     text, markup = await build_profile_view(user)
 
     try:
-        await callback.message.edit_text(
-            text,
-            reply_markup=markup,
-            parse_mode="HTML",
-        )
+        await callback.message.delete()
     except Exception:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+        pass
 
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=markup,
-            parse_mode="HTML",
-            disable_notification=True,
-        )
+    await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text,
+        reply_markup=markup,
+        parse_mode="HTML",
+        disable_notification=True,
+    )
 
     await callback.answer()
 

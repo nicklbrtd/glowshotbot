@@ -474,59 +474,41 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         is_premium=is_premium,
     )
 
-    menu_msg_id = None
-
     menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium, lang=lang)
-    # 1. Пытаемся превратить текущее сообщение в меню
+    # Сначала шлём новое меню...
     try:
-        await callback.message.edit_text(
-            menu_text,
+        sent = await callback.message.bot.send_message(
+            chat_id=chat_id,
+            text=menu_text,
             reply_markup=main_kb,
+            disable_notification=True,
             link_preview_options=NO_PREVIEW,
             parse_mode="HTML",
         )
-        menu_msg_id = callback.message.message_id
     except Exception:
-        # 2. Если редактировать нельзя (фото, удалено и т.д.) — сначала шлём НОВОЕ меню
-        try:
-            sent = await callback.message.bot.send_message(
-                chat_id=chat_id,
-                text=menu_text,
-                reply_markup=main_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
-        except Exception:
-            sent = await callback.message.answer(
-                menu_text,
-                reply_markup=main_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
-        menu_msg_id = sent.message_id
+        sent = await callback.message.answer(
+            menu_text,
+            reply_markup=main_kb,
+            disable_notification=True,
+            link_preview_options=NO_PREVIEW,
+            parse_mode="HTML",
+        )
+    menu_msg_id = sent.message_id
 
-        # 3. И только ПОСЛЕ этого удаляем старое сообщение (с фоткой/разделом)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+    # ...затем удаляем старое сообщение раздела
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
-    # 4. После того, как меню появилось, можно спокойно удалить сообщение с фоткой
+    # удаляем висевшее сообщение с фото "моя фотография" (если было)
     if photo_msg_id:
         try:
-            # на всякий случай не трогаем меню, если id совпали
             if photo_msg_id != menu_msg_id:
-                await callback.message.bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=photo_msg_id,
-                )
+                await callback.message.bot.delete_message(chat_id=chat_id, message_id=photo_msg_id)
         except Exception:
             pass
         data["myphoto_photo_msg_id"] = None
 
-    # можно ещё сохранить menu_msg_id в state, если пользуешься этим выше
-    if menu_msg_id:
-        data["menu_msg_id"] = menu_msg_id
+    data["menu_msg_id"] = menu_msg_id
     await state.set_data(data)

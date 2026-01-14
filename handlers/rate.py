@@ -370,47 +370,45 @@ async def _apply_rating_card(
 ) -> None:
     """Аккуратно применяет карточку оценивания к существующему сообщению или отправляет новое при ошибке."""
     if card.photo_file_id is None:
-        # Текстовая карточка (нет фото)
-        try:
-            if message is not None:
-                if message.photo:
-                    await message.edit_caption(
-                        caption=card.caption,
-                        reply_markup=card.keyboard,
-                        parse_mode="HTML",
-                    )
-                else:
-                    await message.edit_text(
-                        text=card.caption,
-                        reply_markup=card.keyboard,
-                        parse_mode="HTML",
-                    )
-                return
-        except Exception:
-            pass
-
-        if message_id is not None:
+        # Текстовая карточка (нет фото). Если предыдущее сообщение было с фото — удаляем его, чтобы не оставалась картинка.
+        if message is not None and message.photo:
             try:
-                await bot.edit_message_caption(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    caption=card.caption,
+                await message.delete()
+            except Exception:
+                pass
+            message = None
+
+        if message_id is not None and (message is None or message.photo):
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+            message_id = None
+
+        # Если есть текстовое сообщение без фото — пробуем отредактировать, иначе шлём новое.
+        if message is not None and not message.photo:
+            try:
+                await message.edit_text(
+                    text=card.caption,
                     reply_markup=card.keyboard,
                     parse_mode="HTML",
                 )
                 return
             except Exception:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=card.caption,
-                        reply_markup=card.keyboard,
-                        parse_mode="HTML",
-                    )
-                    return
-                except Exception:
-                    pass
+                message = None
+
+        if message_id is not None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=card.caption,
+                    reply_markup=card.keyboard,
+                    parse_mode="HTML",
+                )
+                return
+            except Exception:
+                message_id = None
 
         try:
             await bot.send_message(
@@ -701,7 +699,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     return "\n".join(lines)
 
-async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> None:
+async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int, *, replace_message: bool = False) -> None:
     """
     Показать следующую фотографию для оценивания, стараясь переиспользовать текущее сообщение.
 
@@ -712,12 +710,20 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int) -> N
     """
     if await _deny_if_full_banned(callback=callback):
         return
+    msg = None if replace_message else callback.message
+    msg_id = None if replace_message else callback.message.message_id
+    if replace_message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
     card = await _build_next_rating_card(user_id, viewer_tg_id=int(callback.from_user.id))
     await _apply_rating_card(
         bot=callback.message.bot,
         chat_id=callback.message.chat.id,
-        message=callback.message,
-        message_id=callback.message.message_id,
+        message=msg,
+        message_id=msg_id,
         card=card,
     )
 
@@ -1885,16 +1891,16 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "rate:start")
 async def rate_start(callback: CallbackQuery) -> None:
-    await rate_root(callback)
+    await rate_root(callback, replace_message=True)
 
 @router.callback_query(F.data == "menu:rate")
-async def rate_root(callback: CallbackQuery) -> None:
+async def rate_root(callback: CallbackQuery, replace_message: bool = False) -> None:
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
-    await show_next_photo_for_rating(callback, user["id"])
+    await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message)
 @router.callback_query(F.data == "comment:seen")
 async def comment_seen(callback: CallbackQuery) -> None:
     """
