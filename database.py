@@ -4013,7 +4013,8 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
         if tgid not in candidate_user_ids:
             candidate_user_ids.append(tgid)
 
-        async def _pick(where_deleted_sql: str):
+        async def _pick(where_deleted_sql: str, *, require_rated: bool = False):
+            having_clause = "HAVING COUNT(r.id) > 0" if require_rated else ""
             q = f"""
                 WITH s AS (
                     SELECT
@@ -4026,6 +4027,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     WHERE ph.user_id = ANY($1::bigint[])
                     {where_deleted_sql}
                     GROUP BY ph.id
+                    {having_clause}
                 )
                 SELECT
                     s.*,
@@ -4045,11 +4047,20 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
             return await conn.fetchrow(q, candidate_user_ids, float(prior), float(global_mean))
 
         try:
-            row = await _pick("AND ph.is_deleted=0")
+            # 1) Активные с оценками
+            row = await _pick("AND ph.is_deleted=0", require_rated=True)
             if row:
                 return dict(row)
-
-            row = await _pick("")
+            # 2) Любые с оценками (может быть архив)
+            row = await _pick("", require_rated=True)
+            if row:
+                return dict(row)
+            # 3) Активные без оценок (fallback)
+            row = await _pick("AND ph.is_deleted=0", require_rated=False)
+            if row:
+                return dict(row)
+            # 4) Любые без оценок (последний fallback)
+            row = await _pick("", require_rated=False)
             return dict(row) if row else None
         except Exception:
             return None
