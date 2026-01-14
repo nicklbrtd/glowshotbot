@@ -733,6 +733,15 @@ async def _build_profile_edit_screen(callback_or_msg, user: dict, state: FSMCont
     return text, kb.as_markup()
 
 
+def _build_bio_edit_kb(user: dict, lang: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if (user.get("bio") or "").strip():
+        kb.button(text=t("profile.edit.bio.clear_btn", lang), callback_data="profile:bio_clear")
+    kb.button(text=t("common.back", lang), callback_data="profile:edit")
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
 @router.callback_query(F.data == "profile:edit")
 async def profile_edit_menu(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
@@ -790,7 +799,7 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
         except Exception:
             is_active = False
 
-    if not is_active:
+    if (not is_active) and not (user.get("tg_channel_link")):
         await callback.answer(
             t("profile.edit.channel.premium_only", lang),
             show_alert=True,
@@ -800,9 +809,15 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ProfileEditStates.waiting_new_channel)
     await state.update_data(edit_msg_id=callback.message.message_id, edit_chat_id=callback.message.chat.id)
 
+    kb = InlineKeyboardBuilder()
+    if (user.get("tg_channel_link") or "").strip():
+        kb.button(text=t("profile.edit.channel.clear_btn", lang), callback_data="profile:channel_clear")
+    kb.button(text=t("common.back", lang), callback_data="profile:edit")
+    kb.adjust(1, 1)
+
     await callback.message.edit_text(
         t("profile.edit.channel.ask", lang),
-        reply_markup=build_back_kb(callback_data="profile:edit", text=t("common.back", lang)),
+        reply_markup=kb.as_markup(),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1133,6 +1148,31 @@ async def profile_set_channel(message: Message, state: FSMContext):
     )
 
 
+@router.callback_query(F.data == "profile:channel_clear")
+async def profile_channel_clear(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id", callback.message.message_id)
+    edit_chat_id = data.get("edit_chat_id", callback.message.chat.id)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
+    if user and user.get("id"):
+        await update_user_channel_link(int(user["id"]), None)
+    await state.clear()
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    text, markup = await _build_profile_edit_screen(callback, user)
+    await callback.message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+        parse_mode="HTML",
+    )
+    await callback.answer(t("profile.edit.channel.deleted", lang))
+
+
 @router.message(ProfileEditStates.waiting_new_name, F.text)
 async def profile_set_name(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -1349,7 +1389,7 @@ async def profile_edit_bio(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         t("profile.edit.bio.ask", lang),
-        reply_markup=build_back_kb(callback_data="profile:edit", text=t("common.back", lang)),
+        reply_markup=_build_bio_edit_kb(user, lang),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1413,6 +1453,31 @@ async def profile_set_bio(message: Message, state: FSMContext):
         reply_markup=markup,
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data == "profile:bio_clear")
+async def profile_bio_clear(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    edit_msg_id = data.get("edit_msg_id", callback.message.message_id)
+    edit_chat_id = data.get("edit_chat_id", callback.message.chat.id)
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+
+    if user and user.get("id"):
+        await update_user_bio(int(user["id"]), None)
+    await state.clear()
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    text, markup = await _build_profile_edit_screen(callback, user)
+    await callback.message.bot.edit_message_text(
+        chat_id=edit_chat_id,
+        message_id=edit_msg_id,
+        text=text,
+        reply_markup=markup,
+        parse_mode="HTML",
+    )
+    await callback.answer(t("profile.edit.bio.deleted", lang))
 
 
 

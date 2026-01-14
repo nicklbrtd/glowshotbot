@@ -56,9 +56,7 @@ def build_back_to_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
 
 def build_back_kb(callback_data: str, text: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    if text is None:
-        text = t("kb.back", lang)
-    kb.button(text=text, callback_data=callback_data)
+    kb.button(text=text or t("kb.back", lang), callback_data=callback_data)
     kb.adjust(1)
     return kb.as_markup()
 

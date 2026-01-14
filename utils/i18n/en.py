@@ -91,6 +91,8 @@ EN = {
     "profile.edit.bio.empty": "❌ Bio can't be empty.\n\nWrite a couple of lines: what you like to shoot and your style.",
     "profile.edit.bio.invalid": "❌ Please don't put @usernames, links, or channel ads in your bio.\n\nWrite a short bio <b>without contacts</b>.",
     "profile.edit.bio.saved": "✅ Bio updated.",
+    "profile.edit.bio.clear_btn": "🗑 Delete bio",
+    "profile.edit.bio.deleted": "Bio removed.",
 
     # Profile edit: gender
     "profile.edit.gender.ask": "⚧️ <b>Gender</b>\n\nChoose how to show it on your profile.",
@@ -101,10 +103,12 @@ EN = {
 
     # Profile edit: channel
     "profile.edit.channel.premium_only": "Link is available only with GlowShot Premium 💎",
-    "profile.edit.channel.ask": "📡 <b>Link</b>\n\nSend your Telegram channel/profile link.\n\nOnly Telegram links are allowed:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.\n\nTo remove the link, send <code>delete</code>.",
+    "profile.edit.channel.ask": "📡 <b>Link</b>\n\nSend your Telegram channel/profile link.\n\nOnly Telegram links are allowed:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.",
     "profile.edit.channel.bad_username": "That doesn't look like a valid @username.\n\nSend <code>https://t.me/username</code> or just <code>@username</code>.",
     "profile.edit.channel.only_tg": "You can set only a Telegram link.\n\nValid examples:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.",
     "profile.edit.channel.removed": "✅ Link removed.",
+    "profile.edit.channel.deleted": "✅ Link removed.",
+    "profile.edit.channel.clear_btn": "🗑 Delete link",
     "profile.edit.channel.saved": "✅ Link updated.",
 
     # Profile edit: city

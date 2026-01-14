@@ -91,6 +91,8 @@ RU = {
     "profile.edit.bio.empty": "❌ Описание не может быть пустым.\n\nНапиши пару слов о себе: что любишь снимать и какой у тебя стиль.",
     "profile.edit.bio.invalid": "❌ В описании нельзя оставлять @username, ссылки или рекламировать каналы.\n\nНапиши пару слов о себе <b>без контактов</b>.",
     "profile.edit.bio.saved": "✅ Описание обновлено.",
+    "profile.edit.bio.clear_btn": "🗑 Удалить описание",
+    "profile.edit.bio.deleted": "Описание удалено.",
 
     # Profile edit: gender
     "profile.edit.gender.ask": "⚧️ <b>Пол</b>\n\nВыбери, как тебя указать в профиле.",
@@ -101,10 +103,12 @@ RU = {
 
     # Profile edit: channel
     "profile.edit.channel.premium_only": "Привязка ссылки доступна только с GlowShot Premium 💎",
-    "profile.edit.channel.ask": "📡 <b>Ссылка</b>\n\nОтправь ссылку на свой Telegram-канал или профиль.\n\nПринимаются только Telegram-ссылки:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.\n\nЕсли хочешь убрать ссылку — отправь слово <code>удалить</code>.",
+    "profile.edit.channel.ask": "📡 <b>Ссылка</b>\n\nОтправь ссылку на свой Telegram-канал или профиль.\n\nПринимаются только Telegram-ссылки:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.",
     "profile.edit.channel.bad_username": "Это не похоже на корректный @username.\n\nОтправь ссылку вида <code>https://t.me/username</code> или просто <code>@username</code>.",
     "profile.edit.channel.only_tg": "Можно указать только ссылку на Telegram.\n\nПодойдёт:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.",
     "profile.edit.channel.removed": "✅ Ссылка удалена.",
+    "profile.edit.channel.deleted": "✅ Ссылка удалена.",
+    "profile.edit.channel.clear_btn": "🗑 Удалить ссылку",
     "profile.edit.channel.saved": "✅ Ссылка обновлена.",
 
     # Profile edit: city
