@@ -86,9 +86,9 @@ async def build_premium_benefits_text(lang: str) -> str:
     for b in benefits:
         title = html.escape(str(b.get("title") or ""), quote=False)
         desc = html.escape(str(b.get("description") or ""), quote=False)
-        lines.append(f"{title}")
+        lines.append(f"<b>{title}</b>")
         if desc:
-            lines.append(desc)
+            lines.append(f"<i>{desc}</i>")
         lines.append("")
 
     return "\n".join(lines).strip()

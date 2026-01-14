@@ -318,7 +318,8 @@ async def _render_benefits_admin(state: FSMContext, message_or_cb, *, error: str
     for idx, b in enumerate(benefits, start=1):
         title = str(b.get("title") or "")
         kb.button(text=f"{idx}. {title[:28] or '—'}", callback_data=f"admin:premium:benefits:edit:{b['id']}")
-    kb.button(text="✏️ Редактировать номер", callback_data="admin:premium:benefits:editnum")
+    kb.button(text="✏️ Редактировать", callback_data="admin:premium:benefits:editnum")
+    kb.button(text="🔀 Поменять местами", callback_data="admin:premium:benefits:swap")
     kb.button(text="➕ Добавить", callback_data="admin:premium:benefits:add")
     kb.button(text="⬅️ Назад", callback_data="admin:premium")
     kb.adjust(1)
@@ -403,6 +404,7 @@ class PremiumAdminStates(StatesGroup):
     waiting_benefit_add = State()
     waiting_benefit_edit = State()
     waiting_benefit_edit_num = State()
+    waiting_benefit_swap = State()
 
 
 
@@ -1268,11 +1270,39 @@ async def admin_premium_benefits_editnum(callback: CallbackQuery, state: FSMCont
     admin = await _ensure_admin(callback)
     if not admin:
         return
+    benefits = await get_premium_benefits()
+    if not benefits:
+        await _render_benefits_admin(state, callback, error="Пока нет пунктов для редактирования.")
+        await callback.answer()
+        return
+
     await state.set_state(PremiumAdminStates.waiting_benefit_edit_num)
+    kb = InlineKeyboardBuilder()
+    for idx, b in enumerate(benefits, start=1):
+        title = str(b.get("title") or "")
+        kb.button(text=f"{idx}. {title[:28] or '—'}", callback_data=f"admin:premium:benefits:edit:{b['id']}")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium:benefits")
+    kb.adjust(1)
+
     await _edit_premium_prompt_or_answer(
         callback.message,
         state,
-        "✏️ <b>Редактирование по номеру</b>\n\nОтправь номер преимущества из списка.\nЯ попрошу новый текст в следующем шаге.",
+        "✏️ <b>Редактирование</b>\n\nВыбери пункт кнопкой или отправь его номер.\nПосле выбора пришли новый слоган и описание одним сообщением.",
+        kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:benefits:swap")
+async def admin_premium_benefits_swap(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await state.set_state(PremiumAdminStates.waiting_benefit_swap)
+    await _edit_premium_prompt_or_answer(
+        callback.message,
+        state,
+        "🔀 <b>Поменять местами</b>\n\nОтправь два номера через пробел, например: <code>1 3</code>.",
         InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:premium:benefits")]
@@ -1381,6 +1411,30 @@ async def admin_premium_benefit_edit_save(message: Message, state: FSMContext):
         await _render_benefits_admin(state, message, error="Не удалось обновить.")
         return
     await _render_benefits_admin(state, message, error="Обновлено!")
+
+
+@router.message(PremiumAdminStates.waiting_benefit_swap, F.text)
+async def admin_premium_benefit_swap_save(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+    raw = (message.text or "").strip()
+    await message.delete()
+    parts = raw.replace(",", " ").split()
+    if len(parts) != 2:
+        await _render_benefits_admin(state, message, error="Нужно два номера через пробел.")
+        return
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except Exception:
+        await _render_benefits_admin(state, message, error="Номера должны быть числами.")
+        return
+    ok = await swap_premium_benefits(a, b)
+    await _premium_soft_clear(state)
+    if not ok:
+        await _render_benefits_admin(state, message, error="Не удалось поменять местами. Проверь номера.")
+        return
+    await _render_benefits_admin(state, message, error="Порядок обновлён!")
 
 @router.callback_query(F.data == "admin:premium:list")
 async def admin_premium_list(callback: CallbackQuery, state: FSMContext):

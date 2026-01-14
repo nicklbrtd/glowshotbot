@@ -2629,6 +2629,46 @@ async def update_premium_benefit(benefit_id: int, title: str, description: str) 
         )
     return res.lower().startswith("update") and "0" not in res.split()
 
+
+async def swap_premium_benefits(order_idx1: int, order_idx2: int) -> bool:
+    """Swap benefits by their 1-based order (position)."""
+    if order_idx1 == order_idx2:
+        return True
+    benefits = await get_premium_benefits()
+    n = len(benefits)
+    if (
+        order_idx1 <= 0
+        or order_idx2 <= 0
+        or order_idx1 > n
+        or order_idx2 > n
+    ):
+        return False
+
+    b1 = benefits[order_idx1 - 1]
+    b2 = benefits[order_idx2 - 1]
+    id1, pos1 = int(b1["id"]), int(b1["position"])
+    id2, pos2 = int(b2["id"]), int(b2["position"])
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE premium_benefits
+                SET position = CASE
+                    WHEN id=$1 THEN $3
+                    WHEN id=$2 THEN $4
+                    ELSE position
+                END
+                WHERE id IN ($1,$2)
+                """,
+                id1,
+                id2,
+                pos2,
+                pos1,
+            )
+    return True
+
 # -------------------- payments --------------------
 
 
