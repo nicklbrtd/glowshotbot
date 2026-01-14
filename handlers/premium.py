@@ -147,8 +147,8 @@ async def profile_premium_menu(callback: CallbackQuery):
         news_items = await get_premium_news_since(since, limit=10)
         if news_items:
             news_lines = [t("premium.news.header", lang)]
-            for i, it in enumerate(news_items, start=1):
-                news_lines.append(f"{i}. {it}")
+            for it in news_items:
+                news_lines.append(f"• {it}")
             news_block = "\n".join(news_lines)
         else:
             news_block = t("premium.news.header", lang) + "\n" + t("premium.news.empty", lang)

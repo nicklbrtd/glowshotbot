@@ -315,9 +315,6 @@ async def _render_benefits_admin(state: FSMContext, message_or_cb, *, error: str
         lines.append(f"⚠️ {error}")
 
     kb = InlineKeyboardBuilder()
-    for idx, b in enumerate(benefits, start=1):
-        title = str(b.get("title") or "")
-        kb.button(text=f"{idx}. {title[:28] or '—'}", callback_data=f"admin:premium:benefits:edit:{b['id']}")
     kb.button(text="✏️ Редактировать", callback_data="admin:premium:benefits:editnum")
     kb.button(text="🔀 Поменять местами", callback_data="admin:premium:benefits:swap")
     kb.button(text="➕ Добавить", callback_data="admin:premium:benefits:add")
@@ -1228,7 +1225,7 @@ async def admin_premium_news_save(message: Message, state: FSMContext):
         )
         return
 
-    await state.clear()
+    await _premium_soft_clear(state)
     await _edit_premium_prompt_or_answer(
         message,
         state,
