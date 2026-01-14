@@ -4035,7 +4035,11 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                         ELSE NULL
                     END AS bayes_score
                 FROM s
-                ORDER BY bayes_score DESC NULLS LAST, ratings_count DESC, id ASC
+                ORDER BY
+                    ratings_count DESC,
+                    bayes_score DESC NULLS LAST,
+                    avg_rating DESC NULLS LAST,
+                    id ASC
                 LIMIT 1
             """
             return await conn.fetchrow(q, candidate_user_ids, float(prior), float(global_mean))
