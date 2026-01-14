@@ -5,10 +5,15 @@ from aiogram.types import CallbackQuery
 from datetime import datetime, timedelta
 
 from utils.time import get_moscow_now
-from database import get_premium_news_since, get_user_by_tg_id
+from database import (
+    get_premium_news_since,
+    get_user_by_tg_id,
+    get_premium_benefits,
+)
 from database import get_user_premium_status, is_user_premium_active
 from utils.i18n import t
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import html
 
 router = Router(name="premium")
 
@@ -72,16 +77,21 @@ def _get_lang(user: object | None) -> str:
         return "ru"
 
 
-def build_premium_benefits_text(lang: str) -> str:
-    return (
-        t("premium.benefits.title", lang) + "\n\n"
-        + t("premium.benefits.header", lang) + "\n"
-        + t("premium.benefits.p1.title", lang) + "\n" + t("premium.benefits.p1.text", lang) + "\n"
-        + t("premium.benefits.p2.title", lang) + "\n" + t("premium.benefits.p2.text", lang) + "\n"
-        + t("premium.benefits.p3.title", lang) + "\n" + t("premium.benefits.p3.text", lang) + "\n"
-        + t("premium.benefits.p4.title", lang) + "\n" + t("premium.benefits.p4.text", lang) + "\n\n"
-        + t("premium.benefits.footer", lang)
-    )
+async def build_premium_benefits_text(lang: str) -> str:
+    benefits = await get_premium_benefits()
+    if not benefits:
+        return t("premium.benefits.title", lang) + "\n\n" + t("premium.benefits.footer", lang)
+
+    lines: list[str] = [t("premium.benefits.title", lang), ""]
+    for b in benefits:
+        title = html.escape(str(b.get("title") or ""), quote=False)
+        desc = html.escape(str(b.get("description") or ""), quote=False)
+        lines.append(f"{title}")
+        if desc:
+            lines.append(desc)
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def _format_until_and_days_left(until_iso: str | None, lang: str) -> tuple[str, str]:
@@ -152,7 +162,7 @@ async def profile_premium_menu(callback: CallbackQuery):
 
     else:
         # --- Inactive premium scenario ---
-        text = build_premium_benefits_text(lang)
+        text = await build_premium_benefits_text(lang)
 
         kb.button(text=t("premium.plan.7d", lang), callback_data="premium:plan:7d")
         kb.button(text=t("premium.plan.30d", lang), callback_data="premium:plan:30d")
@@ -175,7 +185,7 @@ async def premium_benefits(callback: CallbackQuery):
     kb.adjust(1)
 
     await callback.message.edit_text(
-        build_premium_benefits_text(lang),
+        await build_premium_benefits_text(lang),
         reply_markup=kb.as_markup(),
         parse_mode="HTML",
     )

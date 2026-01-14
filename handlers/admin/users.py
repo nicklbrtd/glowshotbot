@@ -13,7 +13,7 @@ from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from database import (
@@ -32,6 +32,10 @@ from database import (
     hide_active_photos_for_user,
     restore_photos_from_status,
     get_all_users_tg_ids,
+    add_premium_news,
+    get_premium_benefits,
+    add_premium_benefit,
+    update_premium_benefit,
 )
 
 from .common import (
@@ -154,8 +158,10 @@ def build_premium_menu_kb() -> InlineKeyboardMarkup:
     kb.button(text="📋 Список", callback_data="admin:premium:list")
     kb.button(text="➕ Выдать", callback_data="admin:premium:grant")
     kb.button(text="➖ Убрать", callback_data="admin:premium:revoke")
+    kb.button(text="🆕 Добавить изменения", callback_data="admin:premium:news")
+    kb.button(text="🧩 Преимущества", callback_data="admin:premium:benefits")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 2)
+    kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -279,6 +285,46 @@ async def _premium_soft_clear(state: FSMContext):
         await state.update_data(premium_prompt_chat_id=chat_id, premium_prompt_msg_id=msg_id)
 
 
+def _split_benefit_text(raw: str) -> tuple[str, str]:
+    s = (raw or "").strip()
+    if not s:
+        return "", ""
+    for sep in (" — ", " - ", " —", " -", "—", "-"):
+        if sep in s:
+            parts = s.split(sep, 1)
+            return parts[0].strip(), parts[1].strip()
+    return s, ""
+
+
+async def _render_benefits_admin(state: FSMContext, message_or_cb, *, error: str | None = None):
+    benefits = await get_premium_benefits()
+    lines: list[str] = ["🧩 <b>Преимущества Premium</b>", ""]
+    if benefits:
+        for i, b in enumerate(benefits, start=1):
+            title = html.escape(str(b.get("title") or ""), quote=False)
+            desc = html.escape(str(b.get("description") or ""), quote=False)
+            lines.append(f"{i}) {title}")
+            if desc:
+                lines.append(desc)
+            lines.append("")
+        lines.append("Выбери пункт для редактирования или добавь новый.")
+    else:
+        lines.append("Пока нет записей. Нажми «➕ Добавить», чтобы создать первый пункт.")
+    if error:
+        lines.append("")
+        lines.append(f"⚠️ {error}")
+
+    kb = InlineKeyboardBuilder()
+    for idx, b in enumerate(benefits, start=1):
+        title = str(b.get("title") or "")
+        kb.button(text=f"{idx}. {title[:28] or '—'}", callback_data=f"admin:premium:benefits:edit:{b['id']}")
+    kb.button(text="✏️ Редактировать номер", callback_data="admin:premium:benefits:editnum")
+    kb.button(text="➕ Добавить", callback_data="admin:premium:benefits:add")
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.adjust(1)
+
+    await _edit_premium_prompt_or_answer(message_or_cb, state, "\n".join(lines), kb.as_markup())
+
 
 def build_premium_notice_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -353,6 +399,10 @@ class PremiumAdminStates(StatesGroup):
     waiting_fest_text = State()
     waiting_fest_days = State()
     waiting_fest_notify = State()
+    waiting_premium_news = State()
+    waiting_benefit_add = State()
+    waiting_benefit_edit = State()
+    waiting_benefit_edit_num = State()
 
 
 
@@ -1112,6 +1162,7 @@ async def admin_premium_menu(callback: CallbackQuery, state: FSMContext):
         "• 📋 Список — текущие премиум-пользователи\n"
         "• ➕ Выдать — по @username/ID и сроку\n"
         "• ➖ Убрать — снять премиум\n"
+        "• 🆕 Добавить изменения — текст в блок «Новое в Premium» за неделю\n"
     )
 
     try:
@@ -1122,6 +1173,214 @@ async def admin_premium_menu(callback: CallbackQuery, state: FSMContext):
     await state.update_data(premium_prompt_chat_id=msg.chat.id, premium_prompt_msg_id=msg.message_id)
     await callback.answer()
 
+
+@router.callback_query(F.data == "admin:premium:news")
+async def admin_premium_news(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await _premium_soft_clear(state)
+    await state.set_state(PremiumAdminStates.waiting_premium_news)
+
+    text = (
+        "🆕 <b>Добавить изменения в Premium</b>\n\n"
+        "Отправь текст одним сообщением.\n"
+        "Пример:\n"
+        "• Новый фильтр 🔥\n"
+        "• Улучшили выдачу фото\n\n"
+        "Эти пункты попадут в «Новое в Premium за последнюю неделю» в профиле."
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="admin:premium")
+    kb.adjust(1)
+
+    await _edit_premium_prompt_or_answer(callback.message, state, text, kb.as_markup())
+    await callback.answer()
+
+
+@router.message(PremiumAdminStates.waiting_premium_news, F.text)
+async def admin_premium_news_save(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    raw = (message.text or "").strip()
+    await message.delete()
+    if not raw:
+        await _edit_premium_prompt_or_answer(
+            message,
+            state,
+            "Текст пустой. Отправь описание изменения или вернись назад.",
+            build_premium_menu_kb(),
+        )
+        return
+
+    try:
+        await add_premium_news(raw)
+    except Exception:
+        await _edit_premium_prompt_or_answer(
+            message,
+            state,
+            "Не удалось сохранить. Попробуй позже.",
+            build_premium_menu_kb(),
+        )
+        return
+
+    await state.clear()
+    await _edit_premium_prompt_or_answer(
+        message,
+        state,
+        "✅ Добавлено! Запись появится в блоке «Новое в Premium» (последняя неделя).",
+        build_premium_menu_kb(),
+    )
+
+@router.callback_query(F.data == "admin:premium:benefits")
+async def admin_premium_benefits(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await _premium_soft_clear(state)
+    await _render_benefits_admin(state, callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:benefits:add")
+async def admin_premium_benefits_add(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await state.set_state(PremiumAdminStates.waiting_benefit_add)
+    await _edit_premium_prompt_or_answer(
+        callback.message,
+        state,
+        "➕ <b>Новый пункт преимуществ</b>\n\nОтправь слоган и описание в одном сообщении.\nПример:\n<i>🚀 Быстрый старт — приоритет в очереди загрузок</i>",
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:premium:benefits")]
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:premium:benefits:editnum")
+async def admin_premium_benefits_editnum(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    await state.set_state(PremiumAdminStates.waiting_benefit_edit_num)
+    await _edit_premium_prompt_or_answer(
+        callback.message,
+        state,
+        "✏️ <b>Редактирование по номеру</b>\n\nОтправь номер преимущества из списка.\nЯ попрошу новый текст в следующем шаге.",
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:premium:benefits")]
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^admin:premium:benefits:edit:(\d+)$"))
+async def admin_premium_benefits_edit(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+    try:
+        bid = int((callback.data or "").split(":")[-1])
+    except Exception:
+        await callback.answer("Некорректный ID.", show_alert=True)
+        return
+    await state.set_state(PremiumAdminStates.waiting_benefit_edit)
+    await state.update_data(premium_benefit_id=bid)
+    await _edit_premium_prompt_or_answer(
+        callback.message,
+        state,
+        "✏️ <b>Редактирование пункта</b>\n\nОтправь новый слоган и описание в одном сообщении.\nПример:\n<i>🚀 Быстрый старт — приоритет в очереди загрузок</i>",
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:premium:benefits")]
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.message(PremiumAdminStates.waiting_benefit_add, F.text)
+async def admin_premium_benefit_add_save(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+    raw = (message.text or "").strip()
+    await message.delete()
+    title, desc = _split_benefit_text(raw)
+    if not title:
+        await _render_benefits_admin(state, message, error="Пустой слоган. Отправь слоган и описание.")
+        return
+    try:
+        await add_premium_benefit(title, desc)
+    except Exception:
+        await _render_benefits_admin(state, message, error="Не удалось сохранить. Попробуй ещё раз.")
+        return
+    await _premium_soft_clear(state)
+    await _render_benefits_admin(state, message, error="Добавлено!")
+
+
+@router.message(PremiumAdminStates.waiting_benefit_edit_num, F.text)
+async def admin_premium_benefit_pick_number(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+    raw = (message.text or "").strip()
+    await message.delete()
+    try:
+        num = int(raw)
+    except Exception:
+        await _render_benefits_admin(state, message, error="Номер должен быть числом.")
+        return
+    benefits = await get_premium_benefits()
+    if num <= 0 or num > len(benefits):
+        await _render_benefits_admin(state, message, error="Нет преимущества с таким номером.")
+        return
+    benefit = benefits[num - 1]
+    await state.set_state(PremiumAdminStates.waiting_benefit_edit)
+    await state.update_data(premium_benefit_id=int(benefit.get("id")))
+    await _edit_premium_prompt_or_answer(
+        message,
+        state,
+        "✏️ <b>Редактирование пункта</b>\n\nОтправь новый слоган и описание в одном сообщении.\nПример:\n<i>🚀 Быстрый старт — приоритет в очереди загрузок</i>",
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:premium:benefits")]
+            ]
+        ),
+    )
+
+
+@router.message(PremiumAdminStates.waiting_benefit_edit, F.text)
+async def admin_premium_benefit_edit_save(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+    data = await state.get_data()
+    bid = int(data.get("premium_benefit_id") or 0)
+    raw = (message.text or "").strip()
+    await message.delete()
+    title, desc = _split_benefit_text(raw)
+    if not title or not bid:
+        await _render_benefits_admin(state, message, error="Пустой слоган или неверный пункт.")
+        return
+    ok = False
+    try:
+        ok = await update_premium_benefit(bid, title, desc)
+    except Exception:
+        ok = False
+    await _premium_soft_clear(state)
+    if not ok:
+        await _render_benefits_admin(state, message, error="Не удалось обновить.")
+        return
+    await _render_benefits_admin(state, message, error="Обновлено!")
 
 @router.callback_query(F.data == "admin:premium:list")
 async def admin_premium_list(callback: CallbackQuery, state: FSMContext):

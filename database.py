@@ -1141,6 +1141,19 @@ async def ensure_schema() -> None:
             );
             """
         )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS premium_benefits (
+              id BIGSERIAL PRIMARY KEY,
+              position INTEGER NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT,
+              UNIQUE(position)
+            );
+            """
+        )
 
         # напоминания о скором окончании премиума (дедуп по tg_id + premium_until)
         await conn.execute(
@@ -2554,6 +2567,67 @@ async def get_premium_news_since(since_iso: str, limit: int = 10) -> list[str]:
             int(limit),
         )
     return [str(r["text"]) for r in rows]
+
+
+async def get_premium_benefits() -> list[dict]:
+    """Return ordered list of premium benefits."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, position, title, description, created_at, updated_at
+            FROM premium_benefits
+            ORDER BY position ASC, id ASC
+            """
+        )
+    return [dict(r) for r in rows]
+
+
+async def add_premium_benefit(title: str, description: str) -> int:
+    """Add benefit to the end of the list; returns inserted id."""
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    t = (title or "").strip()
+    d = (description or "").strip()
+    if not t:
+        return 0
+    async with p.acquire() as conn:
+        pos = await conn.fetchval("SELECT COALESCE(MAX(position), 0) + 1 FROM premium_benefits")
+        row = await conn.fetchrow(
+            """
+            INSERT INTO premium_benefits (position, title, description, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$4)
+            RETURNING id
+            """,
+            int(pos),
+            t,
+            d,
+            now,
+        )
+    return int(row["id"]) if row else 0
+
+
+async def update_premium_benefit(benefit_id: int, title: str, description: str) -> bool:
+    """Update benefit title/description by id."""
+    p = _assert_pool()
+    t = (title or "").strip()
+    d = (description or "").strip()
+    if not t:
+        return False
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE premium_benefits
+            SET title=$1, description=$2, updated_at=$3
+            WHERE id=$4
+            """,
+            t,
+            d,
+            now,
+            int(benefit_id),
+        )
+    return res.lower().startswith("update") and "0" not in res.split()
 
 # -------------------- payments --------------------
 

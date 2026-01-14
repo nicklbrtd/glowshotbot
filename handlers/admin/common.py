@@ -118,6 +118,7 @@ class RoleStates(StatesGroup):
     waiting_user_for_add = State()
     waiting_user_for_remove = State()
     waiting_premium_duration = State()
+    waiting_premium_news = State()
 
 
 class BroadcastStates(StatesGroup):
