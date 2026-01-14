@@ -658,18 +658,27 @@ async def profile_back_to_profile(callback: CallbackQuery):
 
     text, markup = await build_profile_view(user)
 
+    # Внутри раздела стараемся идти через редактирование, чтобы не плодить сообщения.
     try:
-        await callback.message.delete()
+        await callback.message.edit_text(
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
     except Exception:
-        pass
+        # если не редактируется (например, было фото) — удалим и отправим новое
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
 
-    await callback.message.bot.send_message(
-        chat_id=callback.message.chat.id,
-        text=text,
-        reply_markup=markup,
-        parse_mode="HTML",
-        disable_notification=True,
-    )
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
 
     await callback.answer()
 
