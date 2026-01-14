@@ -330,12 +330,9 @@ async def build_profile_view(user: dict):
         except Exception:
             rank_label = None
 
-    # Полоска прогресса до следующего ранга (текстом)
+    # Полоска прогресса рядом с рангом
     progress_bar = rank_progress_bar(rank_points_value or 0)
-    if lang == "en":
-        progress_line = f"Next rank: {progress_bar}"
-    else:
-        progress_line = f"До следующего ранга: {progress_bar}"
+    rank_display = f"{rank_label or format_rank(0, lang=lang)} ({progress_bar})"
 
     if user_id:
         # Всего загружено фото
@@ -522,8 +519,7 @@ async def build_profile_view(user: dict):
     text_lines = [
         f"{t('profile.title', lang)}{premium_badge}{streak_badge}",
         t("profile.name_age", lang, name=name, age=age) if age else t("profile.name", lang, name=name),
-        t("profile.rank", lang, rank=(rank_label or format_rank(0, lang=lang))),
-        progress_line,
+        t("profile.rank", lang, rank=rank_display),
         t("profile.gender_line", lang, gender=gender_icon),
         f"🧾 Код автора: <code>{html.escape(str(author_code), quote=False)}</code>",
     ]
