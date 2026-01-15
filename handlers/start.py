@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 import database as db
 from keyboards.common import build_main_menu
+from utils.time import get_moscow_now
 
 router = Router()
 
@@ -64,6 +65,13 @@ AD_LINES_EN: list[str] = [
     "Post your best shot and ask friends to rate via a link 🔗⭐️",
 ]
 
+def _is_premium_promo_day(now_dt: datetime | None = None) -> bool:
+    """
+    Цикл 6 дней: 2 дня кнопки нет, 4 дня — есть.
+    """
+    dt = now_dt or get_moscow_now()
+    day_num = (dt.date().toordinal() - 737791)  # anchor 2025-01-01 approx
+    return (day_num % 6) >= 2
 
 def _get_flag(user, key: str) -> bool:
     if user is None:
@@ -161,6 +169,7 @@ async def _build_dynamic_main_menu(
         lang=lang,
         has_photo=has_photo,
         has_rate_targets=has_rate_targets,
+        show_premium_promo=_is_premium_promo_day(),
     )
 
 async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, lang: str) -> str:
@@ -191,6 +200,27 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
     ad_lines = AD_LINES_RU if lang == "ru" else AD_LINES_EN
     if ad_lines:
         lines.append(f"• {random.choice(ad_lines)}")
+
+    if _is_premium_promo_day():
+        try:
+            benefits = await db.get_premium_benefits()
+        except Exception:
+            benefits = []
+        promo_line = None
+        if benefits:
+            b = random.choice(benefits)
+            title = (b.get("title") or "").strip()
+            desc = (b.get("description") or "").strip()
+            if desc:
+                promo_line = f"💎 {title} — {desc}"
+            elif title:
+                promo_line = f"💎 {title}"
+        if promo_line:
+            lines.append("")
+            lines.append(promo_line)
+        else:
+            lines.append("")
+            lines.append("💎 GlowShot Premium: двойные фото, супер-оценки и фишки без ограничений.")
 
 
     lines.append("")

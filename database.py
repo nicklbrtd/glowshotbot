@@ -3245,6 +3245,16 @@ async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | No
               AND p.moderation_status IN ('active')
               AND COALESCE(p.ratings_enabled, 1)=1
               AND p.user_id <> $1
+              AND (
+                u.is_premium=1
+                OR p.id IN (
+                    SELECT id
+                    FROM photos
+                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status='active'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
+              )
               AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
             ORDER BY random()
             LIMIT 1
@@ -3270,6 +3280,16 @@ async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | No
               AND p.moderation_status IN ('active')
               AND COALESCE(p.ratings_enabled, 1)=0
               AND p.user_id <> $1
+              AND (
+                u.is_premium=1
+                OR p.id IN (
+                    SELECT id
+                    FROM photos
+                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status='active'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
+              )
               AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
               AND NOT EXISTS (
                   SELECT 1 FROM viewonly_views v
@@ -4549,46 +4569,6 @@ async def get_photo_admin_stats(photo_id: int) -> dict:
 
 async def ensure_user_minimal_row(tg_id: int, username: str | None = None) -> dict | None:
     return await _ensure_user_row(int(tg_id), username=username)
-
-def _make_share_code(n: int = 10) -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(random.choice(alphabet) for _ in range(n))
-
-async def get_or_create_share_link_code(owner_tg_id: int) -> str:
-    p = _assert_pool()
-    async with p.acquire() as conn:
-        v = await conn.fetchval(
-            """
-            SELECT code FROM photo_share_links
-            WHERE owner_tg_id=$1 AND is_active=1
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            int(owner_tg_id),
-        )
-    if v:
-        return str(v)
-
-    now = get_moscow_now_iso()
-    for _ in range(10):
-        code = _make_share_code(10)
-        try:
-            async with p.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO photo_share_links (code, owner_tg_id, is_active, created_at) VALUES ($1,$2,1,$3)",
-                    code, int(owner_tg_id), now
-                )
-            return code
-        except Exception:
-            continue
-
-    code = _make_share_code(14)
-    async with p.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO photo_share_links (code, owner_tg_id, is_active, created_at) VALUES ($1,$2,1,$3)",
-            code, int(owner_tg_id), now
-        )
-    return code
 
 
 # -------------------- Notifications settings (likes/comments) --------------------

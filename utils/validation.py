@@ -45,6 +45,12 @@ def has_links_or_usernames(text: str | None) -> bool:
     if "t.me/" in lowered or "telegram.me/" in lowered:
         return True
 
+    if " тг" in lowered or lowered.startswith("тг") or " tg" in lowered or lowered.startswith("tg"):
+        return True
+
+    if " тгк" in lowered or lowered.startswith("тгк") or " tgk" in lowered or lowered.startswith("tgk"):
+        return True
+
     if any(tld in lowered for tld in _COMMON_TLDS):
         return True
 
@@ -75,12 +81,14 @@ _SUBSCRIBE_MARKERS: Final[tuple[str, ...]] = (
 
 _CHANNEL_MARKERS: Final[tuple[str, ...]] = (
     "тгк",
+    "тг",
     "тгканал",
     "тг канал",
     "tg канал",
     "tg-канал",
     "tg-канал",
     "tgk",
+    "tg",
     "телеграм канал",
     "телеграм-канал",
     "канал в тг",

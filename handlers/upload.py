@@ -1,6 +1,6 @@
 import io
 import random
-from PIL import Image
+from PIL import Image  # type: ignore
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import datetime, timedelta
 from asyncpg.exceptions import UniqueViolationError
@@ -107,7 +107,7 @@ async def _get_daily_top_photos_v2(day_key: str, limit: int = 10) -> list[dict]:
 class MyPhotoStates(StatesGroup):
     """Состояния мастера загрузки фотографии.
 
-    Новый порядок:
+    порядок:
     1) загрузка фото;
     2) название.
 
@@ -357,6 +357,12 @@ def _photo_ratings_enabled(photo: dict) -> bool:
     return bool(photo.get("ratings_enabled", True))
 
 
+async def _is_photo_locked_for_user(photo_id: int, state: FSMContext) -> bool:
+    data = await state.get_data()
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+    return photo_id in locked_ids
+
+
 def _photo_public_id(photo: dict) -> str:
     return str(photo.get("file_id_public") or photo.get("file_id"))
 
@@ -376,7 +382,7 @@ def _is_photo_quality_ok(image_bytes: bytes) -> tuple[bool, str | None]:
     return True, None
 
 
-def build_my_photo_caption(photo: dict) -> str:
+def build_my_photo_caption(photo: dict, *, locked: bool = False) -> str:
     """Собрать подпись к фотографии в разделе «Моя фотография».
 
     Здесь нет статистики — только базовая информация о работе.
@@ -410,6 +416,9 @@ def build_my_photo_caption(photo: dict) -> str:
         f"<b>{title_line}</b>",
     ]
 
+    if locked:
+        caption_lines.append("💎 Вторая фотография доступна с GlowShot Premium.")
+
     if description:
         caption_lines.append("")
         caption_lines.append(f"📝 {description}")
@@ -417,29 +426,56 @@ def build_my_photo_caption(photo: dict) -> str:
     return "\n".join(caption_lines)
 
 
-def build_my_photo_keyboard(photo_id: int, *, ratings_enabled: bool | None = None) -> InlineKeyboardMarkup:
+def build_my_photo_keyboard(
+    photo_id: int,
+    *,
+    ratings_enabled: bool | None = None,
+    can_add_more: bool = False,
+    is_premium_user: bool = False,
+    nav_prev: bool = False,
+    nav_next: bool = False,
+    locked: bool = False,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
-    rows.append([
-        InlineKeyboardButton(text="🔗 Поделиться", callback_data=f"myphoto:share:{photo_id}"),
-    ])
+    if locked:
+        rows.append([
+            InlineKeyboardButton(text="💎 Вернуть премиум", callback_data="premium:open"),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(text="🔗 Поделиться", callback_data=f"myphoto:share:{photo_id}"),
+            InlineKeyboardButton(text="⭐️ Оценки", callback_data=f"myphoto:ratings:{photo_id}"),
+        ])
 
-    rows.append([
-        InlineKeyboardButton(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}:0"),
-        InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
-    ])
+    if not locked:
+        rows.append([
+            InlineKeyboardButton(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}:0"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
+        ])
 
-    state_label = "ВКЛ" if ratings_enabled is not False else "ВЫКЛ"
-    rows.append([
-        InlineKeyboardButton(text=f"⭐️ Оценки: {state_label}", callback_data=f"myphoto:ratings:{photo_id}"),
-    ])
+    # Кнопка загрузки второй работы (видна всем, доступна премиум). Прячем только когда достигли глобального максимума (2 фото).
+    if can_add_more:
+        rows.append([InlineKeyboardButton(text="📤 Загрузить", callback_data="myphoto:add")])
 
-    rows.append([
-        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
-        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
-    ])
+    if locked:
+        rows.append([
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
+        ])
 
-    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")])
+    # Навигация между фото
+    nav_row: list[InlineKeyboardButton] = []
+    if nav_prev:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
+    nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    if nav_next:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data="myphoto:nav:next"))
+    rows.append(nav_row)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -590,9 +626,6 @@ def build_my_photo_stats_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
     )
     return kb.as_markup()
 
@@ -797,7 +830,9 @@ async def _photo_result_status(photo: dict) -> tuple[bool, str | None, int | Non
     return False, None, None
 
 
-async def build_my_photo_main_text(photo: dict) -> str:
+async def build_my_photo_main_text(photo: dict, *, locked: bool = False) -> str:
+    ratings_enabled = _photo_ratings_enabled(photo) and (not locked)
+
     device_type_raw = str(photo.get("device_type") or "")
     emoji = _device_emoji(device_type_raw)
 
@@ -842,8 +877,15 @@ async def build_my_photo_main_text(photo: dict) -> str:
     lines.append(f"🏷️ Тег: <b>{_esc_html(tag_text)}</b>")
     lines.append("")
     lines.append(f"📅 Опубликовано: {pub_str}")
-    lines.append(f"💖 Оценок: {ratings_count}")
-    lines.append(f"📊 Рейтинг: <b>{score_str}</b>")
+    def _strike(text: str) -> str:
+        return f"<s>{text}</s>" if not ratings_enabled else text
+
+    lines.append(_strike(f"💖 Оценок: {ratings_count}"))
+    lines.append(_strike(f"📊 Рейтинг: <b>{score_str}</b>"))
+    if not ratings_enabled:
+        lines.append("🚫 Оценки для этой фотографии выключены.")
+        if locked:
+            lines.append("💎 Вторая активная фотография доступна только с Premium.")
     lines.append("")
     lines.append("📝 Описание:")
     if desc_short:
@@ -860,6 +902,11 @@ async def _show_my_photo_section(
     service_message: Message,
     state: FSMContext,
     photo: dict,
+    nav_prev: bool = False,
+    nav_next: bool = False,
+    can_add_more: bool = False,
+    is_premium_user: bool = False,
+    locked: bool = False,
 ) -> None:
     """Показ раздела «Моя фотография» одним сообщением с фото, подписью и кнопками.
 
@@ -869,10 +916,15 @@ async def _show_my_photo_section(
     3) Сохраняем id этого сообщения в FSM, чтобы потом можно было его удалить при выходе в меню.
     """
 
-    caption = await build_my_photo_main_text(photo)
+    caption = await build_my_photo_main_text(photo, locked=locked)
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
+        can_add_more=can_add_more,
+        is_premium_user=is_premium_user,
+        nav_prev=nav_prev,
+        nav_next=nav_next,
+        locked=locked,
     )
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
@@ -899,6 +951,12 @@ async def _edit_or_replace_my_photo_message(
     callback: CallbackQuery,
     state: FSMContext,
     photo: dict,
+    *,
+    nav_prev: bool | None = None,
+    nav_next: bool | None = None,
+    can_add_more: bool | None = None,
+    is_premium_user: bool | None = None,
+    locked: bool | None = None,
 ) -> None:
     """
     UX:
@@ -908,10 +966,32 @@ async def _edit_or_replace_my_photo_message(
     msg = callback.message
     chat_id = msg.chat.id
 
-    caption = await build_my_photo_main_text(photo)
+    data = await state.get_data()
+    ids: list[int] = data.get("myphoto_ids") or []
+    current_idx = 0
+    if photo.get("id") in ids:
+        current_idx = ids.index(photo["id"])
+    if nav_prev is None:
+        nav_prev = current_idx > 0
+    if nav_next is None:
+        nav_next = current_idx < len(ids) - 1
+    if can_add_more is None:
+        can_add_more = len(ids) < 2
+    if is_premium_user is None:
+        is_premium_user = bool(data.get("myphoto_is_premium"))
+    if locked is None:
+        locked_ids = set(data.get("myphoto_locked_ids") or [])
+        locked = photo.get("id") in locked_ids
+
+    caption = await build_my_photo_main_text(photo, locked=bool(locked))
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
+        can_add_more=bool(can_add_more),
+        is_premium_user=bool(is_premium_user),
+        nav_prev=bool(nav_prev),
+        nav_next=bool(nav_next),
+        locked=bool(locked),
     )
 
     # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
@@ -1002,20 +1082,24 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    # теперь у всех только 1 активная фотография
-    photos = photos[:1]
+    # Ограничиваем набор до 2 фото (премиум максимум две активные)
+    photos = photos[:2]
 
     photo: dict | None = None
+    current_idx = 0
     if photos:
         data = await state.get_data()
         last_pid = data.get("myphoto_last_id")
-        if last_pid:
-            for p in photos:
-                if p["id"] == last_pid:
-                    photo = p
-                    break
-        if photo is None:
+        photo_ids = [p["id"] for p in photos]
+        if last_pid and last_pid in photo_ids:
+            current_idx = photo_ids.index(last_pid)
+            photo = photos[current_idx]
+        else:
             photo = photos[0]
+    locked_ids: list[int] = []
+    if not is_premium_user and len(photos) > 1:
+        # все, кроме первого, считаем премиум-локом
+        locked_ids = [p["id"] for p in photos[1:]]
 
     if photo is None:
         data = await state.get_data()
@@ -1045,6 +1129,12 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             idea_label="Идея дня",
             idea_title=idea_title,
             idea_hint=idea_hint,
+        )
+        await state.update_data(
+            myphoto_ids=[],
+            myphoto_current_idx=0,
+            myphoto_last_id=None,
+            myphoto_is_premium=is_premium_user,
         )
 
         try:
@@ -1116,11 +1206,31 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
+    # Сохраняем список фото и текущий индекс в state для навигации
+    photo_ids = [p["id"] for p in photos]
+    await state.update_data(
+        myphoto_ids=photo_ids,
+        myphoto_current_idx=current_idx,
+        myphoto_last_id=photo["id"],
+        myphoto_is_premium=is_premium_user,
+        myphoto_locked_ids=locked_ids,
+    )
+
+    nav_prev = current_idx > 0
+    nav_next = current_idx < len(photo_ids) - 1
+    can_add_more = len(photo_ids) < 2
+    locked = photo["id"] in locked_ids
+
     await _show_my_photo_section(
         chat_id=callback.message.chat.id,
         service_message=callback.message,
         state=state,
         photo=photo,
+        nav_prev=nav_prev,
+        nav_next=nav_next,
+        can_add_more=can_add_more,
+        is_premium_user=is_premium_user,
+        locked=locked,
     )
 
     await callback.answer()
@@ -1195,8 +1305,70 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     Навигация по своим фотографиям: вперёд / назад.
     Работает на основе списка активных работ пользователя.
     """
-    await callback.answer("Сейчас доступна только одна активная фотография.")
-    return
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    direction = (callback.data or "").split(":")[-1]
+    user_id = int(user["id"])
+
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    photos = await get_active_photos_for_user(user_id, limit=2)
+    try:
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+    except Exception:
+        pass
+    photos = photos[:2]
+
+    if not photos:
+        await my_photo_menu(callback, state)
+        return
+
+    photo_ids = [p["id"] for p in photos]
+    data = await state.get_data()
+    current_idx = int(data.get("myphoto_current_idx") or 0)
+    last_pid = data.get("myphoto_last_id")
+    if last_pid in photo_ids:
+        current_idx = photo_ids.index(last_pid)
+    current_idx = max(0, min(current_idx, len(photo_ids) - 1))
+
+    if direction == "next" and current_idx < len(photo_ids) - 1:
+        current_idx += 1
+    elif direction == "prev" and current_idx > 0:
+        current_idx -= 1
+
+    photo = photos[current_idx]
+    nav_prev = current_idx > 0
+    nav_next = current_idx < len(photo_ids) - 1
+    can_add_more = len(photo_ids) < 2
+    locked_ids = list(data.get("myphoto_locked_ids") or [])
+    locked = photo["id"] in locked_ids
+
+    await state.update_data(
+        myphoto_ids=photo_ids,
+        myphoto_current_idx=current_idx,
+        myphoto_last_id=photo["id"],
+        myphoto_is_premium=is_premium_user,
+        myphoto_locked_ids=locked_ids,
+    )
+
+    await _edit_or_replace_my_photo_message(
+        callback,
+        state,
+        photo,
+        nav_prev=nav_prev,
+        nav_next=nav_next,
+        can_add_more=can_add_more,
+        is_premium_user=is_premium_user,
+        locked=locked,
+    )
+    await callback.answer()
 
 
 # ====== 📊 Моя фотография: статистика ======
@@ -1220,6 +1392,12 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
     photo = await get_photo_by_id(photo_id)
     if photo is None or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+    if photo_id in locked_ids:
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
         return
 
     # Only owner can view "my photo" stats
@@ -1397,6 +1575,11 @@ async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
     if photo is None or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
+    data = await state.get_data()
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+    if photo_id in locked_ids:
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
+        return
 
     if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
         await callback.answer("Нет доступа.", show_alert=True)
@@ -1471,16 +1654,45 @@ async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
     await my_photo_menu(callback, state)
 
 
-# ---- helper for upload limit after delete ----
+# ---- upload limits helpers ----
+
+def _user_photo_limits(is_premium_user: bool, is_admin: bool) -> tuple[int, int]:
+    """
+    Возвращает (max_active, daily_limit) для пользователя.
+    Админ: до 2 активных, но попыток загрузки в день не ограничиваем (ставим очень большое число).
+    """
+    if is_admin:
+        return 2, 10**9
+    if is_premium_user:
+        return 2, 3  # две активных, до трёх загрузок в день (можно заменять)
+    return 1, 1
+
+
 async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool) -> tuple[bool, str | None]:
-    if is_admin or is_premium_user:
-        return True, None
+    max_active, daily_limit = _user_photo_limits(is_premium_user, is_admin)
+    user_id = int(user["id"])
+
+    active_count = 0
     try:
-        today_count = await count_today_photos_for_user(int(user["id"]), include_deleted=True)
+        active_count = len(await get_active_photos_for_user(user_id))
+    except Exception:
+        active_count = 0
+
+    if active_count >= max_active:
+        # Нужен ручной делит перед новой загрузкой
+        if is_premium_user and max_active > 1:
+            return False, "Удалите одну из текущих фотографий, чтобы загрузить новую."
+        return False, "Сначала удалите текущую фотографию."
+
+    today_count = 0
+    try:
+        today_count = await count_today_photos_for_user(user_id, include_deleted=True)
     except Exception:
         today_count = 0
-    if today_count >= 1:
+
+    if today_count >= daily_limit:
         return False, _format_time_until_next_upload()
+
     return True, None
 
 
@@ -1510,30 +1722,36 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
 
     is_admin = is_admin_user(user)
 
-    # Теперь загрузка новой фотографии возможна только после ручного удаления текущей активной.
-    # (Исключение: админ может перезаливать.)
-    if (not is_admin) and active_photos:
-        await callback.answer(
-            "Сначала удали текущую фотографию (🗑 Удалить) в разделе «Моя фотография»,\nа потом загружай новую.",
-            show_alert=True,
-        )
+    max_active, daily_limit = _user_photo_limits(is_premium_user, is_admin)
+    active_count = len(active_photos)
+
+    # Проверка лимита активных фото
+    if not is_admin and active_count >= max_active:
+        if is_premium_user:
+            await callback.answer(
+                "У тебя уже 2 активные фотографии. Удали одну, чтобы загрузить новую.",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                "Вторая фотография доступна в GlowShot Premium 💎.\n\nОформи подписку, чтобы добавить ещё одну.",
+                show_alert=True,
+            )
         return
 
-    photo = await get_today_photo_for_user(user_id)
-
-    # Ограничение: обычные — 1 раз в день, premium — без лимита
-    if (not is_premium_user) and (not is_admin):
+    # Проверка дневных попыток
+    if not is_admin:
         today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
-        if today_count >= 1:
+        if today_count >= daily_limit:
             remaining = _format_time_until_next_upload()
             await callback.answer(
-                f"Ты уже выложил(а) фото сегодня.\n\n"
-                f"Новый кадр можно будет выложить {remaining}.",
+                f"Лимит загрузок на сегодня исчерпан.\n\nНовый кадр можно будет выложить {remaining}.",
                 show_alert=True,
             )
             return
 
     # Админу позволяем перезаливать: если сегодня уже есть активный кадр — мягко удаляем его
+    photo = await get_today_photo_for_user(user_id)
     if is_admin and photo is not None and not photo.get("is_deleted"):
         await mark_photo_deleted(photo["id"])
 
@@ -1836,58 +2054,16 @@ async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
     await mark_photo_deleted(photo_id)
     await _clear_photo_message_id(state)
 
-    is_admin = is_admin_user(user)
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    can_upload, remaining = await _can_user_upload_now(user, is_premium_user, is_admin)
-
     # Удаляем старое сообщение с фотографией, чтобы не мелькала старая картинка
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-    if can_upload:
-        idea_title, idea_hint = _get_daily_idea()
-        limit, current_used, remaining = await _idea_counters(user, is_premium_user)
-        text = _build_upload_intro_text(
-            user,
-            idea_label="Идея дня",
-            idea_title=idea_title,
-            idea_hint=idea_hint,
-        )
-        kb = build_upload_intro_kb(remaining=remaining, limit=limit)
-
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
-            disable_notification=True,
-        )
-        await callback.answer("Фотография удалена.")
-        return
-    else:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="💎 Premium", callback_data="premium:open")
-        kb.button(text="⬅️ В меню", callback_data="menu:back")
-        kb.adjust(1, 1)
-        text = (
-            f"Загрузить новую фотографию можно {remaining}.\n\n"
-            "Подождите, либо купите подписку GlowShot Premium и забудьте про лимиты."
-        )
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb.as_markup(),
-            disable_notification=True,
-        )
-        await callback.answer("Фотография удалена.")
-        return
+    await callback.answer("Фотография удалена.")
+    # Обновляем раздел «Моя фотография» после удаления
+    await my_photo_menu(callback, state)
+    return
 
 # --- Cancel delete handler ---
 @router.callback_query(F.data.regexp(r"^myphoto:delete_cancel:(\d+)$"))
@@ -1936,7 +2112,6 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
 def _myphoto_back_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")
-    kb.button(text="🏠 В меню", callback_data="menu:back")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1962,7 +2137,6 @@ def _myphoto_comments_kb(
         kb.row(*nav_row)
 
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     return kb.as_markup()
 
 
@@ -1985,8 +2159,28 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Фотография не найдена.", show_alert=True)
         return
 
-    caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo_id, ratings_enabled=_photo_ratings_enabled(photo))
+    data = await state.get_data()
+    ids: list[int] = data.get("myphoto_ids") or []
+    try:
+        current_idx = ids.index(photo_id) if photo_id in ids else 0
+    except Exception:
+        current_idx = 0
+    nav_prev = current_idx > 0
+    nav_next = current_idx < len(ids) - 1
+    can_add_more = len(ids) < 2
+    is_premium_user = bool(data.get("myphoto_is_premium"))
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+
+    caption = await build_my_photo_main_text(photo, locked=photo_id in locked_ids)
+    kb = build_my_photo_keyboard(
+        photo_id,
+        ratings_enabled=_photo_ratings_enabled(photo),
+        can_add_more=can_add_more,
+        is_premium_user=is_premium_user,
+        nav_prev=nav_prev,
+        nav_next=nav_next,
+        locked=photo_id in locked_ids,
+    )
 
     try:
         if callback.message.photo:
@@ -2015,6 +2209,9 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     if user is None:
         return
 
+    data = await state.get_data()
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+
     parts = (callback.data or "").split(":")
     if len(parts) < 3:
         await callback.answer("Ошибка.")
@@ -2038,6 +2235,9 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
         return
     if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
         await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if photo_id in locked_ids:
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
         return
 
     per_page = 15
@@ -2162,6 +2362,9 @@ async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
     if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
+    if await _is_photo_locked_for_user(photo_id, state):
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
+        return
     # Remember which message we should update after text edits
     try:
         await state.update_data(
@@ -2242,6 +2445,9 @@ async def myphoto_edit_title(callback: CallbackQuery, state: FSMContext):
     if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
         await callback.answer("Нет доступа.", show_alert=True)
         return
+    if await _is_photo_locked_for_user(photo_id, state):
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
+        return
 
     await state.set_state(EditPhotoStates.waiting_title)
     await state.update_data(edit_photo_id=photo_id)
@@ -2270,6 +2476,9 @@ async def myphoto_edit_device(callback: CallbackQuery, state: FSMContext):
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
         await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if await _is_photo_locked_for_user(photo_id, state):
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
         return
 
     await state.set_state(EditPhotoStates.waiting_device_type)
@@ -2333,6 +2542,9 @@ async def myphoto_edit_desc(callback: CallbackQuery, state: FSMContext):
     if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
         await callback.answer("Нет доступа.", show_alert=True)
         return
+    if await _is_photo_locked_for_user(photo_id, state):
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
+        return
 
     await state.set_state(EditPhotoStates.waiting_description)
     await state.update_data(edit_photo_id=photo_id)
@@ -2367,6 +2579,9 @@ async def myphoto_edit_tag(callback: CallbackQuery, state: FSMContext):
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
         await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if await _is_photo_locked_for_user(photo_id, state):
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
         return
 
     text = "🏷 <b>Тег</b>\n\nВыбери жанр:"
@@ -2542,6 +2757,9 @@ async def myphoto_edit_desc_clear(callback: CallbackQuery, state: FSMContext):
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user.get("id", 0)):
         await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if await _is_photo_locked_for_user(photo_id, state):
+        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
         return
 
     try:
@@ -2733,9 +2951,41 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
 
     # Финальная карточка: стараемся НЕ плодить сообщения.
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"], ratings_enabled=_photo_ratings_enabled(photo))
+
+    # Контекст навигации и лимитов
+    try:
+        active_photos_after = await get_active_photos_for_user(int(user_id), limit=2)
+        active_photos_after = sorted(active_photos_after, key=lambda p: (p.get("created_at") or ""), reverse=True)
+    except Exception:
+        active_photos_after = [photo]
+    photo_ids_after = [p["id"] for p in active_photos_after]
+    try:
+        current_idx = photo_ids_after.index(photo["id"])
+    except ValueError:
+        current_idx = 0
+    nav_prev = current_idx > 0
+    nav_next = current_idx < len(photo_ids_after) - 1
+    can_add_more = len(photo_ids_after) < 2
+
+    is_premium_user = False
+    try:
+        if hasattr(event, "from_user") and getattr(event.from_user, "id", None):
+            is_premium_user = await is_user_premium_active(int(event.from_user.id))
+    except Exception:
+        is_premium_user = False
+
+    kb = build_my_photo_keyboard(
+        photo["id"],
+        ratings_enabled=_photo_ratings_enabled(photo),
+        can_add_more=can_add_more,
+        is_premium_user=is_premium_user,
+        nav_prev=nav_prev,
+        nav_next=nav_next,
+    )
 
     # Обновляем отправленную ватермаркнутую карточку
+    final_msg_id: int | None = None
+
     try:
         await bot.edit_message_caption(
             chat_id=chat_id,
@@ -2744,6 +2994,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             reply_markup=kb,
         )
         await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
+        final_msg_id = sent_msg_id
     except Exception:
         sent_photo = await bot.send_photo(
             chat_id=chat_id,
@@ -2753,5 +3004,15 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             disable_notification=True,
         )
         await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
+        final_msg_id = sent_photo.message_id
     await state.clear()
+    # Сохраняем контекст навигации после очистки мастера
+    await state.update_data(
+        myphoto_ids=photo_ids_after,
+        myphoto_current_idx=current_idx,
+        myphoto_last_id=photo["id"],
+        myphoto_is_premium=is_premium_user,
+        myphoto_photo_msg_id=final_msg_id,
+        myphoto_locked_ids=[],
+    )
     return

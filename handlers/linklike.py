@@ -14,15 +14,16 @@ from database import (
     get_user_by_tg_id,
     get_user_by_id,
     get_photo_by_id,
+    get_active_photos_for_user,
     get_or_create_share_link_code,
     refresh_share_link_code,
     get_owner_tg_id_by_share_code,
-    get_active_photo_for_owner_tg_id,
     ensure_user_minimal_row,
     add_rating_by_tg_id,
     get_user_rating_value,
-    get_link_ratings_count_for_photo, 
+    get_link_ratings_count_for_photo,
     get_ratings_count_for_photo,
+    is_user_premium_active,
 )
 
 router = Router()
@@ -67,20 +68,38 @@ def _rate_kb(
     *,
     owner_tg_id: int,
     code: str,
+    photo_id: int,
+    idx: int,
     rated_value: int | None,
     is_registered: bool,
+    has_next: bool,
+    is_rateable: bool,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
-    if rated_value is None:
-        kb.row(*[InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{i}:{code}") for i in range(1, 6)])
-        kb.row(*[InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{i}:{code}") for i in range(6, 11)])
+    if is_rateable and rated_value is None:
+        kb.row(
+            *[
+                InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}")
+                for i in range(1, 6)
+            ]
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}")
+                for i in range(6, 11)
+            ]
+        )
         return kb.as_markup()
 
-    if is_registered:
-        kb.row(InlineKeyboardButton(text="✅ Отлично", callback_data="lr:done"))
+    # Уже оценено или нельзя оценивать — даём кнопку дальше/регистрации/меню
+    if has_next:
+        kb.row(InlineKeyboardButton(text="➡️ Далее", callback_data=f"lr:next:{owner_tg_id}:{idx+1}:{code}"))
     else:
-        kb.row(InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data="auth:start"))
+        if is_registered:
+            kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+        else:
+            kb.row(InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data="auth:start"))
 
     return kb.as_markup()
 
@@ -100,34 +119,70 @@ def _fmt_pub_date(photo: dict) -> str:
             return raw.split("T", 1)[0]
         return raw
 
-async def _render_link_ui(target: Message | CallbackQuery, owner_tg_id: int, code: str):
+
+async def _get_active_photos_for_share(owner_tg_id: int) -> list[dict]:
+    """Вернёт список активных фото автора (до 2 шт.), отсортированных по дате создания (старая -> новая)."""
+    owner = await get_user_by_tg_id(int(owner_tg_id))
+    if not owner:
+        return []
+    premium_active = False
+    try:
+        premium_active = await is_user_premium_active(int(owner_tg_id))
+    except Exception:
+        premium_active = False
+    try:
+        photos = await get_active_photos_for_user(int(owner["id"]), limit=2)
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""))
+    except Exception:
+        photos = []
+    photos = photos[:2]
+    if premium_active:
+        return photos
+    # Без премиума — оставляем только одну (самую раннюю в списке)
+    return photos[:1]
+
+async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, code: str, idx: int = 0):
     viewer_tg_id = target.from_user.id
-    # minimal row for uniqueness tracking (even if not registered)
     await ensure_user_minimal_row(viewer_tg_id, username=target.from_user.username)
     viewer_full = await get_user_by_tg_id(int(viewer_tg_id))
     is_reg = _is_registered(viewer_full)
 
-    photo = await get_active_photo_for_owner_tg_id(owner_tg_id)
-    if not photo:
-        txt = "❌ У автора сейчас нет активной фотографии."
+    photos = await _get_active_photos_for_share(owner_tg_id)
+    if not photos:
+        txt = "❌ У автора сейчас нет активных фотографий."
         if isinstance(target, Message):
             await target.answer(txt, disable_notification=True)
         else:
             await target.answer(txt, show_alert=True)
         return
 
+    idx = max(0, min(idx, len(photos) - 1))
+    photo = photos[idx]
+    has_next = idx < len(photos) - 1
+
     owner_user = await get_user_by_id(int(photo["user_id"]))
     owner_username = (owner_user or {}).get("username")
 
     rated_value = None
-    if viewer_full and viewer_full.get("id"):
-        rated_value = await get_user_rating_value(int(photo["id"]), int(viewer_full["id"]))
+    viewer_user_id = viewer_full.get("id") if viewer_full else None
+    if viewer_user_id:
+        rated_value = await get_user_rating_value(int(photo["id"]), int(viewer_user_id))
 
     title = (photo.get("title") or "Фотография").strip()
     pub = _fmt_pub_date(photo)
     pub_inline = f"  <i>{pub}</i>" if pub else ""
 
-    if rated_value is None:
+    is_rateable = bool(photo.get("ratings_enabled", True))
+    if not is_rateable:
+        title_line = f"<b>\"{title}\"</b>{pub_inline}"
+        author_line = (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+        text = (
+            "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
+            f"{title_line}\n"
+            f"{author_line}"
+            "\n🚫 Эта фотография недоступна для оценок.\n"
+        )
+    elif rated_value is None:
         text = (
             "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"<b>\"{title}\"</b>{pub_inline}\n"
@@ -143,9 +198,46 @@ async def _render_link_ui(target: Message | CallbackQuery, owner_tg_id: int, cod
             + f"\n<b>Твоя оценка:</b> {rated_value}"
         )
 
-    kb = _rate_kb(owner_tg_id=owner_tg_id, code=code, rated_value=rated_value, is_registered=is_reg)
+    kb = _rate_kb(
+        owner_tg_id=owner_tg_id,
+        code=code,
+        photo_id=int(photo["id"]),
+        idx=idx,
+        rated_value=rated_value,
+        is_registered=is_reg,
+        has_next=has_next,
+        is_rateable=is_rateable,
+    )
 
-    if rated_value is None:
+    if not is_rateable:
+        # Показать фото с подписью (без оценки), либо текст если не можем отредактировать
+        if isinstance(target, Message):
+            await target.bot.send_photo(
+                chat_id=target.chat.id,
+                photo=photo["file_id"],
+                caption=text,
+                reply_markup=kb,
+                disable_notification=True,
+                parse_mode="HTML",
+            )
+        else:
+            try:
+                if target.message.photo:
+                    await target.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
+                else:
+                    await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                await target.message.bot.send_photo(
+                    chat_id=target.message.chat.id,
+                    photo=photo["file_id"],
+                    caption=text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                    parse_mode="HTML",
+                )
+        return
+
+    if rated_value is None and is_rateable:
         # BEFORE rating: show photo + rating keyboard
         if isinstance(target, Message):
             await target.bot.send_photo(
@@ -173,7 +265,7 @@ async def _render_link_ui(target: Message | CallbackQuery, owner_tg_id: int, cod
                 )
         return
 
-    # AFTER rating: remove the photo message (if any) and show compact TEXT result
+    # AFTER rating или если оценка запрещена: удаляем фото и показываем компактный текст
     if isinstance(target, CallbackQuery):
         try:
             await target.message.delete()
@@ -207,6 +299,21 @@ async def myphoto_share(callback: CallbackQuery):
     if not owner_user or int(owner_user.get("tg_id") or 0) != int(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    # Если фото заблокировано из-за отсутствия премиума (вторая активная) — не даём делиться
+    premium_active = False
+    try:
+        premium_active = await is_user_premium_active(int(callback.from_user.id))
+    except Exception:
+        premium_active = False
+    if not premium_active:
+        try:
+            owner_photos = await get_active_photos_for_user(int(owner_user["id"]), limit=2)
+            owner_photos = sorted(owner_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+            if len(owner_photos) > 1 and int(photo_id) != int(owner_photos[0]["id"]):
+                await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
+                return
+        except Exception:
+            pass
 
     code = await get_or_create_share_link_code(int(callback.from_user.id))
     bot_username = await _get_bot_username(callback)
@@ -246,6 +353,22 @@ async def myphoto_share(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("myphoto:share_refresh:"))
 async def myphoto_share_refresh(callback: CallbackQuery):
     photo_id = int(callback.data.split(":")[2])
+
+    owner_user = await get_user_by_tg_id(int(callback.from_user.id))
+    premium_active = False
+    try:
+        premium_active = await is_user_premium_active(int(callback.from_user.id))
+    except Exception:
+        premium_active = False
+    if not premium_active and owner_user:
+        try:
+            owner_photos = await get_active_photos_for_user(int(owner_user["id"]), limit=2)
+            owner_photos = sorted(owner_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+            if len(owner_photos) > 1 and int(photo_id) != int(owner_photos[0]["id"]):
+                await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
+                return
+        except Exception:
+            pass
 
     # Issue a new active code and render it immediately in the same message
     code = await refresh_share_link_code(int(callback.from_user.id))
@@ -295,17 +418,23 @@ async def start_rate_link(message: Message, command: CommandObject):
         await message.answer("❌ Эта ссылка не активна или устарела.", disable_notification=True)
         return
 
-    await _render_link_ui(message, int(owner_tg_id), code)
+    await _render_link_photo(message, int(owner_tg_id), code, idx=0)
 
 @router.callback_query(F.data.startswith("lr:set:"))
 async def lr_set(callback: CallbackQuery):
-    _, _, owner_tg_id_s, value_s, code = (callback.data or "").split(":", 4)
+    _, _, owner_tg_id_s, photo_id_s, idx_s, value_s, code = (callback.data or "").split(":", 6)
     owner_tg_id = int(owner_tg_id_s)
+    photo_id = int(photo_id_s)
+    idx = int(idx_s)
     value = int(value_s)
 
-    photo = await get_active_photo_for_owner_tg_id(owner_tg_id)
-    if not photo:
-        await callback.answer("❌ У автора сейчас нет активной фотографии.", show_alert=True)
+    owner_user = await get_user_by_tg_id(owner_tg_id)
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or photo.get("moderation_status") != "active":
+        await callback.answer("❌ Фото недоступно.", show_alert=True)
+        return
+    if owner_user and int(photo.get("user_id") or 0) != int(owner_user.get("id") or 0):
+        await callback.answer("❌ Фото недоступно.", show_alert=True)
         return
 
     if not bool(photo.get("ratings_enabled", True)):
@@ -328,7 +457,16 @@ async def lr_set(callback: CallbackQuery):
     )
 
     await callback.answer("✅ Оценка учтена!" if ok else "Ты уже оценивал(а) этот кадр.", show_alert=not ok)
-    await _render_link_ui(callback, owner_tg_id, code)
+    # Показать эту же карточку с итогом/кнопкой далее
+    await _render_link_photo(callback, owner_tg_id, code, idx=idx)
+
+
+@router.callback_query(F.data.startswith("lr:next:"))
+async def lr_next(callback: CallbackQuery):
+    _, _, owner_tg_id_s, idx_s, code = (callback.data or "").split(":", 4)
+    owner_tg_id = int(owner_tg_id_s)
+    idx = int(idx_s)
+    await _render_link_photo(callback, owner_tg_id, code, idx=idx)
 
 @router.callback_query(F.data == "lr:done")
 async def lr_done(callback: CallbackQuery):

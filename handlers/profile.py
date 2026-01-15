@@ -1088,44 +1088,24 @@ async def profile_set_channel(message: Message, state: FSMContext):
         )
         return
 
-    value = raw
+    value = raw.strip()
 
-    # Нормализация: если человек прислал @username — превращаем в ссылку
+    # Нормализация: @username или t.me/username -> @username
+    username = None
     if value.startswith("@"):
         username = value[1:].strip()
-        if not username:
-            await message.delete()
-            try:
-                await message.bot.edit_message_text(
-                    chat_id=edit_chat_id,
-                    message_id=edit_msg_id,
-                    text=t("profile.edit.channel.bad_username", lang),
-                    reply_markup=build_back_kb(callback_data="profile:edit_channel", text=t("common.back", lang)),
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest as e:
-                if "message is not modified" not in str(e):
-                    raise
-            return
-        value = f"https://t.me/{username}"
+    else:
+        lower = value.lower()
+        if lower.startswith("https://t.me/") or lower.startswith("http://t.me/"):
+            username = value.split("t.me/", 1)[1].strip().strip("/")
+        elif lower.startswith("https://telegram.me/") or lower.startswith("http://telegram.me/"):
+            username = value.split("telegram.me/", 1)[1].strip().strip("/")
+        elif lower.startswith("t.me/"):
+            username = value.split("t.me/", 1)[1].strip().strip("/")
+        elif lower.startswith("telegram.me/"):
+            username = value.split("telegram.me/", 1)[1].strip().strip("/")
 
-    # Добавляем схему, если человек прислал t.me/username без https://
-    lower = value.lower().strip()
-    if lower.startswith("t.me/"):
-        value = "https://" + value.lstrip()
-
-    if lower.startswith("telegram.me/"):
-        value = "https://" + value.lstrip()
-
-    # Проверяем, что это именно телеграм-ссылка
-    lower = value.lower().strip()
-    if not (
-        lower.startswith("https://t.me/")
-        or lower.startswith("http://t.me/")
-        or lower.startswith("https://telegram.me/")
-        or lower.startswith("http://telegram.me/")
-        or lower.startswith("tg://")
-    ):
+    if username is None or not username:
         await message.delete()
         try:
             await message.bot.edit_message_text(
@@ -1139,6 +1119,8 @@ async def profile_set_channel(message: Message, state: FSMContext):
             if "message is not modified" not in str(e):
                 raise
         return
+
+    value = f"@{username}"
 
     u = await get_user_by_tg_id(message.from_user.id)
     if u and u.get("id"):
