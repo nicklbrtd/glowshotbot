@@ -440,7 +440,7 @@ def build_my_photo_keyboard(
 
     if locked:
         rows.append([
-            InlineKeyboardButton(text="💎 Вернуть премиум", callback_data="premium:open"),
+            InlineKeyboardButton(text="💎 Вернуть премиум", callback_data="premium:open:menu"),
         ])
     else:
         rows.append([

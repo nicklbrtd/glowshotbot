@@ -16,13 +16,15 @@ from aiogram.types import (
 
 from config import SUPPORT_BOT_TOKEN, SUPPORT_CHAT_ID
 from database import (
-    get_support_users,
+    init_db,
     get_support_users_full,
     is_user_premium_active,
     get_user_by_tg_id,
     ensure_user_minimal_row,
     get_user_premium_status,
 )
+from handlers.admin import router as admin_router
+from handlers import moderator
 
 # tickets[(user_id, ticket_id)] = информация о тикете (сообщение в чате поддержки и текст пользователя)
 tickets: Dict[tuple[int, int], dict] = {}
@@ -32,6 +34,8 @@ pending_replies: Dict[int, tuple[int, int]] = {}
 
 # pending_sections[user_id] = выбранный раздел, после которого ждём сообщение/вложение от пользователя
 pending_sections: Dict[int, str] = {}
+# support_resolved_count[operator_id] = количество закрытых тикетов за сессию (в памяти)
+support_resolved_count: Dict[int, int] = {}
 # active dialogue maps
 active_ticket_by_user: Dict[int, int] = {}        # user_id -> ticket_id
 active_ticket_by_operator: Dict[int, int] = {}    # operator_id -> ticket_id
@@ -41,6 +45,8 @@ ticket_support_msg: Dict[int, int] = {}           # ticket_id -> support card me
 
 
 async def main():
+    await init_db()
+
     bot = Bot(
         SUPPORT_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -85,6 +91,91 @@ async def main():
             ]
         )
 
+    def build_staff_start_menu(is_admin: bool, is_moderator: bool, is_support: bool = False) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        if is_admin:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="🛠 Админ-панель",
+                        callback_data="admin:menu",
+                    )
+                ]
+            )
+        if is_moderator:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="🛡 Модерация",
+                        callback_data="mod:menu",
+                    )
+                ]
+            )
+        if is_support:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="🎧 Панель поддержки",
+                        callback_data="support:dashboard",
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton(text="🆘 Вопрос в поддержку", callback_data="support:open")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def _role_label(is_admin: bool, is_moderator: bool) -> str:
+        if is_admin and is_moderator:
+            return "админ · модератор"
+        if is_admin:
+            return "админ"
+        if is_moderator:
+            return "модератор"
+        return "пользователь"
+
+    def _support_greeting_text(user_id: int) -> str:
+        today = datetime.now().strftime("%d.%m.%Y")
+        return (
+            "Привет! на связи поддержка GlowShot, что у вас случилось?\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"дата: {today}"
+        )
+
+    def _support_dashboard_text(user_id: int) -> str:
+        resolved = support_resolved_count.get(int(user_id), 0)
+        active_tid = active_ticket_by_operator.get(int(user_id))
+        lines = [
+            "🎧 <b>Панель поддержки</b>",
+            f"ID: <code>{user_id}</code>",
+            f"Решено тикетов (с момента запуска): <b>{resolved}</b>",
+        ]
+        if active_tid:
+            lines.append(f"Активный тикет: #{active_tid}")
+        else:
+            lines.append("Активный тикет: нет")
+        lines.append("")
+        lines.append("Чтобы создать новый тикет как пользователь — нажми «Вопрос в поддержку».")
+        return "\n".join(lines)
+
+    def build_support_operator_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="support:stats")],
+                [InlineKeyboardButton(text="🆘 Вопрос в поддержку", callback_data="support:open")],
+            ]
+        )
+
+    async def _load_user_and_roles(tg_id: int, username: str | None) -> tuple[dict | None, bool, bool]:
+        """Возвращает (user, is_admin, is_moderator), создавая минимальную запись при отсутствии."""
+        user = await get_user_by_tg_id(int(tg_id))
+        if user is None:
+            try:
+                user = await ensure_user_minimal_row(int(tg_id), username=username)
+            except Exception:
+                user = None
+        is_admin = bool(user and user.get("is_admin"))
+        is_moderator = bool(user and user.get("is_moderator"))
+        return user, is_admin, is_moderator
+
     def section_label(code: str) -> str:
         mapping = {
             "bug": "Баг / ошибка",
@@ -128,13 +219,166 @@ async def main():
         if message.chat.id == SUPPORT_CHAT_ID:
             return
 
-        today = datetime.now().strftime("%d.%m.%Y")
-        text = (
-            "Привет! на связи поддержка GlowShot, что у вас случилось?\n"
-            f"ID: <code>{message.from_user.id}</code>\n"
-            f"дата: {today}"
+        user, is_admin, is_moderator = await _load_user_and_roles(
+            message.from_user.id, getattr(message.from_user, "username", None)
         )
-        await message.answer(text, reply_markup=build_start_menu())
+        is_support = await is_support_operator(message.from_user.id)
+
+        if is_admin or is_moderator:
+            roles: list[str] = []
+            if is_admin:
+                roles.append("админ")
+            if is_moderator:
+                roles.append("модератор")
+            if is_support and "саппорт" not in roles:
+                roles.append("саппорт")
+
+            roles_line = ", ".join(roles) if roles else "команда"
+            text = (
+                "👋 Привет! Это служебное меню поддержки.\n"
+                f"Твоя роль: {roles_line}.\n\n"
+                "Админ- и модераторская панели доступны прямо здесь, без перехода в основной бот.\n"
+                "Если нужен привычный саппорт — жми «Вопрос в поддержку» и выбери раздел, как обычный пользователь."
+            )
+            await message.answer(text, reply_markup=build_staff_start_menu(is_admin, is_moderator, is_support=is_support))
+            return
+
+        if is_support:
+            await message.answer(_support_dashboard_text(message.from_user.id), reply_markup=build_support_operator_menu())
+            return
+
+        await message.answer(_support_greeting_text(message.from_user.id), reply_markup=build_start_menu())
+
+    @dp.message(Command("admin"))
+    async def admin_cmd_disabled(message: Message):
+        # В саппорт-боте вход в админку только через /start и кнопку
+        if message.chat.id == SUPPORT_CHAT_ID:
+            return
+        user, is_admin, is_moderator = await _load_user_and_roles(
+            message.from_user.id, getattr(message.from_user, "username", None)
+        )
+        is_support = await is_support_operator(message.from_user.id)
+        roles = []
+        if is_admin:
+            roles.append("админ")
+        if is_moderator:
+            roles.append("модератор")
+        if is_support:
+            roles.append("саппорт")
+
+        roles_line = ", ".join(roles) if roles else "без роли"
+        text = (
+            "Админ-панель доступна из меню.\n"
+            f"Твои роли: {roles_line}.\n"
+            "Нажми «Админ-панель» или «Модерация» в стартовом меню."
+        )
+        kb = None
+        if is_admin or is_moderator or is_support:
+            kb = build_staff_start_menu(is_admin, is_moderator, is_support=is_support)
+        else:
+            kb = build_start_menu()
+        await message.answer(text, reply_markup=kb)
+
+    @dp.message(F.chat.id != SUPPORT_CHAT_ID, F.text.regexp(r"^/"))
+    async def only_start_allowed(message: Message):
+        # Разрешаем только /start в саппорт-боте (в личке)
+        if (message.text or "").startswith("/start"):
+            return
+
+        _, is_admin, is_moderator = await _load_user_and_roles(
+            message.from_user.id, getattr(message.from_user, "username", None)
+        )
+        is_support = await is_support_operator(message.from_user.id)
+
+        roles = []
+        if is_admin:
+            roles.append("админ")
+        if is_moderator:
+            roles.append("модератор")
+        if is_support:
+            roles.append("саппорт")
+        roles_line = ", ".join(roles) if roles else "без роли"
+
+        text = (
+            "Здесь доступна только команда /start.\n"
+            f"Твои роли: {roles_line}.\n"
+            "Нажми /start, чтобы открыть нужное меню."
+        )
+
+        kb = build_start_menu()
+        if is_admin or is_moderator or is_support:
+            kb = build_staff_start_menu(is_admin, is_moderator, is_support=is_support)
+
+        await message.answer(text, reply_markup=kb)
+
+    @dp.callback_query(F.data == "support:open")
+    async def support_open_callback(callback: CallbackQuery):
+        if callback.message and callback.message.chat.id == SUPPORT_CHAT_ID:
+            await callback.answer("Работает только в личке.", show_alert=True)
+            return
+
+        pending_sections.pop(callback.from_user.id, None)
+        await callback.message.answer(
+            _support_greeting_text(callback.from_user.id),
+            reply_markup=build_start_menu(),
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.in_(("support:dashboard", "support:stats")))
+    async def support_dashboard_callback(callback: CallbackQuery):
+        if callback.message and callback.message.chat.id == SUPPORT_CHAT_ID:
+            await callback.answer()
+            return
+
+        if not await is_support_operator(callback.from_user.id):
+            await callback.answer("Только для команды поддержки.", show_alert=True)
+            return
+
+        await callback.message.answer(
+            _support_dashboard_text(callback.from_user.id),
+            reply_markup=build_support_operator_menu(),
+        )
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+
+    @dp.callback_query(F.data == "menu:back")
+    async def support_back_to_menu(callback: CallbackQuery):
+        """Обработчик «в меню» для админки/модераторки внутри саппорт-бота."""
+        if callback.message and callback.message.chat.id == SUPPORT_CHAT_ID:
+            await callback.answer()
+            return
+
+        _, is_admin, is_moderator = await _load_user_and_roles(
+            callback.from_user.id, getattr(callback.from_user, "username", None)
+        )
+        is_support = await is_support_operator(callback.from_user.id)
+        if is_admin or is_moderator:
+            roles = []
+            if is_admin:
+                roles.append("админ")
+            if is_moderator:
+                roles.append("модератор")
+            if is_support and "саппорт" not in roles:
+                roles.append("саппорт")
+            roles_line = ", ".join(roles) if roles else "команда"
+            text = (
+                "👋 Привет! Это служебное меню поддержки.\n"
+                f"Твоя роль: {roles_line}.\n\n"
+                "Админ- и модераторская панели доступны прямо здесь, без перехода в основной бот.\n"
+                "Если нужен привычный саппорт — жми «Вопрос в поддержку» и выбери раздел, как обычный пользователь."
+            )
+            await callback.message.answer(text, reply_markup=build_staff_start_menu(is_admin, is_moderator, is_support=is_support))
+        else:
+            if is_support:
+                await callback.message.answer(_support_dashboard_text(callback.from_user.id), reply_markup=build_support_operator_menu())
+            else:
+                await callback.message.answer(_support_greeting_text(callback.from_user.id), reply_markup=build_start_menu())
+        try:
+            await callback.answer()
+        except Exception:
+            pass
 
     @dp.callback_query(F.data.startswith("support_section:"))
     async def support_section_callback(callback: CallbackQuery):
@@ -211,6 +455,11 @@ async def main():
             await message.answer("Не удалось обновить сообщение тикета, но статус помечен локально.")
 
         ticket["status"] = "resolved"
+        try:
+            if op_id != message.from_user.id:
+                support_resolved_count[message.from_user.id] = support_resolved_count.get(message.from_user.id, 0) + 1
+        except Exception:
+            pass
         await message.answer(f"Тикет #{ticket_id} помечен как решенный ✅")
 
 
@@ -329,15 +578,23 @@ async def main():
 
         ticket["status"] = "resolved"
         # чистим карты диалога
+        op_id = None
         try:
             op_id = ticket_operator.get(ticket_id)
             uid = ticket_user.get(ticket_id)
             if op_id:
                 active_ticket_by_operator.pop(op_id, None)
+                support_resolved_count[op_id] = support_resolved_count.get(op_id, 0) + 1
             if uid:
                 active_ticket_by_user.pop(uid, None)
             ticket_operator.pop(ticket_id, None)
             ticket_user.pop(ticket_id, None)
+        except Exception:
+            pass
+
+        # если оператор не был зафиксирован в картах, считаем закрывшего
+        try:
+            support_resolved_count[message.from_user.id] = support_resolved_count.get(message.from_user.id, 0) + 1
         except Exception:
             pass
 
@@ -447,6 +704,9 @@ async def main():
             return
 
         user = message.from_user
+        user_db, is_admin, is_moderator = await _load_user_and_roles(
+            user.id, getattr(user, "username", None)
+        )
 
         # Если это оператор в личке бота и он ведёт тикет — пересылаем пользователю
         if user.id in active_ticket_by_operator:
@@ -490,13 +750,7 @@ async def main():
 
         # Если пользователь ещё не выбрал раздел — показываем меню
         if user.id not in pending_sections:
-            today = datetime.now().strftime("%d.%m.%Y")
-            text = (
-                "Привет! на связи поддержка GlowShot, что у вас случилось?\n"
-                f"ID: <code>{user.id}</code>\n"
-                f"дата: {today}"
-            )
-            await message.answer(text, reply_markup=build_start_menu())
+            await message.answer(_support_greeting_text(user.id), reply_markup=build_start_menu())
             return
 
         section_code = pending_sections.pop(user.id)
@@ -505,6 +759,11 @@ async def main():
         ticket_id = message.message_id  # используем message_id как номер тикета
 
         premium_line = await _premium_label(user.id)
+        try:
+            premium_active = await is_user_premium_active(int(user.id))
+        except Exception:
+            premium_active = False
+        status_label = "💎 приоритет (премиум)" if premium_active else _role_label(is_admin, is_moderator)
 
         header = (
             "🆘 <b>Новый запрос!</b>\n\n"
@@ -512,6 +771,7 @@ async def main():
             f"ID пользователя: <code>{user.id}</code>\n"
             f"Username: @{user.username if user.username else '—'}\n"
             f"{premium_line}\n"
+            f"Статус: {status_label}\n"
             f"Раздел: <b>{section}</b>\n\n"
             "Сообщение пользователя:\n"
         )
@@ -561,6 +821,10 @@ async def main():
             "text": message.text or "📎 Вложение",
             "status": "open",
             "section": section,
+            "priority": "premium" if premium_active else "normal",
+            "is_premium": premium_active,
+            "is_admin": is_admin,
+            "is_moderator": is_moderator,
         }
 
         # 2) отвечаем юзеру
@@ -795,7 +1059,16 @@ async def main():
         except Exception:
             pass
 
+        try:
+            support_resolved_count[callback.from_user.id] = support_resolved_count.get(callback.from_user.id, 0) + 1
+        except Exception:
+            pass
+
         await callback.answer("Тикет закрыт ✅")
+
+    # Подключаем панели админа и модератора в бота поддержки
+    dp.include_router(admin_router)
+    dp.include_router(moderator.router)
 
     await dp.start_polling(bot)
 

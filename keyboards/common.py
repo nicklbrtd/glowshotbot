@@ -35,7 +35,7 @@ def build_main_menu(
     kb.button(text=t("kb.main.profile", lang), callback_data="profile:open")
 
     if show_premium_promo:
-        kb.button(text="💎 Premium", callback_data="premium:open")
+        kb.button(text="💎 Premium", callback_data="premium:open:menu")
 
     if is_moderator:
         kb.button(text=t("kb.main.moderator", lang), callback_data="moderator:menu")

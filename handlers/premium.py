@@ -112,8 +112,7 @@ def _format_until_and_days_left(until_iso: str | None, lang: str) -> tuple[str, 
         return (str(until_iso), "")
 
 
-@router.callback_query(F.data == "profile:premium")
-async def profile_premium_menu(callback: CallbackQuery):
+async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:profile"):
     """Premium screen (info + buy/extend entrypoint).
 
     Payment flow and invoices live in `handlers/payments.py`.
@@ -155,9 +154,9 @@ async def profile_premium_menu(callback: CallbackQuery):
 
         text = status_block + "\n" + news_block
 
-        kb.button(text=t("premium.btn.benefits", lang), callback_data="premium:benefits")
+        kb.button(text=t("premium.btn.benefits", lang), callback_data=f"premium:benefits:{back_cb}")
         kb.button(text=t("premium.btn.extend", lang), callback_data="premium:plans")
-        kb.button(text=t("premium.btn.back", lang), callback_data="menu:profile")
+        kb.button(text=t("premium.btn.back", lang), callback_data=back_cb)
         kb.adjust(1)
 
     else:
@@ -167,21 +166,41 @@ async def profile_premium_menu(callback: CallbackQuery):
         kb.button(text=t("premium.plan.7d", lang), callback_data="premium:plan:7d")
         kb.button(text=t("premium.plan.30d", lang), callback_data="premium:plan:30d")
         kb.button(text=t("premium.plan.90d", lang), callback_data="premium:plan:90d")
-        kb.button(text=t("premium.btn.back", lang), callback_data="menu:profile")
+        kb.button(text=t("premium.btn.back", lang), callback_data=back_cb)
         kb.adjust(1)
 
     await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     await callback.answer()
 
 
-@router.callback_query(F.data == "premium:benefits")
+@router.callback_query(F.data == "profile:premium")
+async def profile_premium_menu(callback: CallbackQuery):
+    await _render_premium_menu(callback, back_cb="menu:profile")
+
+
+@router.callback_query(F.data.regexp(r"^premium:open(?::(menu|profile))?$"))
+async def premium_open(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    source = parts[1] if len(parts) > 1 else None
+    back_cb = "menu:profile"
+    if source == "menu":
+        back_cb = "menu:back"
+    elif source == "profile":
+        back_cb = "menu:profile"
+    await _render_premium_menu(callback, back_cb=back_cb)
+
+
+@router.callback_query(F.data.regexp(r"^premium:benefits(?::(.+))?$"))
 async def premium_benefits(callback: CallbackQuery):
     tg_id = callback.from_user.id
     user = await get_user_by_tg_id(tg_id)
     lang = _get_lang(user)
 
+    parts = (callback.data or "").split(":", 2)
+    back_cb = parts[2] if len(parts) >= 3 and parts[2] else "menu:profile"
+
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("premium.btn.back", lang), callback_data="profile:premium")
+    kb.button(text=t("premium.btn.back", lang), callback_data=f"premium:open:{'menu' if back_cb=='menu:back' else 'profile'}")
     kb.adjust(1)
 
     await callback.message.edit_text(
