@@ -1092,7 +1092,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     photos = await get_latest_photos_for_user(user_id, limit=10)
     # сортируем новые сверху
     try:
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
     except Exception:
         pass
 
@@ -1349,7 +1349,7 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
 
     photos = await get_active_photos_for_user(user_id, limit=2)
     try:
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
     except Exception:
         pass
     photos = photos[:2]
@@ -3093,7 +3093,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     # Контекст навигации и лимитов
     try:
         active_photos_after = await get_active_photos_for_user(int(user_id), limit=2)
-        active_photos_after = sorted(active_photos_after, key=lambda p: (p.get("created_at") or ""), reverse=True)
+        active_photos_after = sorted(active_photos_after, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
     except Exception:
         active_photos_after = [photo]
     photo_ids_after = [p["id"] for p in active_photos_after]
