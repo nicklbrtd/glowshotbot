@@ -378,12 +378,6 @@ async def main():
                 reply_markup=build_start_menu(),
             )
         except Exception:
-        try:
-            await callback.message.edit_text(
-                _support_greeting_text(callback.from_user.id, await _premium_label(callback.from_user.id)),
-                reply_markup=build_start_menu(),
-            )
-        except Exception:
             await callback.message.answer(
                 _support_greeting_text(callback.from_user.id, await _premium_label(callback.from_user.id)),
                 reply_markup=build_start_menu(),
