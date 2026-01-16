@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -23,11 +25,34 @@ from database import(
     get_all_users_tg_ids,
     get_premium_users
 )
+from config import BOT_TOKEN
 
 router = Router()
 
 # Сколько задержки между отправками (чтобы не словить flood)
 _SEND_DELAY_SEC = 0.05
+_PRIMARY_BROADCAST_BOT: Bot | None = None
+
+
+def _get_send_bot(current_bot: Bot) -> Bot:
+    """
+    В саппорт-боте отправляем рассылку через основной бот (BOT_TOKEN),
+    чтобы сообщения приходили от него. В обычном режиме возвращаем текущий.
+    """
+    global _PRIMARY_BROADCAST_BOT
+    try:
+        current_token = current_bot.token  # type: ignore[attr-defined]
+    except Exception:
+        current_token = None
+
+    if BOT_TOKEN and current_token != BOT_TOKEN:
+        if _PRIMARY_BROADCAST_BOT is None:
+            _PRIMARY_BROADCAST_BOT = Bot(
+                BOT_TOKEN,
+                default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            )
+        return _PRIMARY_BROADCAST_BOT
+    return current_bot
 
 
 # =============================================================
@@ -326,10 +351,11 @@ async def admin_broadcast_send(callback: CallbackQuery, state: FSMContext):
 
     total = len(tg_ids)
     sent = 0
+    send_bot = _get_send_bot(callback.message.bot)
 
     for uid in tg_ids:
         try:
-            await callback.message.bot.send_message(
+            await send_bot.send_message(
                 chat_id=uid,
                 text=send_text,
                 reply_markup=notif_markup,

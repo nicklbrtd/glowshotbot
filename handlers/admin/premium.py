@@ -24,7 +24,7 @@ from database import (
     update_premium_benefit,
 )
 from utils.time import get_moscow_now
-from .common import _ensure_admin
+from .common import _ensure_admin, ensure_primary_bot
 
 router = Router(name="admin_premium")
 
@@ -206,7 +206,8 @@ async def _notify_user_premium_change(
         )
 
     try:
-        await bot.send_message(
+        main_bot = ensure_primary_bot(bot)
+        await main_bot.send_message(
             chat_id=int(tg_id),
             text=text,
             reply_markup=build_premium_notice_kb(),

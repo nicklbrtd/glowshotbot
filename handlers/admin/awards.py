@@ -24,6 +24,7 @@ from database import (
 
 from .common import (
     _ensure_admin,
+    ensure_primary_bot,
     UserAdminStates,
     UserAwardsStates,
 )
@@ -223,7 +224,8 @@ async def admin_users_award_beta(callback: CallbackQuery, state: FSMContext):
         kb_notify.button(text="✅ Просмотрено", callback_data="award:seen")
         kb_notify.adjust(1)
         try:
-            await callback.message.bot.send_message(
+            main_bot = ensure_primary_bot(callback.message.bot)
+            await main_bot.send_message(
                 chat_id=int(target_tg_id),
                 text=notify_text,
                 reply_markup=kb_notify.as_markup(),
@@ -374,7 +376,8 @@ async def admin_users_award_create_text(message: Message, state: FSMContext):
         kb_notify.adjust(1)
 
         try:
-            await message.bot.send_message(
+            main_bot = ensure_primary_bot(message.bot)
+            await main_bot.send_message(
                 chat_id=int(target_tg_id),
                 text=notify_text,
                 reply_markup=kb_notify.as_markup(),

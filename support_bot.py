@@ -13,6 +13,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     ForceReply,
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.dispatcher.event.bases import SkipHandler
 
 from config import SUPPORT_BOT_TOKEN, SUPPORT_CHAT_ID
 from database import (
@@ -34,6 +36,8 @@ pending_replies: Dict[int, tuple[int, int]] = {}
 
 # pending_sections[user_id] = выбранный раздел, после которого ждём сообщение/вложение от пользователя
 pending_sections: Dict[int, str] = {}
+# support_menu_messages[user_id] = (chat_id, msg_id) — последнее отправленное меню поддержки
+support_menu_messages: Dict[int, tuple[int, int]] = {}
 # support_resolved_count[operator_id] = количество закрытых тикетов за сессию (в памяти)
 support_resolved_count: Dict[int, int] = {}
 # active dialogue maps
@@ -132,13 +136,18 @@ async def main():
             return "модератор"
         return "пользователь"
 
-    def _support_greeting_text(user_id: int) -> str:
+    def _support_greeting_text(user_id: int, premium_line: str | None = None) -> str:
         today = datetime.now().strftime("%d.%m.%Y")
-        return (
-            "Привет! на связи поддержка GlowShot, что у вас случилось?\n"
-            f"ID: <code>{user_id}</code>\n"
-            f"дата: {today}"
-        )
+        lines = [
+            "🤖 <b>Поддержка GlowShot</b>",
+            f"ID: <code>{user_id}</code>",
+            f"Дата: {today}",
+        ]
+        if premium_line:
+            lines.append(premium_line)
+        lines.append("")
+        lines.append("Напиши, что случилось — я передам запрос команде.")
+        return "\n".join(lines)
 
     def _support_dashboard_text(user_id: int) -> str:
         resolved = support_resolved_count.get(int(user_id), 0)
@@ -163,6 +172,36 @@ async def main():
                 [InlineKeyboardButton(text="🆘 Вопрос в поддержку", callback_data="support:open")],
             ]
         )
+
+    def _remember_menu(user_id: int, chat_id: int, msg_id: int) -> None:
+        support_menu_messages[int(user_id)] = (int(chat_id), int(msg_id))
+
+    async def _delete_old_menu_if_any(bot: Bot, user_id: int):
+        chat_msg = support_menu_messages.get(int(user_id))
+        if not chat_msg:
+            return
+        chat_id, msg_id = chat_msg
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+
+    async def _send_support_menu(bot: Bot, user_id: int):
+        """Отправляет пользователю стартовое меню поддержки (удаляет старое)."""
+        try:
+            premium_line = await _premium_label(user_id)
+        except Exception:
+            premium_line = None
+        await _delete_old_menu_if_any(bot, user_id)
+        try:
+            sent = await bot.send_message(
+                chat_id=int(user_id),
+                text=_support_greeting_text(int(user_id), premium_line),
+                reply_markup=build_start_menu(),
+            )
+            _remember_menu(user_id, sent.chat.id, sent.message_id)
+        except Exception:
+            pass
 
     async def _load_user_and_roles(tg_id: int, username: str | None) -> tuple[dict | None, bool, bool]:
         """Возвращает (user, is_admin, is_moderator), создавая минимальную запись при отсутствии."""
@@ -219,6 +258,11 @@ async def main():
         if message.chat.id == SUPPORT_CHAT_ID:
             return
 
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
         user, is_admin, is_moderator = await _load_user_and_roles(
             message.from_user.id, getattr(message.from_user, "username", None)
         )
@@ -240,14 +284,17 @@ async def main():
                 "Админ- и модераторская панели доступны прямо здесь, без перехода в основной бот.\n"
                 "Если нужен привычный саппорт — жми «Вопрос в поддержку» и выбери раздел, как обычный пользователь."
             )
-            await message.answer(text, reply_markup=build_staff_start_menu(is_admin, is_moderator, is_support=is_support))
+            sent = await message.answer(text, reply_markup=build_staff_start_menu(is_admin, is_moderator, is_support=is_support))
+            _remember_menu(message.from_user.id, sent.chat.id, sent.message_id)
             return
 
         if is_support:
-            await message.answer(_support_dashboard_text(message.from_user.id), reply_markup=build_support_operator_menu())
+            sent = await message.answer(_support_dashboard_text(message.from_user.id), reply_markup=build_support_operator_menu())
+            _remember_menu(message.from_user.id, sent.chat.id, sent.message_id)
             return
 
-        await message.answer(_support_greeting_text(message.from_user.id), reply_markup=build_start_menu())
+        sent = await message.answer(_support_greeting_text(message.from_user.id, await _premium_label(message.from_user.id)), reply_markup=build_start_menu())
+        _remember_menu(message.from_user.id, sent.chat.id, sent.message_id)
 
     @dp.message(Command("admin"))
     async def admin_cmd_disabled(message: Message):
@@ -280,8 +327,15 @@ async def main():
         await message.answer(text, reply_markup=kb)
 
     @dp.message(F.chat.id != SUPPORT_CHAT_ID, F.text.regexp(r"^/"))
-    async def only_start_allowed(message: Message):
+    async def only_start_allowed(message: Message, state: FSMContext):
         # Разрешаем только /start в саппорт-боте (в личке)
+        try:
+            if await state.get_state():
+                raise SkipHandler()
+        except SkipHandler:
+            raise
+        except Exception:
+            pass
         if (message.text or "").startswith("/start"):
             return
 
@@ -318,10 +372,22 @@ async def main():
             return
 
         pending_sections.pop(callback.from_user.id, None)
-        await callback.message.answer(
-            _support_greeting_text(callback.from_user.id),
-            reply_markup=build_start_menu(),
-        )
+        try:
+            await callback.message.edit_text(
+                _support_greeting_text(callback.from_user.id, await _premium_label(callback.from_user.id)),
+                reply_markup=build_start_menu(),
+            )
+        except Exception:
+        try:
+            await callback.message.edit_text(
+                _support_greeting_text(callback.from_user.id, await _premium_label(callback.from_user.id)),
+                reply_markup=build_start_menu(),
+            )
+        except Exception:
+            await callback.message.answer(
+                _support_greeting_text(callback.from_user.id, await _premium_label(callback.from_user.id)),
+                reply_markup=build_start_menu(),
+            )
         await callback.answer()
 
     @dp.callback_query(F.data.in_(("support:dashboard", "support:stats")))
@@ -334,10 +400,16 @@ async def main():
             await callback.answer("Только для команды поддержки.", show_alert=True)
             return
 
-        await callback.message.answer(
-            _support_dashboard_text(callback.from_user.id),
-            reply_markup=build_support_operator_menu(),
-        )
+        try:
+            await callback.message.edit_text(
+                _support_dashboard_text(callback.from_user.id),
+                reply_markup=build_support_operator_menu(),
+            )
+        except Exception:
+            await callback.message.answer(
+                _support_dashboard_text(callback.from_user.id),
+                reply_markup=build_support_operator_menu(),
+            )
         try:
             await callback.answer()
         except Exception:
@@ -354,6 +426,8 @@ async def main():
             callback.from_user.id, getattr(callback.from_user, "username", None)
         )
         is_support = await is_support_operator(callback.from_user.id)
+        target_text = _support_greeting_text(callback.from_user.id, await _premium_label(callback.from_user.id))
+        target_kb = build_start_menu()
         if is_admin or is_moderator:
             roles = []
             if is_admin:
@@ -363,18 +437,22 @@ async def main():
             if is_support and "саппорт" not in roles:
                 roles.append("саппорт")
             roles_line = ", ".join(roles) if roles else "команда"
-            text = (
+            target_text = (
                 "👋 Привет! Это служебное меню поддержки.\n"
                 f"Твоя роль: {roles_line}.\n\n"
                 "Админ- и модераторская панели доступны прямо здесь, без перехода в основной бот.\n"
                 "Если нужен привычный саппорт — жми «Вопрос в поддержку» и выбери раздел, как обычный пользователь."
             )
-            await callback.message.answer(text, reply_markup=build_staff_start_menu(is_admin, is_moderator, is_support=is_support))
+            target_kb = build_staff_start_menu(is_admin, is_moderator, is_support=is_support)
         else:
             if is_support:
-                await callback.message.answer(_support_dashboard_text(callback.from_user.id), reply_markup=build_support_operator_menu())
-            else:
-                await callback.message.answer(_support_greeting_text(callback.from_user.id), reply_markup=build_start_menu())
+                target_text = _support_dashboard_text(callback.from_user.id)
+                target_kb = build_support_operator_menu()
+
+        try:
+            await callback.message.edit_text(target_text, reply_markup=target_kb)
+        except Exception:
+            await callback.message.answer(target_text, reply_markup=target_kb)
         try:
             await callback.answer()
         except Exception:
@@ -460,6 +538,7 @@ async def main():
                 support_resolved_count[message.from_user.id] = support_resolved_count.get(message.from_user.id, 0) + 1
         except Exception:
             pass
+        await _send_support_menu(message.bot, user_id)
         await message.answer(f"Тикет #{ticket_id} помечен как решенный ✅")
 
 
@@ -598,6 +677,8 @@ async def main():
         except Exception:
             pass
 
+        await _send_support_menu(message.bot, user_id)
+
         # Если кто-то держит режим ответа на этот тикет — снимем
         try:
             to_del = [aid for aid, v in pending_replies.items() if v == key]
@@ -693,7 +774,7 @@ async def main():
 
 
     @dp.message()
-    async def handle_support(message: Message):
+    async def handle_support(message: Message, state: FSMContext):
         """ 
         Сообщения НЕ из SUPPORT_CHAT_ID:
         1) /start показывает меню разделов.
@@ -703,10 +784,20 @@ async def main():
             # для чата поддержки есть отдельный хендлер выше
             return
 
+        # Если есть активное состояние (админка/модерация и т.п.) — не перехватываем сообщение
+        try:
+            if await state.get_state():
+                raise SkipHandler()
+        except SkipHandler:
+            raise
+        except Exception:
+            pass
+
         user = message.from_user
         user_db, is_admin, is_moderator = await _load_user_and_roles(
             user.id, getattr(user, "username", None)
         )
+        premium_line = await _premium_label(user.id)
 
         # Если это оператор в личке бота и он ведёт тикет — пересылаем пользователю
         if user.id in active_ticket_by_operator:
@@ -748,9 +839,13 @@ async def main():
             await message.answer("✅ Сообщение передано оператору по вашему тикету.")
             return
 
-        # Если пользователь ещё не выбрал раздел — показываем меню
+        # Если пользователь ещё не выбрал раздел — показываем меню и удаляем его сообщение
         if user.id not in pending_sections:
-            await message.answer(_support_greeting_text(user.id), reply_markup=build_start_menu())
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await message.answer(_support_greeting_text(user.id, premium_line), reply_markup=build_start_menu())
             return
 
         section_code = pending_sections.pop(user.id)
@@ -880,6 +975,8 @@ async def main():
 
             ticket["status"] = "resolved"
             await callback.answer("Спасибо, отметили вопрос как решенный ✅", show_alert=False)
+            # отправим пользователю меню поддержки
+            await _send_support_menu(callback.bot, callback.from_user.id)
             return
 
         # статус "не решен" — эскалируем живому оператору поддержки
@@ -1063,6 +1160,8 @@ async def main():
             support_resolved_count[callback.from_user.id] = support_resolved_count.get(callback.from_user.id, 0) + 1
         except Exception:
             pass
+
+        await _send_support_menu(callback.bot, user_id)
 
         await callback.answer("Тикет закрыт ✅")
 

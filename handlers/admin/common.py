@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from typing import Optional, Union, Any
 
+from aiogram import Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-from config import MASTER_ADMIN_ID, ADMIN_PASSWORD
+from config import MASTER_ADMIN_ID, ADMIN_PASSWORD, BOT_TOKEN
 from database import get_user_by_tg_id
 from keyboards.common import build_admin_menu, build_back_kb
 
@@ -201,6 +204,34 @@ def kb_one_back(text: str, callback_data: str) -> InlineKeyboardMarkup:
     kb.button(text=text, callback_data=callback_data)
     kb.adjust(1)
     return kb.as_markup()
+
+
+# =============================================================
+# ==== PRIMARY BOT (для отправки уведомлений пользователям) ===
+# =============================================================
+
+_PRIMARY_BOT: Bot | None = None
+
+
+def ensure_primary_bot(bot: Bot) -> Bot:
+    """
+    Возвращает основной бот (BOT_TOKEN), чтобы уведомления пользователям
+    всегда приходили из основного бота, даже если админка открыта в саппорт-боте.
+    """
+    global _PRIMARY_BOT
+    try:
+        current_token = bot.token  # type: ignore[attr-defined]
+    except Exception:
+        current_token = None
+
+    if BOT_TOKEN and current_token != BOT_TOKEN:
+        if _PRIMARY_BOT is None:
+            _PRIMARY_BOT = Bot(
+                BOT_TOKEN,
+                default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            )
+        return _PRIMARY_BOT
+    return bot
 
 
 __all__ = [

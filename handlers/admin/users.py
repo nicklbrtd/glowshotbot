@@ -33,6 +33,7 @@ from database import (
 
 from .common import (
     _ensure_admin,
+    ensure_primary_bot,
 )
 from utils.time import get_moscow_now
 
@@ -858,7 +859,8 @@ async def admin_users_ban_reason(message: Message, state: FSMContext):
         else:
             lines.append("⛔ Вы забанены админом бота.")
         lines.append(f"Причина: {reason_raw}")
-        await message.bot.send_message(chat_id=int(tg_id), text="\n".join(lines))
+        main_bot = ensure_primary_bot(message.bot)
+        await main_bot.send_message(chat_id=int(tg_id), text="\n".join(lines))
     except Exception:
         pass
 

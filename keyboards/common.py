@@ -37,13 +37,7 @@ def build_main_menu(
     if show_premium_promo:
         kb.button(text="💎 Premium", callback_data="premium:open:menu")
 
-    if is_moderator:
-        kb.button(text=t("kb.main.moderator", lang), callback_data="moderator:menu")
-
-    if is_admin:
-        kb.button(text=t("kb.main.admin", lang), callback_data="admin:menu")
-
-    kb.adjust(2, 2, 2)
+    kb.adjust(2, 2, 1, 1)
 
     return kb.as_markup()
 
