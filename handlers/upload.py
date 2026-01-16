@@ -313,11 +313,15 @@ def _build_upload_intro_text(
     idea_label: str,
     idea_title: str,
     idea_hint: str,
+    second: bool = False,
 ) -> str:
     ready = _ready_wording(user)
     selfie = _selfie_wording(user)
+    title_line = "📸 <b>Загрузить фотографию!</b>"
+    if second:
+        title_line = "📸 <b>Загрузить вторую фотографию!</b>"
     lines: list[str] = [
-        "📸 <b>Загрузить фотографию!</b>",
+        title_line,
         "",
         f"💡 <b>{idea_label}:</b> {idea_title}",
         f"🔍 <b>Попробуй:</b> {idea_hint}.",
@@ -330,12 +334,19 @@ def _build_upload_intro_text(
         "",
         "🛡 Модерация вправе удалить вашу фотографию и ограничить доступ к боту при нарушении правил.",
         "",
-        f"Когда будешь {ready} — жми «Загрузить».",
+        ("Это загрузка второй активной фотографии.\n\n" if second else "") + f"Когда будешь {ready} — жми «Загрузить».",
     ]
     return "\n".join(lines)
 
 
-def build_upload_intro_kb(*, remaining: int | None = None, limit: int | None = None) -> InlineKeyboardMarkup:
+def build_upload_intro_kb(
+    *,
+    remaining: int | None = None,
+    limit: int | None = None,
+    idea_cb: str = "myphoto:idea",
+    upload_cb: str = "myphoto:add",
+    back_cb: str = "menu:back",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     remaining_safe = None
     if remaining is not None:
@@ -346,9 +357,9 @@ def build_upload_intro_kb(*, remaining: int | None = None, limit: int | None = N
     idea_btn_text = "🎲 Сгенерировать идею"
     if remaining_safe is not None:
         idea_btn_text += f" ({remaining_safe})"
-    kb.button(text=idea_btn_text, callback_data="myphoto:idea")
-    kb.button(text="📤 Загрузить", callback_data="myphoto:add")
-    kb.button(text="⬅️ Назад", callback_data="menu:back")
+    kb.button(text=idea_btn_text, callback_data=idea_cb)
+    kb.button(text="📤 Загрузить", callback_data=upload_cb)
+    kb.button(text="⬅️ Назад", callback_data=back_cb)
     kb.adjust(1)
     return kb.as_markup()
 
@@ -456,7 +467,7 @@ def build_my_photo_keyboard(
 
     # Кнопка загрузки второй работы (видна всем, доступна премиум). Прячем только когда достигли глобального максимума (2 фото).
     if can_add_more:
-        rows.append([InlineKeyboardButton(text="➕ Добавить ещё", callback_data="myphoto:add:extra")])
+        rows.append([InlineKeyboardButton(text="➕ Добавить ещё", callback_data="myphoto:add_intro:extra")])
 
     if locked:
         rows.append([
@@ -1553,6 +1564,117 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
 
     try:
         if callback.message.photo:
+            await callback.message.edit_caption(caption=text, reply_markup=kb)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:add_intro:extra")
+async def myphoto_add_intro_extra(callback: CallbackQuery, state: FSMContext):
+    """Показывает экран правил/идей для загрузки второй фотографии."""
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    limit, current, remaining = await _idea_counters(user, is_premium_user)
+    idea_title, idea_hint = _get_daily_idea()
+    text = _build_upload_intro_text(
+        user,
+        idea_label="Идея дня",
+        idea_title=idea_title,
+        idea_hint=idea_hint,
+        second=True,
+    )
+    kb = build_upload_intro_kb(
+        remaining=remaining,
+        limit=limit,
+        idea_cb="myphoto:idea:extra",
+        upload_cb="myphoto:add:extra",
+        back_cb="myphoto:open",
+    )
+
+    sent = await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text,
+        reply_markup=kb,
+        disable_notification=True,
+    )
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:idea:extra")
+async def myphoto_generate_idea_extra(callback: CallbackQuery, state: FSMContext):
+    """Сгенерировать идею для второй фотографии (те же лимиты, другая навигация)."""
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    limit_per_week, current_used, remaining_before = await _idea_counters(user, is_premium_user)
+    week_key = _current_week_key()
+
+    if current_used >= limit_per_week:
+        await callback.answer(
+            f"Лимит идей на неделю: {limit_per_week}. Попробуй после понедельника.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        new_count = await increment_weekly_idea_requests(user["id"], week_key)
+    except Exception:
+        new_count = current_used + 1
+
+    daily_title, _ = _get_daily_idea()
+    idea_title, idea_hint = _pick_random_idea(exclude_title=daily_title)
+    text = _build_upload_intro_text(
+        user,
+        idea_label="Новая идея",
+        idea_title=idea_title,
+        idea_hint=idea_hint,
+        second=True,
+    )
+    remaining_after = max(limit_per_week - new_count, 0)
+    kb = build_upload_intro_kb(
+        remaining=remaining_after,
+        limit=limit_per_week,
+        idea_cb="myphoto:idea:extra",
+        upload_cb="myphoto:add:extra",
+        back_cb="myphoto:open",
+    )
+
+    try:
+        if callback.message and getattr(callback.message, "photo", None):
             await callback.message.edit_caption(caption=text, reply_markup=kb)
         else:
             await callback.message.edit_text(text, reply_markup=kb)
