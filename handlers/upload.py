@@ -456,7 +456,7 @@ def build_my_photo_keyboard(
 
     # Кнопка загрузки второй работы (видна всем, доступна премиум). Прячем только когда достигли глобального максимума (2 фото).
     if can_add_more:
-        rows.append([InlineKeyboardButton(text="📤 Загрузить", callback_data="myphoto:add")])
+        rows.append([InlineKeyboardButton(text="➕ Добавить ещё", callback_data="myphoto:add:extra")])
 
     if locked:
         rows.append([
@@ -1065,6 +1065,9 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
+    data = await state.get_data()
+    menu_msg_id = data.get("menu_msg_id")
+    opened_from_menu = menu_msg_id and callback.message and callback.message.message_id == menu_msg_id
 
     is_admin = is_admin_user(user)
     user_id = user["id"]
@@ -1137,23 +1140,37 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             myphoto_is_premium=is_premium_user,
         )
 
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb)
-            else:
-                await callback.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-
-            await callback.message.bot.send_message(
+        if opened_from_menu:
+            sent = await callback.message.bot.send_message(
                 chat_id=callback.message.chat.id,
                 text=text,
                 reply_markup=kb,
                 disable_notification=True,
             )
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            data["menu_msg_id"] = None
+            await state.set_data(data)
+        else:
+            try:
+                if callback.message.photo:
+                    await callback.message.edit_caption(caption=text, reply_markup=kb)
+                else:
+                    await callback.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    pass
+
+                await callback.message.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text=text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
 
         await callback.answer()
         return
@@ -1699,7 +1716,7 @@ async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool
 # ========= ДОБАВЛЕНИЕ ФОТО =========
 
 
-@router.callback_query(F.data == "myphoto:add")
+@router.callback_query(F.data.regexp(r"^myphoto:add(?::extra)?$"))
 async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     """Старт мастера загрузки новой работы.
 
@@ -1765,27 +1782,26 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         title=None,
     )
 
-    text = "Теперь отправь фотографию (1 шт.), которую хочешь выложить."
+    is_extra = (callback.data or "") == "myphoto:add:extra"
+    if is_extra:
+        text = "Загрузка второй фотографии: отправь кадр (1 шт.), который хочешь добавить."
+    else:
+        text = "Теперь отправь фотографию (1 шт.), которую хочешь выложить."
     kb = build_upload_wizard_kb(back_to="menu")
 
+    # Всегда отправляем новое сообщение, затем удаляем предыдущее
+    sent = await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text,
+        reply_markup=kb,
+        disable_notification=True,
+    )
     try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb)
-    except TelegramBadRequest:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        sent = await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
-            disable_notification=True,
-        )
-        # важно: обновим upload_msg_id, иначе дальнейшие шаги будут ссылаться на удалённое сообщение
-        await state.update_data(upload_msg_id=sent.message_id, upload_chat_id=sent.chat.id, upload_is_photo=False)
+        await callback.message.delete()
+    except Exception:
+        pass
+    # важно: обновим upload_msg_id, иначе дальнейшие шаги будут ссылаться на удалённое сообщение
+    await state.update_data(upload_msg_id=sent.message_id, upload_chat_id=sent.chat.id, upload_is_photo=False)
 
     await callback.answer()
 

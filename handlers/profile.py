@@ -628,19 +628,17 @@ async def profile_menu(callback: CallbackQuery):
 
     text, markup = await build_profile_view(user)
 
-    # Для перехода из меню — удаляем старое сообщение и отправляем новое.
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-    await callback.message.bot.send_message(
+    sent = await callback.message.bot.send_message(
         chat_id=callback.message.chat.id,
         text=text,
         reply_markup=markup,
         parse_mode="HTML",
         disable_notification=True,
     )
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
     await callback.answer()
 

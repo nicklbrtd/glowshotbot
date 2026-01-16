@@ -712,11 +712,7 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int, *, r
         return
     msg = None if replace_message else callback.message
     msg_id = None if replace_message else callback.message.message_id
-    if replace_message:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+    old_msg = callback.message if replace_message else None
 
     card = await _build_next_rating_card(user_id, viewer_tg_id=int(callback.from_user.id))
     await _apply_rating_card(
@@ -726,6 +722,12 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int, *, r
         message_id=msg_id,
         card=card,
     )
+
+    if old_msg is not None:
+        try:
+            await old_msg.delete()
+        except Exception:
+            pass
 
     try:
         await callback.answer()

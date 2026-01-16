@@ -112,7 +112,7 @@ def _format_until_and_days_left(until_iso: str | None, lang: str) -> tuple[str, 
         return (str(until_iso), "")
 
 
-async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:profile"):
+async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:profile", *, from_menu: bool = False):
     """Premium screen (info + buy/extend entrypoint).
 
     Payment flow and invoices live in `handlers/payments.py`.
@@ -169,7 +169,20 @@ async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:pro
         kb.button(text=t("premium.btn.back", lang), callback_data=back_cb)
         kb.adjust(1)
 
-    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    if from_menu:
+        sent = await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+    else:
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     await callback.answer()
 
 
@@ -184,7 +197,7 @@ async def premium_open(callback: CallbackQuery):
     # ожидаем premium:open or premium:open:menu/profile
     source = parts[2] if len(parts) > 2 else (parts[1] if len(parts) > 1 else None)
     back_cb = "menu:profile" if source == "profile" else "menu:back"
-    await _render_premium_menu(callback, back_cb=back_cb)
+    await _render_premium_menu(callback, back_cb=back_cb, from_menu=(source == "menu"))
 
 
 @router.callback_query(F.data.regexp(r"^premium:benefits(?::(.+))?$"))

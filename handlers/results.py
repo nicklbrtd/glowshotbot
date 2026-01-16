@@ -272,12 +272,7 @@ async def results_menu(callback: CallbackQuery):
         "<i>Пока раздел в разработке.</i>"
     )
     try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-    try:
-        await callback.message.bot.send_message(
+        sent = await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
             text=text,
             reply_markup=kb,
@@ -285,7 +280,12 @@ async def results_menu(callback: CallbackQuery):
             disable_notification=True,
         )
     except Exception:
-        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        sent = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     await callback.answer()
 
 
