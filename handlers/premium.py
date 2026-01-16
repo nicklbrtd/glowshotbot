@@ -181,12 +181,9 @@ async def profile_premium_menu(callback: CallbackQuery):
 @router.callback_query(F.data.regexp(r"^premium:open(?::(menu|profile))?$"))
 async def premium_open(callback: CallbackQuery):
     parts = (callback.data or "").split(":")
-    source = parts[1] if len(parts) > 1 else None
-    back_cb = "menu:profile"
-    if source == "menu":
-        back_cb = "menu:back"
-    elif source == "profile":
-        back_cb = "menu:profile"
+    # ожидаем premium:open or premium:open:menu/profile
+    source = parts[2] if len(parts) > 2 else (parts[1] if len(parts) > 1 else None)
+    back_cb = "menu:profile" if source == "profile" else "menu:back"
     await _render_premium_menu(callback, back_cb=back_cb)
 
 
