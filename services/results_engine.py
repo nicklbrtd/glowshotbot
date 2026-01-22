@@ -229,7 +229,7 @@ async def get_day_eligibility(user_tg_id: int, day_key: str | None = None) -> di
       checks: list[{title, ok, value}]
       note_best_photo: str | None
     """
-    day_key = day_key or get_moscow_today().isoformat()
+    day_key = day_key or get_moscow_today()
 
     user = await get_user_by_tg_id(int(user_tg_id))
     if not user:
