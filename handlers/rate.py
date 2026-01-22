@@ -631,34 +631,22 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     premium_badge = "💎 " if is_author_premium else ""
     lines.append(f"{premium_badge}«{escape(title)}» — {escape(display_name)}{photo_index_part}")
 
-    # beta tester line
-    if bool(photo.get("has_beta_award")):
-        lines.append("••• 🏆 <b>Бета-тестер бота</b> •••")
+    # Ссылка на аккаунт (реальный username), отдельно — канал автора
+    if username:
+        lines.append(f"Аккаунт: @{escape(username)}")
 
-    # link line (если имеется) — только для премиум-автора
     raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
     if is_author_premium and raw_link:
-        display = raw_link
-        if raw_link.startswith("https://t.me/") or raw_link.startswith("http://t.me/"):
-            username = raw_link.split("t.me/", 1)[1].strip("/").strip()
-            if username:
-                display = "@" + username
-        elif raw_link.startswith("@"):
-            display = raw_link
-        elif "t.me/" in raw_link:
-            username = raw_link.split("t.me/", 1)[1].strip("/").strip()
-            if username:
-                display = "@" + username
-        lines.append(f"🔗 Ссылка: {escape(display)}")
+        lines.append(f"Канал: {escape(raw_link)}")
 
     # описание из био автора (а не из фото)
     description = ""
     if author:
         description = (author.get("bio") or "").strip()
+    desc_block = []
     if description:
-        lines.append("")
-        lines.append("Описание:")
-        lines.append(quote(description))
+        desc_block.append("Описание:")
+        desc_block.append(quote(description))
 
     # --- Реклама под описанием ---
     # Реклама: по умолчанию включена, но премиум может выключить в настройках
@@ -687,8 +675,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             ad_title = (ad.get("title") or "").strip()
             ad_body = (ad.get("body") or "").strip()
             if ad_title or ad_body:
-                lines.append("")
-                lines.append("••• реклама •••")
+                lines.append("Реклама:")
                 if ad_title:
                     lines.append(f"<b>{escape(ad_title)}</b>")
                 if ad_body:
@@ -696,6 +683,12 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     # details on demand (доступны всем; супер-кнопки ограничены клавой)
     if show_details:
+        if desc_block:
+            lines.extend(desc_block)
+
+        if bool(photo.get("has_beta_award")):
+            lines.append("🏆 Бета-тестер бота")
+
         rating_str = "—"
         good_cnt = 0
         bad_cnt = 0
@@ -748,7 +741,6 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             f"Дата публикации: {published or '—'}",
         ] + admin_extras
 
-        lines.append("")
         lines.append(quote("\n".join(details_lines)))
 
     return "\n".join(lines)
@@ -1834,10 +1826,6 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
     except Exception:
         viewer_is_premium = False
 
-    if not viewer_is_premium:
-        await callback.answer("Это доступно только в GlowShot Premium 💎", show_alert=True)
-        return
-
     try:
         photo = await get_photo_by_id(photo_id)
     except Exception:
@@ -1859,7 +1847,7 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
             photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
     caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=to_show)
-    kb = build_rate_keyboard(photo_id, is_premium=True, show_details=to_show)
+    kb = build_rate_keyboard(photo_id, is_premium=viewer_is_premium, show_details=to_show)
 
     try:
         await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
