@@ -72,7 +72,7 @@ def _rate_kb(
     idx: int,
     rated_value: int | None,
     is_registered: bool,
-    has_next: bool,
+    has_next_unrated: bool,
     is_rateable: bool,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -93,7 +93,7 @@ def _rate_kb(
         return kb.as_markup()
 
     # Уже оценено или нельзя оценивать — даём кнопку дальше/регистрации/меню
-    if has_next:
+    if has_next_unrated:
         kb.row(InlineKeyboardButton(text="➡️ Далее", callback_data=f"lr:next:{owner_tg_id}:{idx+1}:{code}"))
     else:
         if is_registered:
@@ -156,17 +156,66 @@ async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, 
             await target.answer(txt, show_alert=True)
         return
 
+    viewer_user_id = viewer_full.get("id") if viewer_full else None
+
+    # Найдём первую неоценённую пользователем фотографию (если есть)
+    unrated_idx = None
+    ratings_cache: list[int | None] = []
+    for i, ph in enumerate(photos):
+        rv = None
+        if viewer_user_id:
+            rv = await get_user_rating_value(int(ph["id"]), int(viewer_user_id))
+        ratings_cache.append(rv)
+        if rv is None and unrated_idx is None:
+            unrated_idx = i
+
+    if unrated_idx is None:
+        # Все фото оценены — показываем финальный экран
+        done_text = (
+            "🔗⭐️ Все доступные фото автора уже оценены.\n\n"
+            "Спасибо за оценки!"
+        )
+        kb = InlineKeyboardBuilder()
+        if is_reg:
+            kb.button(text="🏠 В меню", callback_data="menu:back")
+        else:
+            kb.button(text="📝 Зарегистрироваться", callback_data="auth:start")
+        kb.adjust(1)
+
+        # удаляем старое сообщение (если было) и шлём новое
+        try:
+            if isinstance(target, CallbackQuery):
+                await target.message.delete()
+            else:
+                pass
+        except Exception:
+            pass
+        if isinstance(target, CallbackQuery):
+            await target.message.bot.send_message(
+                chat_id=target.message.chat.id,
+                text=done_text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+                parse_mode="HTML",
+            )
+        else:
+            await target.bot.send_message(
+                chat_id=target.chat.id,
+                text=done_text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+                parse_mode="HTML",
+            )
+        return
+
+    idx = unrated_idx if idx >= len(photos) else idx
     idx = max(0, min(idx, len(photos) - 1))
     photo = photos[idx]
-    has_next = idx < len(photos) - 1
+    rated_value = ratings_cache[idx]
+    has_next_unrated = any(rv is None for j, rv in enumerate(ratings_cache) if j != idx)
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
     owner_username = (owner_user or {}).get("username")
-
-    rated_value = None
-    viewer_user_id = viewer_full.get("id") if viewer_full else None
-    if viewer_user_id:
-        rated_value = await get_user_rating_value(int(photo["id"]), int(viewer_user_id))
 
     title = (photo.get("title") or "Фотография").strip()
     pub = _fmt_pub_date(photo)
@@ -205,83 +254,29 @@ async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, 
         idx=idx,
         rated_value=rated_value,
         is_registered=is_reg,
-        has_next=has_next,
+        has_next_unrated=has_next_unrated,
         is_rateable=is_rateable,
     )
 
-    if not is_rateable:
-        # Показать фото с подписью (без оценки), либо текст если не можем отредактировать
-        if isinstance(target, Message):
-            await target.bot.send_photo(
-                chat_id=target.chat.id,
-                photo=photo["file_id"],
-                caption=text,
-                reply_markup=kb,
-                disable_notification=True,
-                parse_mode="HTML",
-            )
-        else:
-            try:
-                if target.message.photo:
-                    await target.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
-                else:
-                    await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            except Exception:
-                await target.message.bot.send_photo(
-                    chat_id=target.message.chat.id,
-                    photo=photo["file_id"],
-                    caption=text,
-                    reply_markup=kb,
-                    disable_notification=True,
-                    parse_mode="HTML",
-                )
-        return
-
-    if rated_value is None and is_rateable:
-        # BEFORE rating: show photo + rating keyboard
-        if isinstance(target, Message):
-            await target.bot.send_photo(
-                chat_id=target.chat.id,
-                photo=photo["file_id"],
-                caption=text,
-                reply_markup=kb,
-                disable_notification=True,
-                parse_mode="HTML",
-            )
-        else:
-            try:
-                if target.message.photo:
-                    await target.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
-                else:
-                    await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            except Exception:
-                await target.message.bot.send_photo(
-                    chat_id=target.message.chat.id,
-                    photo=photo["file_id"],
-                    caption=text,
-                    reply_markup=kb,
-                    disable_notification=True,
-                    parse_mode="HTML",
-                )
-        return
-
-    # AFTER rating или если оценка запрещена: удаляем фото и показываем компактный текст
+    # Всегда показываем с фотографией. Удаляем старое сообщение, чтобы избежать багов с media.
     if isinstance(target, CallbackQuery):
         try:
             await target.message.delete()
         except Exception:
             pass
-        await target.message.bot.send_message(
+        await target.message.bot.send_photo(
             chat_id=target.message.chat.id,
-            text=text,
+            photo=photo["file_id"],
+            caption=text,
             reply_markup=kb,
             disable_notification=True,
             parse_mode="HTML",
         )
     else:
-        await target.bot.send_message(
+        await target.bot.send_photo(
             chat_id=target.chat.id,
-            text=text,
+            photo=photo["file_id"],
+            caption=text,
             reply_markup=kb,
             disable_notification=True,
             parse_mode="HTML",
