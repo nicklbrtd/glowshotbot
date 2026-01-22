@@ -9,6 +9,8 @@ from database import upsert_user_profile, get_user_by_tg_id
 from keyboards.common import build_main_menu
 
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
+from utils.time import get_moscow_today
+from datetime import datetime
 
 router = Router()
 
@@ -24,6 +26,62 @@ class RegistrationStates(StatesGroup):
 async def _get_reg_context(state: FSMContext) -> tuple[int | None, int | None]:
     data = await state.get_data()
     return data.get("reg_chat_id"), data.get("reg_msg_id")
+
+
+async def _finish_registration_message(*, bot, chat_id: int, msg_id: int) -> None:
+    """Показывает финальное сообщение регистрации с кнопкой «В меню», не удаляя исходное."""
+    try:
+        day = get_moscow_today()
+        try:
+            reg_date = datetime.fromisoformat(day).strftime("%d.%m.%Y")
+        except Exception:
+            reg_date = day
+    except Exception:
+        reg_date = ""
+
+    lines = [
+        "Регистрация завершена 🎉",
+        "",
+        f"Дата регистрации: {reg_date}" if reg_date else "Дата регистрации: —",
+        "Теперь ты можешь пользоваться этим ботом.",
+        "Все данные — имя, пол, возраст и описание — можно менять позже в разделе «Профиль».",
+        "Жми «В меню»",
+    ]
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="В меню", callback_data="afterreg:menu")
+    kb.adjust(1)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text="\n".join(lines),
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        await bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data == "afterreg:menu")
+async def after_registration_menu(callback: CallbackQuery, state: FSMContext):
+    """Удаляем клавиатуру и подсказку, отправляем меню отдельным сообщением."""
+    try:
+        text = (callback.message.text or "").replace("Жми «В меню»", "").strip()
+        await callback.message.edit_text(text)
+    except Exception:
+        pass
+
+    try:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text="Вот главное меню:",
+            reply_markup=build_main_menu(),
+        )
+    except Exception:
+        pass
+
+    await callback.answer("Открываю меню")
 
 
 
@@ -101,8 +159,9 @@ async def registration_lang(callback: CallbackQuery, state: FSMContext):
         chat_id=reg_chat_id,
         message_id=reg_msg_id,
         text=(
-            "Короткая анкета: вопросы для статистики, почти всё можно пропустить.\n\n"
-            "Как тебя указать? Имя или псевдоним — его увидят другие пользователи."
+            "Некоторые вопросы для статистики, почти всё можно пропустить.\n\n"
+            "Как тебя указывать? Имя или псевдоним — его увидят другие пользователи.\n\n"
+            "Осталось всего пару шагов."
         ),
     )
     await callback.answer("Язык выбран")
@@ -158,9 +217,8 @@ async def registration_name(message: Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="Парень 🚹", callback_data="gender:male")
     kb.button(text="Девушка 🚺", callback_data="gender:female")
-    kb.button(text="Другое ⚧️", callback_data="gender:other")
     kb.button(text="Не важно", callback_data="gender:na")
-    kb.adjust(2, 2)
+    kb.adjust(2, 1)
 
     await state.set_state(RegistrationStates.waiting_gender)
     await message.delete()
@@ -168,9 +226,8 @@ async def registration_name(message: Message, state: FSMContext):
         chat_id=reg_chat_id,
         message_id=reg_msg_id,
         text=(
-            "Выбери, как тебя указать в профиле.\n\n"
-            "Это нужно только для статистики.\n"
-            "Если не хочешь уточнять — жми «Не важно»."
+            "Выбери свой пол.\n"
+            "Если не хочешь уточнять — жми «Не важно». Уже почти готово."
         ),
         reply_markup=kb.as_markup(),
     )
@@ -191,11 +248,10 @@ async def registration_gender(callback: CallbackQuery, state: FSMContext):
     mapping = {
         "male": "Парень",
         "female": "Девушка",
-        "other": "Другое",
         "na": "Не важно",
     }
     gender = mapping.get(gender_code, "Не важно")
-    await state.update_data(gender=gender)
+    await state.update_data(gender=gender, gender_code=gender_code)
 
     await state.set_state(RegistrationStates.waiting_age)
 
@@ -207,9 +263,9 @@ async def registration_gender(callback: CallbackQuery, state: FSMContext):
         chat_id=reg_chat_id,
         message_id=reg_msg_id,
         text=(
-            "Сколько тебе лет?\n\n"
+            "Сколько тебе лет?\n"
             "Напиши число (только цифры) или нажми «Пропустить».\n"
-            "Это тоже нужно только для статистики."
+            "Последний шаг будет совсем коротким."
         ),
         reply_markup=kb.as_markup(),
     )
@@ -278,14 +334,19 @@ async def registration_age_value(message: Message, state: FSMContext):
     age = int(text)
     if age < 6  or age > 90:
         await message.delete()
+        data = await state.get_data()
+        gender_code = data.get("gender_code", "na")
+        if gender_code == "male":
+            unsure = "Ты уверен, что это твой реальный возраст?"
+        elif gender_code == "female":
+            unsure = "Ты уверена, что это твой реальный возраст?"
+        else:
+            unsure = "Похоже, возраст указан необычно. Проверь, не опечатался?"
         try:
             await message.bot.edit_message_text(
                 chat_id=reg_chat_id,
                 message_id=reg_msg_id,
-                text=(
-                    "Ты уверен(а), что это твой реальный возраст?\n"
-                    "Напиши реальный возраст или нажми «Пропустить»."
-                ),
+                text=f"{unsure}\nНапиши реальный возраст или нажми «Пропустить».",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -304,7 +365,7 @@ async def registration_age_value(message: Message, state: FSMContext):
         chat_id=reg_chat_id,
         message_id=reg_msg_id,
         text=(
-            "Теперь можешь добавить описание для профиля.\n"
+            "Последний шаг: можешь добавить описание для профиля.\n"
             "Напиши это одним сообщением или нажми «Пропустить»."
         ),
         reply_markup=kb.as_markup(),
@@ -387,16 +448,10 @@ async def registration_bio(message: Message, state: FSMContext):
     )
 
     await message.delete()
-    await message.bot.edit_message_text(
+    await _finish_registration_message(
+        bot=message.bot,
         chat_id=reg_chat_id,
-        message_id=reg_msg_id,
-        text=(
-            "Регистрация завершена 🎉\n\n"
-            "Теперь ты можешь пользоваться GlowShot.\n"
-            "Все данные — имя, пол, возраст и описание — можно менять позже в разделе «Профиль».\n\n"
-            "Вот главное меню:"
-        ),
-        reply_markup=build_main_menu(),
+        msg_id=reg_msg_id,
     )
 
 
@@ -429,15 +484,10 @@ async def registration_bio_skip(callback: CallbackQuery, state: FSMContext):
         bio=None,
     )
 
-    await callback.message.bot.edit_message_text(
+    await _finish_registration_message(
+        bot=callback.message.bot,
         chat_id=reg_chat_id,
-        message_id=reg_msg_id,
-        text=(
-            "Регистрация завершена 🎉\n\n"
-            "Описание ты решил(а) пропустить — ничего страшного, его можно заполнить позже в разделе «Профиль».\n\n"
-            "Вот главное меню:"
-        ),
-        reply_markup=build_main_menu(),
+        msg_id=reg_msg_id,
     )
     await callback.answer()
 
