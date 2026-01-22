@@ -648,7 +648,13 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
     if raw_link:
-        lines.append(f"Ссылка: {escape(raw_link)}")
+        link_label = raw_link
+        # если пользователь ввёл ссылку вида t.me/username, превращаем в @username
+        if raw_link.startswith("https://t.me/") or raw_link.startswith("http://t.me/") or raw_link.startswith("t.me/"):
+            uname = raw_link.split("t.me/", 1)[1].lstrip("@")
+            if uname:
+                link_label = f"@{uname}"
+        lines.append(f"Ссылка: {escape(link_label)}")
 
     # описание из био автора (а не из фото)
     description = ""
@@ -1856,9 +1862,25 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         await callback.answer("Фото не найдено.", show_alert=True)
         return
 
-    # подтянем флаг и ссылку best-effort
-    if "has_beta_award" not in photo:
-        photo["has_beta_award"] = False
+    # подтянем флаг ачивки и ссылку best-effort
+    try:
+        author_user_id = int(photo.get("user_id") or 0)
+    except Exception:
+        author_user_id = 0
+
+    if "has_beta_award" not in photo or not photo.get("has_beta_award"):
+        try:
+            if author_user_id:
+                awards = await get_awards_for_user(author_user_id)
+                photo["has_beta_award"] = any(
+                    (award.get("code") or "").strip() == "beta_tester"
+                    or "бета-тестер бота" in (award.get("title") or "").strip().lower()
+                    or "бета тестер бота" in (award.get("title") or "").strip().lower()
+                    for award in awards
+                )
+        except Exception:
+            photo["has_beta_award"] = False
+
     if "user_tg_channel_link" not in photo:
         try:
             author = await get_user_by_id(int(photo.get("user_id") or 0))
