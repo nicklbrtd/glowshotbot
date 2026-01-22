@@ -12,6 +12,7 @@ from handlers.streak import (
     get_profile_streak_status,
     toggle_profile_streak_notify_and_status,
 )
+from handlers.premium import _render_premium_menu
 
 from database import (
     get_user_by_tg_id,
@@ -614,11 +615,7 @@ async def build_profile_view(user: dict):
     kb.button(text=t("profile.btn.streak", lang), callback_data="profile:streak")
 
     premium_button_text = t("profile.btn.premium.my", lang) if premium_active else t("profile.btn.premium.buy", lang)
-    premium_callback = "profile:premium"
-    if bool(user.get("is_admin") or user.get("is_moderator")):
-        premium_button_text += " / toggle"
-        premium_callback = "profile:premium_toggle_admin"
-    kb.button(text=premium_button_text, callback_data=premium_callback)
+    kb.button(text=premium_button_text, callback_data="profile:premium")
 
     kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
     kb.adjust(2, 2, 2, 1, 1)
@@ -675,12 +672,16 @@ async def profile_premium_toggle_admin(callback: CallbackQuery):
         await set_user_premium_until(tg_id, distant)
         new_state = True
 
-    # Перестраиваем профиль
-    text, markup = await build_profile_view(await get_user_by_tg_id(tg_id))
+    # Перестраиваем меню премиума (остаемся в том же экране)
     try:
-        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        await _render_premium_menu(callback, back_cb="menu:profile", from_menu=False)
     except Exception:
-        pass
+        # fallback: обновить профиль
+        text, markup = await build_profile_view(await get_user_by_tg_id(tg_id))
+        try:
+            await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            pass
 
     await callback.answer("Премиум включён" if new_state else "Премиум выключён")
 
