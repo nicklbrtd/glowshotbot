@@ -159,7 +159,10 @@ async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:pro
         kb.button(text=t("premium.btn.benefits", lang), callback_data=f"premium:benefits:{back_cb}")
         kb.button(text=t("premium.btn.extend", lang), callback_data="premium:plans")
         if is_admin:
-            kb.button(text="🔧 Премиум ВКЛ/ВЫКЛ", callback_data="profile:premium_toggle_admin")
+            kb.button(
+                text=f"🔧 Премиум: {'ВКЛ' if is_active else 'ВЫКЛ'}",
+                callback_data="profile:premium_toggle_admin",
+            )
         kb.button(text=t("premium.btn.back", lang), callback_data=back_cb)
         kb.adjust(1)
 
@@ -171,7 +174,10 @@ async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:pro
         kb.button(text=t("premium.plan.30d", lang), callback_data="premium:plan:30d")
         kb.button(text=t("premium.plan.90d", lang), callback_data="premium:plan:90d")
         if is_admin:
-            kb.button(text="🔧 Премиум ВКЛ/ВЫКЛ", callback_data="profile:premium_toggle_admin")
+            kb.button(
+                text=f"🔧 Премиум: {'ВКЛ' if is_active else 'ВЫКЛ'}",
+                callback_data="profile:premium_toggle_admin",
+            )
         kb.button(text=t("premium.btn.back", lang), callback_data=back_cb)
         kb.adjust(1)
 
