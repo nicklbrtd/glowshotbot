@@ -486,19 +486,21 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: b
         InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"),
     )
 
-    # кнопка «Еще» всегда доступна; супер/ачивка показываем только при раскрытии и для премиум
+    # Супер/ачивка — только при раскрытии и для премиум, отдельной строкой
+    if show_details and is_premium:
+        kb.row(
+            InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
+            InlineKeyboardButton(text="🏆 Ачивка", callback_data=f"rate:award:{photo_id}"),
+        )
+
+    # «В меню» слева, «Еще/Скрыть» справа
     kb.row(
+        InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"),
         InlineKeyboardButton(
             text=("🕵️ Скрыть" if show_details else "🕵️ Еще"),
             callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
         ),
-        *((
-            InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
-            InlineKeyboardButton(text="🏆 Ачивка", callback_data=f"rate:award:{photo_id}"),
-        ) if (show_details and is_premium) else ()),
     )
-
-    kb.row(InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"))
     return kb.as_markup()
 
 
@@ -635,17 +637,18 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
                 ids = [int(p.get("id") or 0) for p in active_photos]
                 if int(photo.get("id") or 0) in ids:
                     idx = ids.index(int(photo.get("id") or 0))
-                    photo_index_part = f" • Фото {idx + 1}/2"
+                    photo_index_part = f" · #{idx + 1}/2"
         except Exception:
             pass
 
     premium_badge = "💎 " if is_author_premium else ""
-    title_mono = f"<code>{escape(title)}</code>"
-    lines.append(f"{premium_badge}{title_mono}{device} — {escape(display_name)}{photo_index_part}")
+    title_mono = f"\"<code>{escape(title)}</code>\""
+    device_part = f" {device}" if device else ""
+    lines.append(f"{premium_badge}{title_mono}{device_part} — {escape(display_name)}{photo_index_part}")
 
     raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
     if raw_link:
-        lines.append(f"Канал: {escape(raw_link)}")
+        lines.append(f"Ссылка: {escape(raw_link)}")
 
     # описание из био автора (а не из фото)
     description = ""
@@ -693,7 +696,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     # details on demand (доступны всем; супер-кнопки ограничены клавой)
     if show_details:
         if bool(photo.get("has_beta_award")):
-            lines.append("🏆 Бета-тестер бота")
+            lines.append("··· Бета-тестер бота ···")
 
         if desc_block:
             lines.extend(desc_block)
@@ -756,9 +759,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
         lines.append(quote("\n".join(details_lines)))
     else:
-        # короткий режим: описание (если есть) и реклама
-        if desc_block:
-            lines.extend(desc_block)
+        # короткий режим: только ссылка и реклама
         if ad_lines:
             lines.append("")
             lines.extend(ad_lines)
