@@ -661,15 +661,15 @@ async def profile_premium_toggle_admin(callback: CallbackQuery):
     current = await is_user_premium_active(tg_id)
 
     # бесcрочно: ставим premium_until далеко в будущем
-    from database import set_user_premium_until  # type: ignore
+    from database import set_user_premium_status  # type: ignore
     import datetime
 
     if current:
-        await set_user_premium_until(tg_id, None)
+        await set_user_premium_status(tg_id, False, premium_until=None)
         new_state = False
     else:
         distant = (datetime.datetime.utcnow() + datetime.timedelta(days=3650)).isoformat()
-        await set_user_premium_until(tg_id, distant)
+        await set_user_premium_status(tg_id, True, premium_until=distant)
         new_state = True
 
     # Перестраиваем меню премиума (остаемся в том же экране)
