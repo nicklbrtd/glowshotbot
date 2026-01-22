@@ -110,8 +110,6 @@ async def recalc_day_global(*, day_key: str, limit: int = 10) -> int:
             continue
         if invited < min_invited:
             continue
-        if pending_reports > 0:
-            continue
 
         # cooldown победителя: last_win_date + 1 день недоступны
         last_win_raw = r.get("last_win_date")
@@ -255,20 +253,15 @@ async def get_day_eligibility(user_tg_id: int, day_key: str | None = None) -> di
     best_photo = None
     for r in rows:
         ratings_count = int(r.get("ratings_count") or 0)
-        pending_reports = int(r.get("pending_reports") or 0)
-        if ratings_count < min_ratings:
-            continue
-        if pending_reports > 0:
-            continue
-        best_photo = r
-        break
+        if ratings_count >= min_ratings:
+            best_photo = r
+            break
 
     checks = [
         {"title": "Пригласить 2 друзей по реферальной ссылке", "ok": invited >= min_invited, "value": invited},
-        {"title": "Собрать 20 оценок на сегодняшней фото", "ok": bool(best_photo), "value": None},
         {
-            "title": "Отсутствие открытых жалоб на фото",
-            "ok": bool(best_photo) and int(best_photo.get("pending_reports") or 0) == 0 if best_photo else False,
+            "title": "Собрать в сумме 20 оценок на любой активной фотографии",
+            "ok": bool(best_photo),
             "value": None,
         },
     ]
@@ -276,6 +269,9 @@ async def get_day_eligibility(user_tg_id: int, day_key: str | None = None) -> di
     note = None
     if rows:
         note = f"У тебя активных фото за день: {len(rows)}. В итоги попадёт одна — с лучшим рейтингом."
+        # Информируем, что жалобы влияют на место, но не блокируют участие
+        if best_photo and int(best_photo.get("pending_reports") or 0) > 0:
+            note += " У фото есть жалобы — они снижают рейтинг, но не блокируют участие."
 
     return {
         "eligible": all(c["ok"] for c in checks) if checks else False,

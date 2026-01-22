@@ -1,6 +1,7 @@
 import os
 import random
 import html
+import hashlib
 from utils.i18n import t
 from datetime import datetime, timedelta
 from aiogram import Router, F
@@ -14,7 +15,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 import database as db
 from keyboards.common import build_main_menu
-from utils.time import get_moscow_now
+from utils.time import get_moscow_now, get_moscow_today
 
 router = Router()
 
@@ -169,11 +170,18 @@ async def _build_dynamic_main_menu(
         lang=lang,
         has_photo=has_photo,
         has_rate_targets=has_rate_targets,
-        show_premium_promo=_is_premium_promo_day(),
     )
 
 async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, lang: str) -> str:
-    """Формирует текст главного меню (персональный)."""
+    """Формирует текст главного меню (без рекламы, с адаптивными подсказками)."""
+
+    def _fmt_rating(v: float | None) -> str:
+        if v is None:
+            return "—"
+        try:
+            return f"{float(v):.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(v)
 
     # Имя
     name = None
@@ -183,48 +191,86 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         except Exception:
             name = None
     if not name:
-        name = "друг" if lang == "ru" else "friend"
-
+        name = "друг"
     safe_name = html.escape(str(name), quote=False)
 
     title_prefix = "💎 " if is_premium else ""
-
     lines: list[str] = []
-    lines.append(t("menu.title", lang, prefix=title_prefix))
-    lines.append(t("menu.name", lang, name=safe_name))
-    lines.append("")
-    # Рекламный блок
-    lines.append(t("menu.ad.header", lang))
-    lines.append(t("menu.ad.line", lang, link=AD_CHANNEL_LINK))
-    # random 2nd promo line
-    ad_lines = AD_LINES_RU if lang == "ru" else AD_LINES_EN
-    if ad_lines:
-        lines.append(f"• {random.choice(ad_lines)}")
+    lines.append(f"{title_prefix}Привет, {safe_name}!")
 
-    if _is_premium_promo_day():
+    # --- Блок статуса фотографии ---
+    active_photo = None
+    stats = None
+    comments_count = 0
+    ratings_count = 0
+    avg_rating = None
+
+    if user and user.get("id"):
         try:
-            benefits = await db.get_premium_benefits()
+            photos = await db.get_active_photos_for_user(int(user["id"]))
+            if photos:
+                # берем самую свежую
+                active_photo = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))[-1]
         except Exception:
-            benefits = []
-        promo_line = None
-        if benefits:
-            b = random.choice(benefits)
-            title = (b.get("title") or "").strip()
-            desc = (b.get("description") or "").strip()
-            if desc:
-                promo_line = f"💎 {title} — {desc}"
-            elif title:
-                promo_line = f"💎 {title}"
-        if promo_line:
-            lines.append("")
-            lines.append(promo_line)
-        else:
-            lines.append("")
-            lines.append("💎 GlowShot Premium: двойные фото, супер-оценки и фишки без ограничений.")
-
+            active_photo = None
 
     lines.append("")
-    lines.append(t("menu.tagline", lang))
+    if not active_photo:
+        lines.append("📷 У тебя нет активной фотографии.")
+        lines.append("Загрузи кадр, чтобы получать оценки и комментарии.")
+    else:
+        try:
+            stats = await db.get_photo_stats(int(active_photo["id"]))
+            ratings_count = int(stats.get("ratings_count") or 0)
+            avg_rating = stats.get("avg_rating")
+            comments_count = int(stats.get("comments_count") or 0)
+        except Exception:
+            stats = None
+
+        title = (active_photo.get("title") or "Без названия").strip()
+        lines.append(f"🎞 Текущая работа: «{html.escape(title, quote=False)}»")
+        if ratings_count == 0:
+            lines.append("Оценок пока нет — это нормально, подбор аудитории займёт немного времени.")
+        else:
+            lines.append(f"Рейтинг: { _fmt_rating(avg_rating) }   ·   Оценок: {ratings_count}")
+        if comments_count > 0:
+            lines.append(f"Комментариев: {comments_count}")
+
+    # --- Блок активности / обратной связи ---
+    lines.append("")
+    if ratings_count > 0 or comments_count > 0:
+        lines.append("🔔 На твою фотографию уже приходили оценки/комментарии.")
+    else:
+        lines.append("🌿 Пока новых оценок нет — это ок, система подберёт зрителей.")
+
+    # --- Блок подсказок (макс 2) ---
+    hints: list[str] = []
+    if not active_photo:
+        hints.append("💡 Загрузи фотографию, чтобы начать получать оценки.")
+    else:
+        if ratings_count < 20:
+            hints.append("💡 Поделись ссылкой на фото — оценки по ссылке учитываются.")
+        hints.append("💡 Зови друзей через /ref — приглашённые помогают пробиться в итоги дня.")
+        hints.append("💡 Оценивай работы других — система подберёт больше зрителей для твоего кадра.")
+        # список советов в коде можно расширять здесь
+
+    if hints:
+        lines.append("")
+        # детерминированный выбор до 2 подсказок (по пользователю и дате)
+        seed_str = f"{tg_id}-{get_moscow_today()}"
+        seed = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16)
+        pool = list(hints)
+        selected: list[str] = []
+        while pool and len(selected) < 2:
+            idx = seed % len(pool)
+            selected.append(pool.pop(idx))
+            seed = seed // 7 or 1
+        for h in selected:
+            lines.append(h)
+
+    # --- Опциональная бренд-строка ---
+    lines.append("")
+    lines.append("Публикуй · Оценивай · Побеждай")
 
     return "\n".join(lines)
 

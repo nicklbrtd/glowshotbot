@@ -48,6 +48,7 @@ from database import (
     get_user_reports_since,
     mark_viewonly_seen,
     get_active_photos_for_user,
+    get_random_active_ad,
 )
 from html import escape
 from config import MODERATION_CHAT_ID
@@ -658,6 +659,22 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     if description:
         lines.append("")
         lines.append(quote(description))
+
+    # --- Реклама под описанием ---
+    try:
+        ad = await get_random_active_ad()
+    except Exception:
+        ad = None
+    if ad:
+        ad_title = (ad.get("title") or "").strip()
+        ad_body = (ad.get("body") or "").strip()
+        if ad_title or ad_body:
+            lines.append("")
+            lines.append("••• реклама •••")
+            if ad_title:
+                lines.append(f"<b>{escape(ad_title)}</b>")
+            if ad_body:
+                lines.append(quote(ad_body))
 
     # premium details only on demand
     viewer_is_premium = False

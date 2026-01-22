@@ -13,7 +13,6 @@ def build_main_menu(
     lang: str = "ru",
     has_photo: bool | None = None,
     has_rate_targets: bool | None = None,
-    show_premium_promo: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     # Базовые пользовательские кнопки
@@ -33,9 +32,6 @@ def build_main_menu(
     kb.button(text=rate_text, callback_data="rate:start")
     kb.button(text=t("kb.main.results", lang), callback_data="results:menu")
     kb.button(text=t("kb.main.profile", lang), callback_data="profile:open")
-
-    if show_premium_promo:
-        kb.button(text="💎 Premium", callback_data="premium:open:menu")
 
     kb.adjust(2, 2, 1, 1)
 
@@ -135,8 +131,11 @@ def build_admin_menu(lang: str = "ru") -> InlineKeyboardMarkup:
     kb.button(text=t("kb.admin.premium", lang), callback_data="admin:premium")
 
     # 4 ряд
+    kb.button(text="📣 Реклама", callback_data="admin:ads")
     kb.button(text=t("kb.admin.settings", lang), callback_data="admin:settings")
+
+    # 5 ряд
     kb.button(text=t("kb.back_to_menu", lang), callback_data="menu:back")
 
-    kb.adjust(2, 2, 2, 2)
+    kb.adjust(2, 2, 2, 2, 1)
     return kb.as_markup()

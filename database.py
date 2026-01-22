@@ -199,6 +199,72 @@ async def increment_likes_daily_for_tg_id(tg_id: int, day_key: str, delta: int =
             int(delta),
         )
 
+
+# -------------------- ads --------------------
+
+async def create_ad(title: str, body: str, is_active: bool = True) -> int:
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO ads (title, body, is_active, created_at)
+            VALUES ($1,$2,$3,$4)
+            RETURNING id
+            """,
+            str(title),
+            str(body),
+            1 if is_active else 0,
+            now,
+        )
+    return int(row["id"]) if row else 0
+
+
+async def list_ads(limit: int = 50) -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, title, body, is_active, created_at
+            FROM ads
+            ORDER BY created_at DESC, id DESC
+            LIMIT $1
+            """,
+            int(limit),
+        )
+    return [dict(r) for r in rows]
+
+
+async def set_ad_active(ad_id: int, active: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE ads SET is_active=$2 WHERE id=$1",
+            int(ad_id),
+            1 if active else 0,
+        )
+
+
+async def delete_ad(ad_id: int) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute("DELETE FROM ads WHERE id=$1", int(ad_id))
+
+
+async def get_random_active_ad() -> dict | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, title, body
+            FROM ads
+            WHERE is_active=1
+            ORDER BY random()
+            LIMIT 1
+            """
+        )
+    return dict(row) if row else None
+
 # -------------------- streak (🔥) API --------------------
 
 _STREAK_DAILY_RATINGS = int(os.getenv("STREAK_DAILY_RATINGS", "3"))
@@ -1076,6 +1142,19 @@ async def ensure_schema() -> None:
               day_key TEXT NOT NULL,
               skips_used INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        # ads
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ads (
+              id BIGSERIAL PRIMARY KEY,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              is_active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL
             );
             """
         )

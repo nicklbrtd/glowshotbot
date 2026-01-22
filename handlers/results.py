@@ -77,6 +77,14 @@ def build_results_menu_kb() -> InlineKeyboardMarkup:
     )
 
 
+def build_back_to_results_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад к итогам", callback_data="results:menu")],
+        ]
+    )
+
+
 def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
     """
     step 0: заставка — «Вперёд», «В меню»
@@ -293,7 +301,7 @@ async def _ensure_day_country_cached(day_key: str, country: str) -> None:
 
 async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) -> None:
     label = _label_for_day(day_key)
-    kb_back_menu = build_back_to_menu_kb()
+    kb_back_menu = build_back_to_results_kb()
 
     # Ensure cache exists (global)
     try:
@@ -441,7 +449,7 @@ async def results_day(callback: CallbackQuery):
     # Если пользователь ещё не допущен — показываем чеклист.
     elig = await get_day_eligibility(int(callback.from_user.id))
     if not elig.get("eligible"):
-        kb = build_back_to_menu_kb()
+        kb = build_back_to_results_kb()
         lines = ["🔥 <b>Итоги дня</b>", "", "Чтобы участвовать, выполни условия:"]
         for c in elig.get("checks", []):
             mark = "✅" if c.get("ok") else "❌"
@@ -464,7 +472,7 @@ async def results_day(callback: CallbackQuery):
             f"Сейчас: <b>{now.strftime('%H:%M')}</b>.\n"
             "Загляни чуть позже — мы подсчитаем все оценки за вчера."
         )
-        await _show_text(callback, text, kb)
+        await _show_text(callback, text, build_back_to_results_kb())
         await callback.answer()
         return
 
