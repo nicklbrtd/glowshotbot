@@ -614,7 +614,11 @@ async def build_profile_view(user: dict):
     kb.button(text=t("profile.btn.streak", lang), callback_data="profile:streak")
 
     premium_button_text = t("profile.btn.premium.my", lang) if premium_active else t("profile.btn.premium.buy", lang)
-    kb.button(text=premium_button_text, callback_data="profile:premium")
+    premium_callback = "profile:premium"
+    if bool(user.get("is_admin") or user.get("is_moderator")):
+        premium_button_text += " / toggle"
+        premium_callback = "profile:premium_toggle_admin"
+    kb.button(text=premium_button_text, callback_data=premium_callback)
 
     kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
     kb.adjust(2, 2, 2, 1, 1)
@@ -643,6 +647,42 @@ async def profile_menu(callback: CallbackQuery):
         pass
 
     await callback.answer()
+
+
+@router.callback_query(F.data == "profile:premium_toggle_admin")
+async def profile_premium_toggle_admin(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    if not (user.get("is_admin") or user.get("is_moderator")):
+        await callback.answer("Доступно только администраторам и модераторам.", show_alert=True)
+        return
+
+    tg_id = int(user.get("tg_id") or callback.from_user.id)
+    current = await is_user_premium_active(tg_id)
+
+    # бесcрочно: ставим premium_until далеко в будущем
+    from database import set_user_premium_until  # type: ignore
+    import datetime
+
+    if current:
+        await set_user_premium_until(tg_id, None)
+        new_state = False
+    else:
+        distant = (datetime.datetime.utcnow() + datetime.timedelta(days=3650)).isoformat()
+        await set_user_premium_until(tg_id, distant)
+        new_state = True
+
+    # Перестраиваем профиль
+    text, markup = await build_profile_view(await get_user_by_tg_id(tg_id))
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
+
+    await callback.answer("Премиум включён" if new_state else "Премиум выключён")
 
 
 # Handler for menu:profile to return to profile view from nested sections

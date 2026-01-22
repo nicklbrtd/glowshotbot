@@ -1,7 +1,7 @@
 from aiogram import Router, F
 import traceback
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from utils.time import get_moscow_today, get_moscow_now
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -570,7 +570,18 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             return ""
         return f"<blockquote>{escape(text)}</blockquote>"
 
+    def device_emoji(device_type_raw: str) -> str:
+        dt = (device_type_raw or "").lower()
+        if "смартфон" in dt or "phone" in dt:
+            return "📱"
+        if "фотокамера" in dt or "camera" in dt:
+            return "📷"
+        if dt:
+            return "📸"
+        return ""
+
     title = (photo.get("title") or "").strip() or "Без названия"
+    device = device_emoji(photo.get("device_type") or "")
 
     # author tg_id
     author_tg_id = None
@@ -629,21 +640,18 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             pass
 
     premium_badge = "💎 " if is_author_premium else ""
-    lines.append(f"{premium_badge}«{escape(title)}» — {escape(display_name)}{photo_index_part}")
-
-    # Ссылка на аккаунт (реальный username), отдельно — канал автора
-    if username:
-        lines.append(f"Аккаунт: @{escape(username)}")
+    title_mono = f"<code>{escape(title)}</code>"
+    lines.append(f"{premium_badge}{title_mono}{device} — {escape(display_name)}{photo_index_part}")
 
     raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
-    if is_author_premium and raw_link:
+    if raw_link:
         lines.append(f"Канал: {escape(raw_link)}")
 
     # описание из био автора (а не из фото)
     description = ""
     if author:
         description = (author.get("bio") or "").strip()
-    desc_block = []
+    desc_block: list[str] = []
     if description:
         desc_block.append("Описание:")
         desc_block.append(quote(description))
@@ -666,7 +674,8 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     if ads_enabled is None:
         ads_enabled = not viewer_is_premium
 
-    if ads_enabled:
+    ad_lines: list[str] = []
+    if ads_enabled and not show_details:
         try:
             ad = await get_random_active_ad()
         except Exception:
@@ -675,19 +684,19 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             ad_title = (ad.get("title") or "").strip()
             ad_body = (ad.get("body") or "").strip()
             if ad_title or ad_body:
-                lines.append("Реклама:")
+                ad_lines.append("••• реклама •••")
                 if ad_title:
-                    lines.append(f"<b>{escape(ad_title)}</b>")
+                    ad_lines.append(f"<b>{escape(ad_title)}</b>")
                 if ad_body:
-                    lines.append(quote(ad_body))
+                    ad_lines.append(quote(ad_body))
 
     # details on demand (доступны всем; супер-кнопки ограничены клавой)
     if show_details:
-        if desc_block:
-            lines.extend(desc_block)
-
         if bool(photo.get("has_beta_award")):
             lines.append("🏆 Бета-тестер бота")
+
+        if desc_block:
+            lines.extend(desc_block)
 
         rating_str = "—"
         good_cnt = 0
@@ -721,12 +730,16 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             pass
 
         admin_extras: list[str] = []
+        viewer_is_privileged = False
         try:
             viewer = await get_user_by_tg_id(int(viewer_tg_id))
             if viewer and (viewer.get("is_admin") or viewer.get("is_moderator")):
-                admin_extras.append(f"Username автора: @{username}" if username else "Username автора: —")
-                admin_extras.append(f"Создано: {published or '—'}")
+                viewer_is_privileged = True
+                if username:
+                    admin_extras.append(f"Аккаунт автора: @{username}")
                 created_at = photo.get("created_at") or ""
+                if published:
+                    admin_extras.append(f"Дата публикации: {published}")
                 if created_at:
                     admin_extras.append(f"created_at: {created_at}")
         except Exception:
@@ -737,11 +750,18 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             f"Рейтинг: {rating_str}",
             f"Оценок всего: {ratings_total}",
             f"Уникальных оценщиков: {rated_users}",
-            f"6–10: {good_cnt}   •   1–5: {bad_cnt}",
+            f"6–10: {good_cnt} • 1–5: {bad_cnt}",
             f"Дата публикации: {published or '—'}",
         ] + admin_extras
 
         lines.append(quote("\n".join(details_lines)))
+    else:
+        # короткий режим: описание (если есть) и реклама
+        if desc_block:
+            lines.extend(desc_block)
+        if ad_lines:
+            lines.append("")
+            lines.extend(ad_lines)
 
     return "\n".join(lines)
 
