@@ -505,9 +505,7 @@ EDIT_TAGS: list[tuple[str, str]] = [
 
 def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="📝 Название", callback_data=f"myphoto:edit:title:{photo_id}"))
     kb.row(InlineKeyboardButton(text="📷 Устройство", callback_data=f"myphoto:edit:device:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="✍️ Описание", callback_data=f"myphoto:edit:desc:{photo_id}"))
     kb.row(InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
     return kb.as_markup()
@@ -567,12 +565,9 @@ def _build_edit_menu_text(photo: dict) -> str:
 
     text = "✏️ <b>Редактирование</b>\n\n"
     text += f"<b>{header}</b>\n"
-    text += f"Тег: <b>{_esc_html(tag_line)}</b>\n\n"
-    text += "Описание:\n"
+    text += f"Тег: <b>{_esc_html(tag_line)}</b>\n"
     if desc:
-        text += _quote(_shorten(desc, 240))
-    else:
-        text += "<i>можно добавить</i>"
+        text += "\nОписание больше не редактируется."
     return text
 
 
@@ -875,9 +870,6 @@ async def build_my_photo_main_text(photo: dict, *, locked: bool = False) -> str:
         except Exception:
             score_str = "—"
 
-    desc_full = (photo.get("description") or "").strip()
-    desc_short = _shorten(desc_full, limit=240)
-
     if emoji:
         header = f"<code>\"{title_safe}\"</code> ({emoji})"
     else:
@@ -897,12 +889,6 @@ async def build_my_photo_main_text(photo: dict, *, locked: bool = False) -> str:
         lines.append("🚫 Оценки для этой фотографии выключены.")
         if locked:
             lines.append("💎 Вторая активная фотография доступна только с Premium.")
-    lines.append("")
-    lines.append("📝 Описание:")
-    if desc_short:
-        lines.append(_quote(desc_short))
-    else:
-        lines.append("<i>не добавлено</i>")
 
     return "\n".join(lines)
 
@@ -1974,7 +1960,8 @@ async def myphoto_got_photo(message: Message, state: FSMContext):
         photo=file_id,
         caption=(
             f"{draft_text}\n\n"
-            "Теперь напиши название этой работы.\n\n"
+            "Теперь напиши название этой работы.\n"
+            "<b>Поменять название после загрузки нельзя.</b>\n\n"
         ),
         reply_markup=build_upload_wizard_kb(back_to="photo"),
         disable_notification=True,
@@ -2574,34 +2561,7 @@ async def myphoto_editmenu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:title:(\d+)$"))
 async def myphoto_edit_title(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-    photo_id = int((callback.data or "").split(":")[3])
-
-    photo = await get_photo_by_id(photo_id)
-    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
-        await callback.answer("Нет доступа.", show_alert=True)
-        return
-    if await _is_photo_locked_for_user(photo_id, state):
-        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
-        return
-
-    await state.set_state(EditPhotoStates.waiting_title)
-    await state.update_data(edit_photo_id=photo_id)
-    try:
-        await state.update_data(
-            edit_target_chat_id=callback.message.chat.id,
-            edit_target_msg_id=callback.message.message_id,
-            edit_target_is_photo=bool(callback.message.photo),
-        )
-    except Exception:
-        pass
-
-    text = "📝 <b>Новое название</b>\n\nОтправь текстом новое название."
-    kb = build_edit_cancel_kb(photo_id)
-    await callback.message.edit_caption(caption=text, reply_markup=kb)
-    await callback.answer()
+    await callback.answer("Название теперь нельзя менять.", show_alert=True)
 
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:device:(\d+)$"))
@@ -2671,40 +2631,7 @@ async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:desc:(\d+)$"))
 async def myphoto_edit_desc(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-    photo_id = int((callback.data or "").split(":")[3])
-
-    photo = await get_photo_by_id(photo_id)
-    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user["id"]):
-        await callback.answer("Нет доступа.", show_alert=True)
-        return
-    if await _is_photo_locked_for_user(photo_id, state):
-        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
-        return
-
-    await state.set_state(EditPhotoStates.waiting_description)
-    await state.update_data(edit_photo_id=photo_id)
-    try:
-        await state.update_data(
-            edit_target_chat_id=callback.message.chat.id,
-            edit_target_msg_id=callback.message.message_id,
-            edit_target_is_photo=bool(callback.message.photo),
-        )
-    except Exception:
-        pass
-
-    text = (
-        "✍️ <b>Описание</b>\n\n"
-        "Отправь описание текстом."
-    )
-    has_desc = bool(photo.get("description"))
-    try:
-        await callback.message.edit_caption(caption=text, reply_markup=build_edit_desc_kb(photo_id, has_desc))
-    except Exception:
-        await callback.message.edit_text(text, reply_markup=build_edit_desc_kb(photo_id, has_desc), parse_mode="HTML")
-    await callback.answer()
+    await callback.answer("Описание фотографий отключено.", show_alert=True)
 
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:tag:(\d+)$"))
@@ -2765,45 +2692,7 @@ async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
 
 @router.message(EditPhotoStates.waiting_title, F.text)
 async def myphoto_edit_title_text(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photo_id = int(data.get("edit_photo_id") or 0)
-    user = await get_user_by_tg_id(message.from_user.id)
-    if not user or not photo_id:
-        await state.clear()
-        await message.delete()
-        return
-
-    title = (message.text or "").strip()
     await message.delete()
-
-    if not title or has_links_or_usernames(title) or has_promo_channel_invite(title):
-        await state.clear()
-        return
-
-    await update_photo_editable_fields(photo_id, int(user["id"]), title=title)
-
-    photo = await get_photo_by_id(photo_id)
-    if not photo or photo.get("is_deleted"):
-        return
-
-    target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
-    target_msg_id = int(data.get("edit_target_msg_id") or 0)
-    had_photo = bool(data.get("edit_target_is_photo"))
-
-    if target_msg_id:
-        new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
-            bot=message.bot,
-            chat_id=target_chat_id,
-            message_id=target_msg_id,
-            photo=photo,
-            had_photo=had_photo,
-        )
-        await state.update_data(
-            edit_target_chat_id=target_chat_id,
-            edit_target_msg_id=new_msg_id,
-            edit_target_is_photo=is_photo_msg,
-        )
-
     await state.clear()
 
 
@@ -2811,119 +2700,18 @@ async def myphoto_edit_title_text(message: Message, state: FSMContext):
 
 @router.message(EditPhotoStates.waiting_description, F.text)
 async def myphoto_edit_desc_text(message: Message, state: FSMContext):
-    data = await state.get_data()
-    photo_id = int(data.get("edit_photo_id") or 0)
-    user = await get_user_by_tg_id(message.from_user.id)
-    if not user or not photo_id:
-        await state.clear()
-        await message.delete()
-        return
-
-    txt = (message.text or "").strip()
     await message.delete()
-
-    if not txt:
-        return
-
-    desc = txt
-
-    if desc and (has_links_or_usernames(desc) or has_promo_channel_invite(desc)):
-        edit_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
-        edit_msg_id = int(data.get("edit_target_msg_id") or 0)
-        had_photo = bool(data.get("edit_target_is_photo"))
-        if edit_msg_id:
-            try:
-                if had_photo:
-                    await message.bot.edit_message_caption(
-                        chat_id=edit_chat_id,
-                        message_id=edit_msg_id,
-                        caption="Описание не должно содержать ссылки или рекламу. Пришли другой текст.",
-                        reply_markup=build_edit_desc_kb(photo_id, has_description=True),
-                        parse_mode="HTML",
-                    )
-                else:
-                    await message.bot.edit_message_text(
-                        chat_id=edit_chat_id,
-                        message_id=edit_msg_id,
-                        text="Описание не должно содержать ссылки или рекламу. Пришли другой текст.",
-                        reply_markup=build_edit_desc_kb(photo_id, has_description=True),
-                        parse_mode="HTML",
-                    )
-            except Exception:
-                pass
-        return
-
-    await update_photo_editable_fields(photo_id, int(user["id"]), description=desc)
-
-    photo = await get_photo_by_id(photo_id)
-    if not photo or photo.get("is_deleted"):
-        return
-
-    target_chat_id = int(data.get("edit_target_chat_id") or message.chat.id)
-    target_msg_id = int(data.get("edit_target_msg_id") or 0)
-    had_photo = bool(data.get("edit_target_is_photo"))
-
-    if target_msg_id:
-        new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
-            bot=message.bot,
-            chat_id=target_chat_id,
-            message_id=target_msg_id,
-            photo=photo,
-            had_photo=had_photo,
-        )
-        await state.update_data(
-            edit_target_chat_id=target_chat_id,
-            edit_target_msg_id=new_msg_id,
-            edit_target_is_photo=is_photo_msg,
-        )
-
+    try:
+        await message.answer("Описание фотографий отключено.")
+    except Exception:
+        pass
     await state.clear()
 
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:desc_clear:(\d+)$"))
 async def myphoto_edit_desc_clear(callback: CallbackQuery, state: FSMContext):
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    try:
-        await state.clear()
-    except Exception:
-        pass
-
-    photo_id = int((callback.data or "").split(":")[3])
-    photo = await get_photo_by_id(photo_id)
-    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user.get("id", 0)):
-        await callback.answer("Нет доступа.", show_alert=True)
-        return
-    if await _is_photo_locked_for_user(photo_id, state):
-        await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
-        return
-
-    try:
-        await update_photo_editable_fields(photo_id, int(user["id"]), description="")
-    except Exception:
-        pass
-
-    # refresh edit menu
-    new_photo = await get_photo_by_id(photo_id)
-    if not new_photo or new_photo.get("is_deleted"):
-        await callback.answer("Описание удалено.", show_alert=False)
-        return
-
-    new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
-        bot=callback.message.bot,
-        chat_id=callback.message.chat.id,
-        message_id=callback.message.message_id,
-        photo=new_photo,
-        had_photo=bool(callback.message.photo),
-    )
-    await state.update_data(
-        edit_target_chat_id=callback.message.chat.id,
-        edit_target_msg_id=new_msg_id,
-        edit_target_is_photo=is_photo_msg,
-    )
-    await callback.answer("Описание удалено.")
+    await callback.answer("Описание фотографий отключено.", show_alert=True)
+    await state.clear()
 
 
 

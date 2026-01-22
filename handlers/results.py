@@ -19,7 +19,7 @@ from database_results import (
     get_results_items,
 )
 
-from services.results_engine import recalc_day_global
+from services.results_engine import recalc_day_global, get_day_eligibility
 
 
 try:
@@ -31,25 +31,6 @@ except Exception:  # pragma: no cover
 
 
 router = Router()
-
-# =========================
-# TEMP: Results are in development
-# =========================
-RESULTS_IN_DEVELOPMENT = True
-
-def _dev_placeholder(title: str) -> str:
-    return (
-        f"{title}\n\n"
-        "🛠 Сейчас итоги в разработке — мы перестраиваем систему (кэш + движки + пороги участия), чтобы всё считалось быстро и честно.\n\n"
-        "<b>Что будет в итогах:</b>\n"
-        "• 📅 Итоги дня — топ фото дня, 1–3 места, топ‑10\n"
-        "• 🗓 Итоги недели — топ недели и лучшие авторы\n"
-        "• 🏙 Город / 🌍 Страна — рейтинги по твоей локации\n"
-        "• 🏆 По рангу — начинающий / любитель / профи\n"
-        "• 🏷 По тегам — портрет / пейзаж / стрит и т.д. <i>(только Premium)</i>\n\n"
-        "<i>Скоро откроем первый рабочий раздел. Спасибо, что тестишь 💛</i>"
-    )
-
 
 # =========================
 # DB helpers (users.city/users.country)
@@ -87,14 +68,7 @@ def build_results_menu_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📅 Итоги дня", callback_data="results:day"),
-                InlineKeyboardButton(text="🗓 Итоги недели", callback_data="results:week"),
-            ],
-            [
                 InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-            ],
-            [
-                InlineKeyboardButton(text="🏙 Мой город", callback_data="results:city"),
-                InlineKeyboardButton(text="🌍 Моя страна", callback_data="results:country"),
             ],
             [
                 InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
@@ -261,15 +235,10 @@ async def results_menu(callback: CallbackQuery):
     kb = build_results_menu_kb()
     text = (
         "🏁 <b>Итоги</b>\n\n"
-        "Сейчас мы переделываем итоги на новую систему (кэш + движки + пороги участия).\n\n"
-        "<b>План разделов:</b>\n"
+        "Доступны:\n"
         "• 📅 Итоги дня\n"
-        "• 🗓 Итоги недели\n"
-        "• 🏙 Итоги города\n"
-        "• 🌍 Итоги страны\n"
-        "• 🏆 Итоги по рангу\n"
-        "• 🏷 Итоги по тегам <i>(Premium)</i>\n\n"
-        "<i>Пока раздел в разработке.</i>"
+        "• 👤 Мои итоги (soon)\n\n"
+        "Остальные разделы подключим позже."
     )
     try:
         sent = await callback.message.bot.send_message(
@@ -469,9 +438,20 @@ async def results_day(callback: CallbackQuery):
     Итоги дня показываем за вчерашний календарный день по Москве,
     и показываем только после 07:00 МСК (как у тебя было).
     """
-    if RESULTS_IN_DEVELOPMENT:
+    # Если пользователь ещё не допущен — показываем чеклист.
+    elig = await get_day_eligibility(int(callback.from_user.id))
+    if not elig.get("eligible"):
         kb = build_back_to_menu_kb()
-        await _show_text(callback, _dev_placeholder("🔥 <b>Итоги дня</b>"), kb)
+        lines = ["🔥 <b>Итоги дня</b>", "", "Чтобы участвовать, выполни условия:"]
+        for c in elig.get("checks", []):
+            mark = "✅" if c.get("ok") else "❌"
+            extra = f" ({c.get('value')} из 2)" if c.get("value") is not None else ""
+            lines.append(f"{mark} {c.get('title')}{extra}")
+        note = elig.get("note_best_photo")
+        if note:
+            lines.append("")
+            lines.append(note)
+        await _show_text(callback, "\n".join(lines), kb)
         await callback.answer()
         return
 
@@ -494,11 +474,6 @@ async def results_day(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("results:day:"))
 async def results_day_nav(callback: CallbackQuery):
-    if RESULTS_IN_DEVELOPMENT:
-        kb = build_back_to_menu_kb()
-        await _show_text(callback, _dev_placeholder("🔥 <b>Итоги дня</b>"), kb)
-        await callback.answer()
-        return
     try:
         _, _, day_key, step_str = callback.data.split(":", 3)
         step = int(step_str)
@@ -521,11 +496,6 @@ async def results_day_nav(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:week")
 async def results_week(callback: CallbackQuery):
-    if RESULTS_IN_DEVELOPMENT:
-        kb = build_back_to_menu_kb()
-        await _show_text(callback, _dev_placeholder("🗓 <b>Итоги недели</b>"), kb)
-        await callback.answer()
-        return
     kb = build_back_to_menu_kb()
     text = (
         "🗓 <b>Итоги недели</b>\n\n"
@@ -538,11 +508,6 @@ async def results_week(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:me")
 async def results_me(callback: CallbackQuery):
-    if RESULTS_IN_DEVELOPMENT:
-        kb = build_results_menu_kb()
-        await _show_text(callback, _dev_placeholder("👤 <b>Мои итоги</b>"), kb)
-        await callback.answer()
-        return
     kb = build_results_menu_kb()
     text = (
         "👤 <b>Мои итоги</b>\n\n"
@@ -559,11 +524,6 @@ async def results_me(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:city")
 async def results_city(callback: CallbackQuery):
-    if RESULTS_IN_DEVELOPMENT:
-        kb = build_results_menu_kb()
-        await _show_text(callback, _dev_placeholder("🏙 <b>Итоги города</b>"), kb)
-        await callback.answer()
-        return
     now = get_moscow_now()
 
     if now.hour < 7:
@@ -642,11 +602,6 @@ async def results_city(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:country")
 async def results_country(callback: CallbackQuery):
-    if RESULTS_IN_DEVELOPMENT:
-        kb = build_results_menu_kb()
-        await _show_text(callback, _dev_placeholder("🌍 <b>Итоги страны</b>"), kb)
-        await callback.answer()
-        return
     now = get_moscow_now()
 
     if now.hour < 7:

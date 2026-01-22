@@ -38,7 +38,6 @@ from database import (
     link_and_reward_referral_if_needed,
     log_bot_error,
     streak_record_action_by_tg_id,
-    streak_get_status_by_tg_id,
     get_notify_settings_by_tg_id,
     increment_likes_daily_for_tg_id,
     get_photo_stats,
@@ -48,6 +47,7 @@ from database import (
     set_user_block_status_by_tg_id,
     get_user_reports_since,
     mark_viewonly_seen,
+    get_active_photos_for_user,
 )
 from html import escape
 from config import MODERATION_CHAT_ID
@@ -555,14 +555,14 @@ def build_no_photos_text() -> str:
 
 # Специальная подпись для раздела оценивания
 async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool = False) -> str:
-    """Шаблон:
-    💎 «Название» • 🔥N дней
+    """Шаблон (без огонька):
+    💎 «Название» (метка 1/2 если у автора две активные)
     ••• 🏆 Бета-тестер бота ••• (если имеется)
     🔗 Ссылка: @xxx (если имеется)
 
-    (описание свернутой цитатой)
+    (описание берём из био автора, не из фото)
 
-    Premium (по кнопке 🕵️ Еще) — тоже цитатой:
+    Premium (по кнопке 🕵️ Еще) — цитатой:
     <blockquote>
     📊 Статистика:
     Рейтинг:
@@ -602,17 +602,6 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             if author.get("tg_channel_link"):
                 photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
-    streak_days = 0
-    streak_visible = True
-    if author_tg_id:
-        try:
-            st = await streak_get_status_by_tg_id(int(author_tg_id))
-            streak_visible = bool(st.get("visible", True))
-            streak_days = int(st.get("streak") or 0) if streak_visible else 0
-        except Exception:
-            streak_days = 0
-            streak_visible = True
-
     is_author_premium = bool(photo.get("user_is_premium") or photo.get("user_premium_until"))
     if not is_author_premium and author_tg_id:
         try:
@@ -621,10 +610,26 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             is_author_premium = False
 
     lines: list[str] = []
-    day_word = _plural_ru(streak_days, "день", "дня", "дней")
-    streak_part = f" • 🔥<b>{streak_days}</b> {day_word}" if streak_visible else ""
+    # Метка 1/2, если у автора две активные фото
+    photo_index_part = ""
+    if author_user_id:
+        try:
+            active_photos = await get_active_photos_for_user(int(author_user_id))
+            if len(active_photos) == 2:
+                # сортируем по created_at, старое первое
+                try:
+                    active_photos = sorted(active_photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
+                except Exception:
+                    pass
+                ids = [int(p.get("id") or 0) for p in active_photos]
+                if int(photo.get("id") or 0) in ids:
+                    idx = ids.index(int(photo.get("id") or 0))
+                    photo_index_part = f" • Фото {idx + 1}/2"
+        except Exception:
+            pass
+
     premium_badge = "💎 " if is_author_premium else ""
-    lines.append(f"{premium_badge}«{escape(title)}»{streak_part}")
+    lines.append(f"{premium_badge}«{escape(title)}»{photo_index_part}")
 
     # beta tester line
     if bool(photo.get("has_beta_award")):
@@ -646,8 +651,10 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
                 display = "@" + username
         lines.append(f"🔗 Ссылка: {escape(display)}")
 
-    # description as collapsed quote
-    description = (photo.get("description") or "").strip()
+    # описание из био автора (а не из фото)
+    description = ""
+    if author:
+        description = (author.get("bio") or "").strip()
     if description:
         lines.append("")
         lines.append(quote(description))
