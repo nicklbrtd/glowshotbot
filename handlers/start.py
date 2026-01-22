@@ -209,10 +209,13 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         try:
             photos = await db.get_active_photos_for_user(int(user["id"]))
             if photos:
-                # берем самую свежую
-                active_photo = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))[-1]
+                # берем самую свежую как основную, но показываем, что их может быть 2
+                photos_sorted = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
+                active_photo = photos_sorted[-1]
+                other_count = len(photos_sorted) - 1
         except Exception:
             active_photo = None
+            other_count = 0
 
     lines.append("")
     if not active_photo:
@@ -228,7 +231,13 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
             stats = None
 
         title = (active_photo.get("title") or "Без названия").strip()
-        lines.append(f"🎞 Текущая работа: «{html.escape(title, quote=False)}»")
+        suffix = ""
+        try:
+            if other_count > 0:
+                suffix = f"  •  ещё {other_count} активн." if other_count == 1 else f"  •  ещё {other_count} активных"
+        except Exception:
+            suffix = ""
+        lines.append(f"🎞 Текущая работа: «{html.escape(title, quote=False)}»{suffix}")
         if ratings_count == 0:
             lines.append("Оценок пока нет — это нормально, подбор аудитории займёт немного времени.")
         else:
@@ -250,8 +259,13 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
     else:
         if ratings_count < 20:
             hints.append("💡 Поделись ссылкой на фото — оценки по ссылке учитываются.")
-        hints.append("💡 Зови друзей через /ref — приглашённые помогают пробиться в итоги дня.")
+        hints.append("💡 Пригласи двоих друзей через /ref — после этого сможешь участвовать в итогах дня.")
         hints.append("💡 Оценивай работы других — система подберёт больше зрителей для твоего кадра.")
+    # Настройка рекламы: подсказка для премиум и непремиум
+    if is_premium:
+        hints.append("💡 Рекламу в оценках можно выключить в настройках профиля.")
+    else:
+        hints.append("💡 Premium позволяет отключить рекламу в оценках.")
         # список советов в коде можно расширять здесь
 
     if hints:

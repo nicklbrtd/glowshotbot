@@ -18,6 +18,7 @@ class RegistrationStates(StatesGroup):
     waiting_gender = State()
     waiting_age = State()
     waiting_bio = State()
+    # язык выбираем до имени, но остаёмся в waiting_name
 
 
 async def _get_reg_context(state: FSMContext) -> tuple[int | None, int | None]:
@@ -57,17 +58,54 @@ async def registration_start(callback: CallbackQuery, state: FSMContext):
             pass
         msg = await callback.message.bot.send_message(
             chat_id=callback.message.chat.id,
-            text="Напиши имя или свой псевдоним.",
+            text="Выбери язык для регистрации и дальнейшей работы:",
+            reply_markup=_build_lang_kb(),
         )
-        await state.update_data(reg_msg_id=msg.message_id, reg_chat_id=msg.chat.id)
+        await state.update_data(reg_msg_id=msg.message_id, reg_chat_id=msg.chat.id, reg_lang="ru")
     else:
         await state.update_data(
             reg_msg_id=callback.message.message_id,
             reg_chat_id=callback.message.chat.id,
+            reg_lang="ru",
         )
-        await callback.message.edit_text("Напиши имя или свой псевдоним.")
+        await callback.message.edit_text(
+            "Выбери язык для регистрации и дальнейшей работы:",
+            reply_markup=_build_lang_kb(),
+        )
 
     await callback.answer()
+
+
+def _build_lang_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Русский", callback_data="reg:lang:ru")
+    kb.button(text="English", callback_data="reg:lang:en")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+@router.callback_query(RegistrationStates.waiting_name, F.data.startswith("reg:lang:"))
+async def registration_lang(callback: CallbackQuery, state: FSMContext):
+    reg_chat_id, reg_msg_id = await _get_reg_context(state)
+    if not reg_chat_id or not reg_msg_id:
+        await state.clear()
+        await callback.answer("Сессия регистрации сбилась. Нажми /start и попробуй снова.", show_alert=True)
+        return
+
+    lang = (callback.data or "reg:lang:ru").split(":")[-1]
+    if lang not in ("ru", "en"):
+        lang = "ru"
+    await state.update_data(reg_lang=lang)
+
+    await callback.message.bot.edit_message_text(
+        chat_id=reg_chat_id,
+        message_id=reg_msg_id,
+        text=(
+            "Короткая анкета: вопросы для статистики, почти всё можно пропустить.\n\n"
+            "Как тебя указать? Имя или псевдоним — его увидят другие пользователи."
+        ),
+    )
+    await callback.answer("Язык выбран")
 
 
 @router.message(RegistrationStates.waiting_name, F.text)

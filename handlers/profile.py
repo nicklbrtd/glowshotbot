@@ -38,6 +38,8 @@ from database import (
     toggle_comments_notify_by_tg_id,
     toggle_user_allow_ratings_by_tg_id,
     set_user_language_by_tg_id,
+    get_ads_enabled_by_tg_id,
+    set_ads_enabled_by_tg_id,
     get_user_block_status_by_tg_id,
     ensure_user_author_code,
 )
@@ -1707,13 +1709,21 @@ def _kb_profile_settings(
     lang: str = "ru",
     *,
     ratings_allowed: bool = True,
+    ads_enabled: bool | None = None,
+    is_premium: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("settings.btn.ratings", lang), callback_data="profile:settings:toggle:ratings")
     kb.button(text=t("settings.btn.notifications", lang), callback_data="profile:settings:notifications")
     kb.button(text=t("settings.lang.btn", lang), callback_data="profile:settings:toggle:lang")
+    if is_premium:
+        ads_state = " ✅" if ads_enabled else " ❌"
+        kb.button(text=f"Реклама{ads_state}", callback_data="profile:settings:toggle:ads")
     kb.button(text=t("common.back", lang), callback_data="menu:profile")
-    kb.adjust(2, 1, 1)
+    if is_premium:
+        kb.adjust(2, 1, 1, 1)
+    else:
+        kb.adjust(2, 1, 1)
     return kb.as_markup()
 
 
@@ -1723,6 +1733,8 @@ def _render_profile_settings(
     lang: str = "ru",
     *,
     ratings_allowed: bool = True,
+    ads_enabled: bool | None = None,
+    is_premium: bool = False,
 ) -> str:
     def _lang_label(code: str) -> str:
         if code.startswith("ru"):
@@ -1731,6 +1743,12 @@ def _render_profile_settings(
 
     ratings_line = "⭐️ " + (t("settings.state.on", lang) if ratings_allowed else t("settings.state.off", lang))
     lang_label = _lang_label(lang)
+    ads_line = ""
+    if is_premium:
+        ads_state = "включена" if ads_enabled else "выключена"
+        ads_line = f"\nРеклама в оценках: {ads_state}\nМожно переключить здесь."
+    else:
+        ads_line = "\nРеклама отключается в Premium."
 
     return (
         f"{t('settings.title', lang)}\n\n"
@@ -1739,6 +1757,7 @@ def _render_profile_settings(
         f"🌐 {t('settings.lang.line', lang, value=lang_label)}\n"
         f"{t('settings.lang.hint', lang, value=lang_label)}\n\n"
         f"🔔 {t('settings.notifications.hint', lang)}"
+        f"{ads_line}"
     )
 
 
@@ -1793,6 +1812,56 @@ def _kb_notifications_settings(
     return kb.as_markup()
 
 
+@router.callback_query(F.data == "profile:settings:toggle:ads")
+async def profile_settings_toggle_ads(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
+        return
+
+    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
+    premium_active = await is_user_premium_active(tg_id)
+    if not premium_active:
+        await callback.answer("Отключение рекламы доступно в Premium.", show_alert=True)
+        return
+
+    current = await get_ads_enabled_by_tg_id(tg_id)
+    if current is None:
+        current = False  # по умолчанию премиум без рекламы
+    new_state = not current
+    await set_ads_enabled_by_tg_id(tg_id, new_state)
+
+    notify = await get_notify_settings_by_tg_id(tg_id)
+    streak_status = await get_profile_streak_status(tg_id)
+    ratings_allowed = bool((user or {}).get("allow_ratings", True))
+    ads_enabled = new_state
+    lang = _get_lang(user)
+
+    text = _render_profile_settings(
+        notify,
+        streak_status,
+        lang,
+        ratings_allowed=ratings_allowed,
+        ads_enabled=ads_enabled,
+        is_premium=premium_active,
+    )
+    kb = _kb_profile_settings(
+        notify,
+        streak_status,
+        lang,
+        ratings_allowed=ratings_allowed,
+        ads_enabled=ads_enabled,
+        is_premium=premium_active,
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer("Обновил настройки рекламы.")
+
+
 @router.callback_query(F.data == "profile:settings")
 async def profile_settings_open(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
@@ -1806,6 +1875,10 @@ async def profile_settings_open(callback: CallbackQuery):
 
     streak_status = await get_profile_streak_status(tg_id)
     ratings_allowed = bool((user or {}).get("allow_ratings", True))
+    ads_enabled = await get_ads_enabled_by_tg_id(tg_id)
+    premium_active = await is_user_premium_active(tg_id)
+    if ads_enabled is None:
+        ads_enabled = not premium_active
 
     lang = _get_lang(user)
     text = _render_profile_settings(
@@ -1813,12 +1886,16 @@ async def profile_settings_open(callback: CallbackQuery):
         streak_status,
         lang,
         ratings_allowed=ratings_allowed,
+        ads_enabled=ads_enabled,
+        is_premium=premium_active,
     )
     kb = _kb_profile_settings(
         notify,
         streak_status,
         lang,
         ratings_allowed=ratings_allowed,
+        ads_enabled=ads_enabled,
+        is_premium=premium_active,
     )
 
     try:

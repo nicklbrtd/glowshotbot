@@ -49,6 +49,7 @@ from database import (
     mark_viewonly_seen,
     get_active_photos_for_user,
     get_random_active_ad,
+    get_ads_enabled_by_tg_id,
 )
 from html import escape
 from config import MODERATION_CHAT_ID
@@ -485,16 +486,17 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: b
         InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"),
     )
 
-    # premium extras
-    if is_premium:
-        kb.row(
+    # кнопка «Еще» всегда доступна; супер/ачивка показываем только при раскрытии и для премиум
+    kb.row(
+        InlineKeyboardButton(
+            text=("🕵️ Скрыть" if show_details else "🕵️ Еще"),
+            callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
+        ),
+        *((
             InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
             InlineKeyboardButton(text="🏆 Ачивка", callback_data=f"rate:award:{photo_id}"),
-            InlineKeyboardButton(
-                text=("🕵️ Скрыть" if show_details else "🕵️ Еще"),
-                callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
-            ),
-        )
+        ) if (show_details and is_premium) else ()),
+    )
 
     kb.row(InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"))
     return kb.as_markup()
@@ -556,21 +558,11 @@ def build_no_photos_text() -> str:
 
 # Специальная подпись для раздела оценивания
 async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool = False) -> str:
-    """Шаблон (без огонька):
-    💎 «Название» (метка 1/2 если у автора две активные)
-    ••• 🏆 Бета-тестер бота ••• (если имеется)
-    🔗 Ссылка: @xxx (если имеется)
-
-    (описание берём из био автора, не из фото)
-
-    Premium (по кнопке 🕵️ Еще) — цитатой:
-    <blockquote>
-    📊 Статистика:
-    Рейтинг:
-    Кол-во 6-10:
-    Кол-во 1-5:
-    </blockquote>
-    """
+    """Карточка оценивания:
+    «Название» — Имя/username • (Фото 1/2) • 💎 если автор премиум
+    Описание: <bio автора>
+    Реклама (только непремиум зрителям)
+    При «Еще» — детали; для админов/модов включаем username и дату публикации."""
 
     def quote(text: str) -> str:
         text = (text or "").strip()
@@ -587,6 +579,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     except Exception:
         author_user_id = 0
 
+    author = None
     if author_user_id:
         try:
             author = await get_user_by_id(author_user_id)
@@ -597,8 +590,6 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
                 author_tg_id = int(author.get("tg_id"))
             except Exception:
                 author_tg_id = None
-
-        # если нет link в photo — попробуем подтянуть
         if author and not photo.get("user_tg_channel_link"):
             if author.get("tg_channel_link"):
                 photo["user_tg_channel_link"] = author.get("tg_channel_link")
@@ -609,6 +600,14 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             is_author_premium = await is_user_premium_active(int(author_tg_id))
         except Exception:
             is_author_premium = False
+
+    # имя/username автора
+    display_name = author.get("name") if author else ""
+    username = author.get("username") if author else None
+    if username:
+        display_name = display_name or f"@{username}"
+    if not display_name:
+        display_name = "Автор"
 
     lines: list[str] = []
     # Метка 1/2, если у автора две активные фото
@@ -630,7 +629,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             pass
 
     premium_badge = "💎 " if is_author_premium else ""
-    lines.append(f"{premium_badge}«{escape(title)}»{photo_index_part}")
+    lines.append(f"{premium_badge}«{escape(title)}» — {escape(display_name)}{photo_index_part}")
 
     # beta tester line
     if bool(photo.get("has_beta_award")):
@@ -658,68 +657,99 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
         description = (author.get("bio") or "").strip()
     if description:
         lines.append("")
+        lines.append("Описание:")
         lines.append(quote(description))
 
     # --- Реклама под описанием ---
-    try:
-        ad = await get_random_active_ad()
-    except Exception:
-        ad = None
-    if ad:
-        ad_title = (ad.get("title") or "").strip()
-        ad_body = (ad.get("body") or "").strip()
-        if ad_title or ad_body:
-            lines.append("")
-            lines.append("••• реклама •••")
-            if ad_title:
-                lines.append(f"<b>{escape(ad_title)}</b>")
-            if ad_body:
-                lines.append(quote(ad_body))
-
-    # premium details only on demand
+    # Реклама: по умолчанию включена, но премиум может выключить в настройках
     viewer_is_premium = False
     try:
         viewer_is_premium = await is_user_premium_active(int(viewer_tg_id))
     except Exception:
         viewer_is_premium = False
 
-    if viewer_is_premium and show_details:
+    ads_enabled = None
+    try:
+        ads_enabled = await get_ads_enabled_by_tg_id(int(viewer_tg_id))
+    except Exception:
+        ads_enabled = None
+
+    # если пользователь не задавал — по умолчанию: у премиум выкл, у остальных вкл
+    if ads_enabled is None:
+        ads_enabled = not viewer_is_premium
+
+    if ads_enabled:
+        try:
+            ad = await get_random_active_ad()
+        except Exception:
+            ad = None
+        if ad:
+            ad_title = (ad.get("title") or "").strip()
+            ad_body = (ad.get("body") or "").strip()
+            if ad_title or ad_body:
+                lines.append("")
+                lines.append("••• реклама •••")
+                if ad_title:
+                    lines.append(f"<b>{escape(ad_title)}</b>")
+                if ad_body:
+                    lines.append(quote(ad_body))
+
+    # details on demand (доступны всем; супер-кнопки ограничены клавой)
+    if show_details:
         rating_str = "—"
         good_cnt = 0
         bad_cnt = 0
+        rated_users = 0
+        ratings_total = 0
+        published = photo.get("day_key") or ""
+        if published:
+            try:
+                pd = datetime.fromisoformat(published.split("T")[0])
+                published = pd.strftime("%d.%m.%Y")
+            except Exception:
+                published = published
 
-        # best-effort: эти функции могут отсутствовать — тогда просто покажем нули/прочерки
         try:
-            from database import get_photo_stats, get_photo_ratings_stats  # type: ignore
-
-            try:
-                ps = await get_photo_stats(int(photo["id"]))
-                v = ps.get("bayes_score")
-                if v is not None:
-                    rating_str = f"{float(v):.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                rating_str = "—"
-
-            try:
-                rs = await get_photo_ratings_stats(int(photo["id"]))
-                good_cnt = int(rs.get("good_count") or 0)
-                bad_cnt = int(rs.get("bad_count") or 0)
-            except Exception:
-                good_cnt = 0
-                bad_cnt = 0
-
+            ps = await get_photo_stats(int(photo["id"]))
+            v = ps.get("bayes_score")
+            ratings_total = int(ps.get("ratings_count") or 0)
+            rated_users = int(ps.get("rated_users") or 0)
+            if v is not None:
+                rating_str = f"{float(v):.2f}".rstrip("0").rstrip(".")
         except Exception:
             pass
 
-        details = "\n".join([
-            "📊 Статистика:",
+        try:
+            from database import get_photo_ratings_stats  # type: ignore
+            rs = await get_photo_ratings_stats(int(photo["id"]))
+            good_cnt = int(rs.get("good_count") or 0)
+            bad_cnt = int(rs.get("bad_count") or 0)
+        except Exception:
+            pass
+
+        admin_extras: list[str] = []
+        try:
+            viewer = await get_user_by_tg_id(int(viewer_tg_id))
+            if viewer and (viewer.get("is_admin") or viewer.get("is_moderator")):
+                admin_extras.append(f"Username автора: @{username}" if username else "Username автора: —")
+                admin_extras.append(f"Создано: {published or '—'}")
+                created_at = photo.get("created_at") or ""
+                if created_at:
+                    admin_extras.append(f"created_at: {created_at}")
+        except Exception:
+            pass
+
+        details_lines = [
+            "📊 Детали:",
             f"Рейтинг: {rating_str}",
-            f"Кол-во 6–10: {good_cnt}",
-            f"Кол-во 1–5: {bad_cnt}",
-        ])
+            f"Оценок всего: {ratings_total}",
+            f"Уникальных оценщиков: {rated_users}",
+            f"6–10: {good_cnt}   •   1–5: {bad_cnt}",
+            f"Дата публикации: {published or '—'}",
+        ] + admin_extras
 
         lines.append("")
-        lines.append(quote(details))
+        lines.append(quote("\n".join(details_lines)))
 
     return "\n".join(lines)
 

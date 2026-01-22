@@ -976,6 +976,8 @@ async def ensure_schema() -> None:
               block_reason TEXT,
               block_until TEXT,
 
+              ads_enabled INTEGER,
+
               referral_code TEXT,
 
               is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -1346,6 +1348,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS visible INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE user_streak ADD COLUMN IF NOT EXISTS reward_111_given INTEGER NOT NULL DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_ratings INTEGER NOT NULL DEFAULT 1;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ads_enabled INTEGER;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS author_code TEXT;")
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS users_author_code_uniq ON users(author_code) WHERE author_code IS NOT NULL;"
@@ -1950,6 +1953,35 @@ async def toggle_user_allow_ratings_by_tg_id(tg_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+# -------------------- ads settings --------------------
+
+async def get_ads_enabled_by_tg_id(tg_id: int) -> bool | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT ads_enabled FROM users WHERE tg_id=$1", int(tg_id))
+    if v is None:
+        return None
+    return bool(v)
+
+
+async def set_ads_enabled_by_tg_id(tg_id: int, enabled: bool) -> dict | None:
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE users
+            SET ads_enabled=$2, updated_at=$3
+            WHERE tg_id=$1
+            RETURNING id, tg_id, ads_enabled
+            """,
+            int(tg_id),
+            1 if enabled else 0,
+            now,
+        )
+    return dict(row) if row else None
+
+
 async def soft_delete_user(user_id: int) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -2371,8 +2403,8 @@ async def link_and_reward_referral_if_needed(invited_tg_id: int):
             int(invited_tg_id)
         )
 
-        await _add_premium_days(conn, inviter_user_id, days=2)
-        await _add_premium_days(conn, invited_user_id, days=2)
+        await _add_premium_days(conn, inviter_user_id, days=1)
+        await _add_premium_days(conn, invited_user_id, days=1)
 
         return True, inviter_tg_id, invited_tg_id
 
