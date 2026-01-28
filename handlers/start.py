@@ -394,6 +394,8 @@ async def cmd_start(message: Message, state: FSMContext):
     lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
     if user is None:
+        # Если был soft-delete, сбрасываем состояние на всякий случай
+        await state.clear()
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
         if payload and payload.startswith("ref_"):
             ref_code = payload[4:].strip()
@@ -415,12 +417,19 @@ async def cmd_start(message: Message, state: FSMContext):
         kb.button(text="Сыыыыр 📸", callback_data="auth:start")
         kb.adjust(1, 1)
 
-        await message.answer(
-            welcome_text,
-            reply_markup=kb.as_markup(),
-            disable_notification=True,
-            parse_mode="HTML",
-        )
+        try:
+            await message.answer(
+                welcome_text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+                parse_mode="HTML",
+            )
+        except Exception:
+            # Fallback без разметки/клавы, чтобы пользователь точно увидел ответ
+            try:
+                await message.answer(welcome_text)
+            except Exception:
+                pass
         try:
             await message.delete()
         except Exception:
