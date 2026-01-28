@@ -394,15 +394,20 @@ async def cmd_start(message: Message, state: FSMContext):
                 except Exception:
                     pass
 
-        lang = _pick_lang(None, getattr(message.from_user, "language_code", None))
-        text = t("start.register.text", lang)
+        # Приветственный экран для новых пользователей
+        welcome_text = (
+            "GlowShot — это новый Телеграм бот для тех, кто любит фотографию.\n"
+            "Выкладывай фото, делись им по ссылке, получай оценки.\n"
+            "Начнем? Жми «Сыыыыр 📸»"
+        )
 
         kb = InlineKeyboardBuilder()
-        kb.button(text=t("start.register.btn", lang), callback_data="auth:start")
-        kb.adjust(1)
+        kb.button(text="Наш телеграм", url="https://t.me/glowshotchannel")
+        kb.button(text="Сыыыыр 📸", callback_data="auth:start")
+        kb.adjust(1, 1)
 
         await message.answer(
-            text,
+            welcome_text,
             reply_markup=kb.as_markup(),
             disable_notification=True,
             parse_mode="HTML",

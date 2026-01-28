@@ -481,9 +481,11 @@ def build_my_photo_keyboard(
 
     # Навигация между фото
     nav_row: list[InlineKeyboardButton] = []
+    # Меню всегда слева
+    nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    # Стрелки — справа, если доступны
     if nav_prev:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
-    nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     if nav_next:
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data="myphoto:nav:next"))
     rows.append(nav_row)
