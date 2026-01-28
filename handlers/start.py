@@ -237,6 +237,9 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         lines.append("🌱 Вы можете отключить возможность оценивать Вашу фотографию, если хотите.")
         lines.append("")
         lines.append(_pick_advice(photos, user, is_premium))
+        lines.append("")
+        tagline = "публикуй · Оценивай · Побеждай"
+        lines.append(f"💎 {tagline}" if is_premium else tagline)
         return "\n".join(lines)
 
     # Сценарий 2: одна фото
@@ -253,6 +256,9 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         lines.append(f"Рейтинг: { _fmt_rating(bayes) }")
         lines.append("")
         lines.append(_pick_advice(photos, user, is_premium))
+        lines.append("")
+        tagline = "публикуй · Оценивай · Побеждай"
+        lines.append(f"💎 {tagline}" if is_premium else tagline)
         return "\n".join(lines)
 
     # Сценарий 3: две фото
@@ -272,6 +278,9 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
     lines.append(f"Лучшая: <code>\"{best_title}\"</code> — { _fmt_rating(best_score) }")
     lines.append("")
     lines.append(_pick_advice(photos, user, is_premium))
+    lines.append("")
+    tagline = "публикуй · Оценивай · Побеждай"
+    lines.append(f"💎 {tagline}" if is_premium else tagline)
     return "\n".join(lines)
     if ratings_count > 0 or comments_count > 0:
         lines.append("🔔 На твою фотографию уже приходили оценки/комментарии.")
