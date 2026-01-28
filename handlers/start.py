@@ -174,7 +174,7 @@ async def _build_dynamic_main_menu(
     )
 
 async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, lang: str) -> str:
-    """Формирует текст главного меню (без рекламы, с адаптивными подсказками)."""
+    """Формирует текст главного меню по новым сценариям."""
 
     def _fmt_rating(v: float | None) -> str:
         if v is None:
@@ -184,70 +184,95 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         except Exception:
             return str(v)
 
-    # Имя
-    name = None
-    if user:
-        try:
-            name = user.get("name") or user.get("first_name")
-        except Exception:
-            name = None
-    if not name:
-        name = "друг"
-    safe_name = html.escape(str(name), quote=False)
+    def _pick_advice(photos: list[dict], user: dict | None, is_premium: bool) -> str:
+        advices: list[str] = []
 
-    title_prefix = "💎 " if is_premium else ""
-    lines: list[str] = []
-    lines.append(f"{title_prefix}Привет, {safe_name}!")
+        if not photos:
+            advices.append("Добавь фотографию для своих первых оценок.")
+            advices.append("Люди могут оставлять комментарии к твоим фотографиям.")
+        else:
+            advices.append('Ты можешь поделиться ссылкой: «Моя фотография» → «Поделиться фотографией».')
+            advices.append(
+                'Если не хочешь получать оценки — выключи их: «Моя фотография» → «Редактировать» → «Оценки».'
+                " Фото останется видимым, но без оценок."
+            )
+            if not is_premium:
+                advices.append("С премиум можно делиться ссылкой в тгк и других соцсетях без ограничений.")
 
-    # --- Блок статуса фотографии ---
-    active_photo = None
-    stats = None
-    comments_count = 0
-    ratings_count = 0
-    avg_rating = None
+            ph = photos[-1]
+            if not (ph.get("device") or ph.get("device_type")):
+                advices.append("Укажи устройство: «Моя фотография» → «Редактировать» → «Устройство».")
+            if not ph.get("tag"):
+                advices.append("Добавь тег: «Моя фотография» → «Редактировать» → «Тег».")
 
+        if not (user or {}).get("bio"):
+            advices.append("Заполни описание в профиле — так тебя легче запомнят.")
+
+        if not advices:
+            return "💡 Совет недоступен."
+
+        import time
+
+        bucket = int(time.time() // (4 * 3600))  # новый совет каждые 4 часа
+        idx = bucket % len(advices)
+        return "💡 " + advices[idx]
+
+    # Подгружаем активные фото (до 2)
+    photos: list[dict] = []
     if user and user.get("id"):
         try:
             photos = await db.get_active_photos_for_user(int(user["id"]))
-            if photos:
-                # берем самую свежую как основную, но показываем, что их может быть 2
-                photos_sorted = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
-                active_photo = photos_sorted[-1]
-                other_count = len(photos_sorted) - 1
+            photos = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
+            photos = photos[:2]
         except Exception:
-            active_photo = None
-            other_count = 0
+            photos = []
 
-    lines.append("")
-    if not active_photo:
-        lines.append("📷 У тебя нет активной фотографии.")
-        lines.append("Загрузи кадр, чтобы получать оценки и комментарии.")
-    else:
+    lines: list[str] = []
+
+    # Сценарий 1: нет фото
+    if not photos:
+        lines.append("У тебя нет активной фотографии.")
+        lines.append("Загрузи её по кнопке «Загрузить».")
+        lines.append("")
+        lines.append("🌱 Вы можете отключить возможность оценивать Вашу фотографию, если хотите.")
+        lines.append("")
+        lines.append(_pick_advice(photos, user, is_premium))
+        return "\n".join(lines)
+
+    # Сценарий 2: одна фото
+    if len(photos) == 1:
+        ph = photos[0]
+        title = html.escape((ph.get("title") or "Без названия").strip(), quote=False)
+        bayes = None
         try:
-            stats = await db.get_photo_stats(int(active_photo["id"]))
-            ratings_count = int(stats.get("ratings_count") or 0)
-            avg_rating = stats.get("avg_rating")
-            comments_count = int(stats.get("comments_count") or 0)
+            st = await db.get_photo_stats(int(ph["id"]))
+            bayes = st.get("bayes_score")
         except Exception:
-            stats = None
+            bayes = None
+        lines.append(f"🎞️ Текущая работа: <code>\"{title}\"</code>")
+        lines.append(f"Рейтинг: { _fmt_rating(bayes) }")
+        lines.append("")
+        lines.append(_pick_advice(photos, user, is_premium))
+        return "\n".join(lines)
 
-        title = (active_photo.get("title") or "Без названия").strip()
-        suffix = ""
-        try:
-            if other_count > 0:
-                suffix = f"  •  ещё {other_count} активн." if other_count == 1 else f"  •  ещё {other_count} активных"
-        except Exception:
-            suffix = ""
-        lines.append(f"🎞 Текущая работа: «{html.escape(title, quote=False)}»{suffix}")
-        if ratings_count == 0:
-            lines.append("Оценок пока нет — это нормально, подбор аудитории займёт немного времени.")
-        else:
-            lines.append(f"Рейтинг: { _fmt_rating(avg_rating) }   ·   Оценок: {ratings_count}")
-        if comments_count > 0:
-            lines.append(f"Комментариев: {comments_count}")
+    # Сценарий 3: две фото
+    best_title = "—"
+    best_score = None
+    try:
+        stats_list = []
+        for ph in photos:
+            st = await db.get_photo_stats(int(ph["id"]))
+            stats_list.append((ph, st.get("bayes_score")))
+        best_ph, best_score = max(stats_list, key=lambda x: (x[1] if x[1] is not None else -1))
+        best_title = html.escape((best_ph.get("title") or "Без названия").strip(), quote=False)
+    except Exception:
+        pass
 
-    # --- Блок активности / обратной связи ---
+    lines.append("🎞️ Две активные фотографии!")
+    lines.append(f"Лучшая: <code>\"{best_title}\"</code> — { _fmt_rating(best_score) }")
     lines.append("")
+    lines.append(_pick_advice(photos, user, is_premium))
+    return "\n".join(lines)
     if ratings_count > 0 or comments_count > 0:
         lines.append("🔔 На твою фотографию уже приходили оценки/комментарии.")
     else:

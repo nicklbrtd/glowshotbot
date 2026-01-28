@@ -277,4 +277,29 @@ RU = {
     "kb.admin.logs": "🧾 Логи",
     "kb.admin.premium": "💎 Премиум",
     "kb.admin.settings": "⚙️ Настройки",
+
+    # Rate section buttons
+    "rate.btn.comment": "💬 Написать",
+    "rate.btn.report": "🚫 Жалоба",
+    "rate.btn.award": "🏆 Ачивка",
+    "rate.btn.more": "🕵️ Еще",
+    "rate.btn.hide": "🕵️ Скрыть",
+    "rate.btn.next": "➡️ Дальше",
+    "rate.btn.invite": "📤 Отправить ссылку",
+
+    # My photo buttons
+    "myphoto.btn.share": "🔗 Поделиться фотографией",
+    "myphoto.btn.comments": "💬 Комментарии",
+    "myphoto.btn.stats": "📊 Статистика",
+    "myphoto.btn.edit": "✏️ Редактировать",
+    "myphoto.btn.delete": "🗑 Удалить",
+    "myphoto.btn.add": "➕ Добавить",
+    "myphoto.btn.premium": "💎 Оформить",
+
+    # Results buttons
+    "results.btn.day": "📅 Итоги дня",
+    "results.btn.me": "👤 Мои итоги",
+    "results.btn.back_results": "⬅️ Назад к итогам",
+    "results.btn.forward": "➡️ Вперёд",
+    "results.btn.back": "⬅️ Назад",
 }

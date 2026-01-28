@@ -6,6 +6,7 @@ from utils.time import get_moscow_today, get_moscow_now
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from utils.i18n import t
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -55,6 +56,15 @@ from html import escape
 from config import MODERATION_CHAT_ID
 
 router = Router()
+
+def _lang(user: dict | None) -> str:
+    try:
+        raw = (user or {}).get("lang") or (user or {}).get("language") or (user or {}).get("language_code")
+        if raw:
+            return str(raw).split("-")[0].lower()
+    except Exception:
+        pass
+    return "ru"
 
 
 def _fmt_pub_date(day_key: str | None) -> str:
@@ -306,19 +316,26 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
     caption = await build_rate_caption(photo, viewer_tg_id=int(viewer_tg_id), show_details=False)
 
     is_premium_rater = False
+    rater_lang = "ru"
     try:
         rater_user = await get_user_by_id(int(rater_user_id))
         if rater_user and rater_user.get("tg_id"):
             is_premium_rater = await is_user_premium_active(rater_user["tg_id"])
+        rater_lang = _lang(rater_user)
     except Exception:
         is_premium_rater = False
 
     is_rateable = bool(photo.get("ratings_enabled", True))
     if not is_rateable:
         caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
-        kb = build_view_only_keyboard(int(photo["id"]))
+        kb = build_view_only_keyboard(int(photo["id"]), lang=rater_lang)
     else:
-        kb = build_rate_keyboard(int(photo["id"]), is_premium=is_premium_rater, show_details=False)
+        kb = build_rate_keyboard(
+            int(photo["id"]),
+            is_premium=is_premium_rater,
+            show_details=False,
+            lang=rater_lang,
+        )
     file_id_str = _photo_public_id(photo)
 
     return RatingCard(
@@ -352,10 +369,12 @@ async def _build_rating_card_for_photo(
 async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> RatingCard:
     photo = await get_random_photo_for_rating(rater_user_id)
     if photo is None:
+        viewer_user = await get_user_by_id(int(rater_user_id))
+        lang = _lang(viewer_user)
         return RatingCard(
             photo=None,
             caption=build_no_photos_text(),
-            keyboard=build_no_photos_keyboard(),
+            keyboard=build_no_photos_keyboard(lang=lang),
             photo_file_id=None,
         )
 
@@ -472,7 +491,7 @@ async def _apply_rating_card(
         except Exception:
             pass
 
-def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: bool = False) -> InlineKeyboardMarkup:
+def build_rate_keyboard(photo_id: int, *, is_premium: bool = False, show_details: bool = False, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
     # 1..10 (две строки по 5)
@@ -482,35 +501,38 @@ def build_rate_keyboard(photo_id: int, is_premium: bool = False, show_details: b
 
     # 💬 + 🚫
     kb.row(
-        InlineKeyboardButton(text="💬 Написать", callback_data=f"rate:comment:{photo_id}"),
-        InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"),
+        InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
+        InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
     )
 
     # Супер/ачивка — только при раскрытии и для премиум, отдельной строкой
     if show_details and is_premium:
         kb.row(
             InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
-            InlineKeyboardButton(text="🏆 Ачивка", callback_data=f"rate:award:{photo_id}"),
+            InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}"),
         )
 
     # «В меню» слева, «Еще/Скрыть» справа
     kb.row(
-        InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"),
+        InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
         InlineKeyboardButton(
-            text=("🕵️ Скрыть" if show_details else "🕵️ Еще"),
+            text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
             callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
         ),
     )
     return kb.as_markup()
 
 
-def build_view_only_keyboard(photo_id: int) -> InlineKeyboardMarkup:
+def build_view_only_keyboard(photo_id: int, *, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="🚫 Жалоба", callback_data=f"rate:report:{photo_id}"),
-        InlineKeyboardButton(text="➡️ Дальше", callback_data=f"rate:skip:{photo_id}"),
+        InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
+        InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}"),
     )
-    kb.row(InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back"))
+    kb.row(
+        InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+        InlineKeyboardButton(text=t("rate.btn.more", lang), callback_data=f"rate:more:{photo_id}:1"),
+    )
     return kb.as_markup()
 
 
@@ -537,13 +559,13 @@ def build_referral_thanks_keyboard() -> InlineKeyboardMarkup:
 BOT_INVITE_LINK = "https://t.me/glowshotbot"
 
 
-def build_no_photos_keyboard() -> InlineKeyboardMarkup:
+def build_no_photos_keyboard(*, lang: str = "ru") -> InlineKeyboardMarkup:
     """Клавиатура, когда фотографии для оценивания закончились."""
     share_url = f"https://t.me/share/url?url={BOT_INVITE_LINK}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Отправить ссылку", url=share_url)],
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:back")],
+            [InlineKeyboardButton(text=t("rate.btn.invite", lang), url=share_url)],
+            [InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")],
         ]
     )
 
@@ -1182,6 +1204,8 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
         is_premium_rater = await is_user_premium_active(int(message.from_user.id))
     except Exception:
         is_premium_rater = False
+    rater_user = await get_user_by_tg_id(int(message.from_user.id))
+    rater_lang = _lang(rater_user)
 
     try:
         photo_for_caption = photo
@@ -1198,7 +1222,12 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
             chat_id=rate_chat_id,
             message_id=rate_msg_id,
             caption=success_caption,
-            reply_markup=build_rate_keyboard(int(photo_id), is_premium=is_premium_rater, show_details=False),
+            reply_markup=build_rate_keyboard(
+                int(photo_id),
+                is_premium=is_premium_rater,
+                show_details=False,
+                lang=rater_lang,
+            ),
             parse_mode="HTML",
         )
     except TelegramBadRequest:
@@ -1852,6 +1881,8 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         viewer_is_premium = await is_user_premium_active(int(callback.from_user.id))
     except Exception:
         viewer_is_premium = False
+    viewer_user = await get_user_by_tg_id(callback.from_user.id)
+    viewer_lang = _lang(viewer_user)
 
     try:
         photo = await get_photo_by_id(photo_id)
@@ -1890,7 +1921,7 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
             photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
     caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=to_show)
-    kb = build_rate_keyboard(photo_id, is_premium=viewer_is_premium, show_details=to_show)
+    kb = build_rate_keyboard(photo_id, is_premium=viewer_is_premium, show_details=to_show, lang=viewer_lang)
 
     try:
         await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")

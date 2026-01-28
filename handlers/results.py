@@ -8,6 +8,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
 
 from keyboards.common import build_back_to_menu_kb
+from utils.i18n import t
 from utils.time import get_moscow_now, get_moscow_today
 
 from database_results import (
@@ -20,6 +21,7 @@ from database_results import (
 )
 
 from services.results_engine import recalc_day_global, get_day_eligibility
+from database import get_user_by_tg_id
 
 
 try:
@@ -31,6 +33,15 @@ except Exception:  # pragma: no cover
 
 
 router = Router()
+
+def _lang(user: dict | None) -> str:
+    try:
+        raw = (user or {}).get("lang") or (user or {}).get("language") or (user or {}).get("language_code")
+        if raw:
+            return str(raw).split("-")[0].lower()
+    except Exception:
+        pass
+    return "ru"
 
 # =========================
 # DB helpers (users.city/users.country)
@@ -63,29 +74,29 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 # UI helpers
 # =========================
 
-def build_results_menu_kb() -> InlineKeyboardMarkup:
+def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📅 Итоги дня", callback_data="results:day"),
-                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+                InlineKeyboardButton(text=t("results.btn.day", lang), callback_data="results:day"),
+                InlineKeyboardButton(text=t("results.btn.me", lang), callback_data="results:me"),
             ],
             [
-                InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+                InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
             ],
         ]
     )
 
 
-def build_back_to_results_kb() -> InlineKeyboardMarkup:
+def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад к итогам", callback_data="results:menu")],
+            [InlineKeyboardButton(text=t("results.btn.back_results", lang), callback_data="results:menu")],
         ]
     )
 
 
-def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
+def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboardMarkup:
     """
     step 0: заставка — «Вперёд», «В меню»
     step 1–3: 3/2/1 места — «Назад», «Вперёд»
@@ -95,8 +106,8 @@ def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
-                    InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"results:day:{day_key}:1"),
+                    InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+                    InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:1"),
                 ]
             ]
         )
@@ -107,8 +118,8 @@ def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="⬅️ Назад", callback_data=f"results:day:{day_key}:{prev_step}"),
-                    InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"results:day:{day_key}:{next_step}"),
+                    InlineKeyboardButton(text=t("results.btn.back", lang), callback_data=f"results:day:{day_key}:{prev_step}"),
+                    InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:{next_step}"),
                 ]
             ]
         )
@@ -116,8 +127,8 @@ def build_day_nav_kb(day_key: str, step: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⬅️ Назад", callback_data=f"results:day:{day_key}:3"),
-                InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+                InlineKeyboardButton(text=t("results.btn.back", lang), callback_data=f"results:day:{day_key}:3"),
+                InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
             ]
         ]
     )
@@ -240,7 +251,9 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
 
 @router.callback_query(F.data == "results:menu")
 async def results_menu(callback: CallbackQuery):
-    kb = build_results_menu_kb()
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(user)
+    kb = build_results_menu_kb(lang)
     text = (
         "🏁 <b>Итоги</b>\n\n"
         "Доступны:\n"
@@ -301,7 +314,9 @@ async def _ensure_day_country_cached(day_key: str, country: str) -> None:
 
 async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) -> None:
     label = _label_for_day(day_key)
-    kb_back_menu = build_back_to_results_kb()
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(user)
+    kb_back_menu = build_back_to_results_kb(lang)
 
     # Ensure cache exists (global)
     try:
@@ -326,7 +341,7 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
         await callback.answer()
         return
 
-    nav_kb = build_day_nav_kb(day_key, step)
+    nav_kb = build_day_nav_kb(day_key, step, lang)
 
     # step 0: intro screen
     if step <= 0:
@@ -435,7 +450,7 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
         if i == 3 and len(top) > 3:
             lines.append("")
 
-    nav = build_day_nav_kb(day_key, step=4)
+    nav = build_day_nav_kb(day_key, step=4, lang=lang)
     await _show_text(callback, "\n".join(lines), nav)
     await callback.answer()
 
@@ -447,9 +462,11 @@ async def results_day(callback: CallbackQuery):
     и показываем только после 07:00 МСК (как у тебя было).
     """
     # Если пользователь ещё не допущен — показываем чеклист.
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(user)
     elig = await get_day_eligibility(int(callback.from_user.id))
     if not elig.get("eligible"):
-        kb = build_back_to_results_kb()
+        kb = build_back_to_results_kb(lang)
         lines = ["🔥 <b>Итоги дня</b>", "", "Чтобы участвовать, выполни условия:"]
         for c in elig.get("checks", []):
             mark = "✅" if c.get("ok") else "❌"
@@ -472,7 +489,7 @@ async def results_day(callback: CallbackQuery):
             f"Сейчас: <b>{now.strftime('%H:%M')}</b>.\n"
             "Загляни чуть позже — мы подсчитаем все оценки за вчера."
         )
-        await _show_text(callback, text, build_back_to_results_kb())
+        await _show_text(callback, text, build_back_to_results_kb(lang))
         await callback.answer()
         return
 

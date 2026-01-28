@@ -277,4 +277,29 @@ EN = {
     "kb.admin.logs": "🧾 Logs",
     "kb.admin.premium": "💎 Premium",
     "kb.admin.settings": "⚙️ Settings",
+
+    # Rate section buttons
+    "rate.btn.comment": "💬 Comment",
+    "rate.btn.report": "🚫 Report",
+    "rate.btn.award": "🏆 Award",
+    "rate.btn.more": "🕵️ More",
+    "rate.btn.hide": "🕵️ Hide",
+    "rate.btn.next": "➡️ Next",
+    "rate.btn.invite": "📤 Share link",
+
+    # My photo buttons
+    "myphoto.btn.share": "🔗 Share photo",
+    "myphoto.btn.comments": "💬 Comments",
+    "myphoto.btn.stats": "📊 Stats",
+    "myphoto.btn.edit": "✏️ Edit",
+    "myphoto.btn.delete": "🗑 Delete",
+    "myphoto.btn.add": "➕ Add",
+    "myphoto.btn.premium": "💎 Get Premium",
+
+    # Results buttons
+    "results.btn.day": "📅 Day results",
+    "results.btn.me": "👤 My results",
+    "results.btn.back_results": "⬅️ Back to results",
+    "results.btn.forward": "➡️ Forward",
+    "results.btn.back": "⬅️ Back",
 }

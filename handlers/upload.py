@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message, InputMediaPhoto, InlineKeyboar
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from utils.i18n import t
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -447,39 +448,42 @@ def build_my_photo_keyboard(
     nav_next: bool = False,
     locked: bool = False,
     show_premium_cta: bool = False,
+    premium_back_cb: str | None = None,
+    lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     # Верхний ряд — «Поделиться» (только если не залочено или есть премиум)
     if not locked or is_premium_user:
         rows.append([
-            InlineKeyboardButton(text="🔗 Поделиться фотографией", callback_data=f"myphoto:share:{photo_id}")
+            InlineKeyboardButton(text=t("myphoto.btn.share", lang), callback_data=f"myphoto:share:{photo_id}")
         ])
 
     if not locked:
         rows.append([
-            InlineKeyboardButton(text="💬 Комментарии", callback_data=f"myphoto:comments:{photo_id}:0"),
-            InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
+            InlineKeyboardButton(text=t("myphoto.btn.comments", lang), callback_data=f"myphoto:comments:{photo_id}:0"),
+            InlineKeyboardButton(text=t("myphoto.btn.stats", lang), callback_data=f"myphoto:stats:{photo_id}"),
         ])
 
     # Блок редактирования и удаления (оценки перенесены внутрь редактирования)
     if locked:
         row = []
         if show_premium_cta:
-            row.append(InlineKeyboardButton(text="💎 Премиум", callback_data="profile:premium"))
-        row.append(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"))
+            back_cb = premium_back_cb or "menu:back"
+            row.append(InlineKeyboardButton(text=t("myphoto.btn.premium", lang), callback_data=f"premium:open:{back_cb}"))
+        row.append(InlineKeyboardButton(text=t("myphoto.btn.delete", lang), callback_data=f"myphoto:delete:{photo_id}"))
         rows.append(row)
     else:
         rows.append([
-            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
+            InlineKeyboardButton(text=t("myphoto.btn.edit", lang), callback_data=f"myphoto:edit:{photo_id}"),
+            InlineKeyboardButton(text=t("myphoto.btn.delete", lang), callback_data=f"myphoto:delete:{photo_id}"),
         ])
 
     # Добавить / навигация
     nav_row: list[InlineKeyboardButton] = []
-    nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    nav_row.append(InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"))
     if can_add_more:
-        nav_row.append(InlineKeyboardButton(text="➕ Добавить", callback_data="myphoto:add_intro:extra"))
+        nav_row.append(InlineKeyboardButton(text=t("myphoto.btn.add", lang), callback_data="myphoto:add_intro:extra"))
     elif nav_prev or nav_next:
         if nav_prev:
             nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
@@ -901,6 +905,7 @@ async def _show_my_photo_section(
     can_add_more: bool = False,
     is_premium_user: bool = False,
     locked: bool = False,
+    user: dict | None = None,
 ) -> None:
     """Показ раздела «Моя фотография» одним сообщением с фото, подписью и кнопками.
 
@@ -911,6 +916,7 @@ async def _show_my_photo_section(
     """
 
     caption = await build_my_photo_main_text(photo, locked=locked)
+    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
@@ -919,6 +925,7 @@ async def _show_my_photo_section(
         nav_prev=nav_prev,
         nav_next=nav_next,
         locked=locked,
+        lang=lang,
     )
 
     # 1. Удаляем старое служебное сообщение, если оно ещё существует
@@ -998,6 +1005,7 @@ async def _edit_or_replace_my_photo_message(
         locked = photo.get("id") in locked_ids
 
     caption = await build_my_photo_main_text(photo, locked=bool(locked))
+    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
@@ -1007,6 +1015,8 @@ async def _edit_or_replace_my_photo_message(
         nav_next=bool(nav_next),
         locked=bool(locked),
         show_premium_cta=bool(locked and not is_premium_user and len(ids) > 1),
+        premium_back_cb=f"myphoto:open",
+        lang=lang,
     )
 
     # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
@@ -1263,6 +1273,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         can_add_more=can_add_more,
         is_premium_user=is_premium_user,
         locked=locked,
+        user=user,
     )
 
     await callback.answer()
@@ -2233,10 +2244,12 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     ids = data.get("myphoto_ids") or []
     is_premium_user = await is_user_premium_active(user["tg_id"])
+    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
         show_premium_cta=bool(photo.get("locked") or (len(ids) > 1 and not is_premium_user)),
+        lang=lang,
     )
     try:
         if callback.message.photo:
@@ -2323,6 +2336,7 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
     locked_ids = set(data.get("myphoto_locked_ids") or [])
 
     caption = await build_my_photo_main_text(photo, locked=photo_id in locked_ids)
+    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
     kb = build_my_photo_keyboard(
         photo_id,
         ratings_enabled=_photo_ratings_enabled(photo),
@@ -2331,6 +2345,7 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
         nav_prev=nav_prev,
         nav_next=nav_next,
         locked=photo_id in locked_ids,
+        lang=lang,
     )
 
     try:
@@ -2925,6 +2940,14 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             is_premium_user = await is_user_premium_active(int(event.from_user.id))
     except Exception:
         is_premium_user = False
+    lang = "ru"
+    try:
+        if hasattr(event, "from_user") and getattr(event.from_user, "id", None):
+            u = await get_user_by_tg_id(int(event.from_user.id))
+            if u:
+                lang = (u.get("lang") or "ru").split("-")[0]
+    except Exception:
+        lang = "ru"
 
     kb = build_my_photo_keyboard(
         photo["id"],
@@ -2933,6 +2956,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         is_premium_user=is_premium_user,
         nav_prev=nav_prev,
         nav_next=nav_next,
+        lang=lang,
     )
 
     # Обновляем отправленную ватермаркнутую карточку
