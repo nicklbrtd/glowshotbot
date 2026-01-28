@@ -384,11 +384,19 @@ async def cmd_start(message: Message, state: FSMContext):
     # Проверяем наличие пользователя даже если он помечен удалённым, чтобы учесть блокировки
     user_any = await db.get_user_by_tg_id_any(message.from_user.id)
     if user_any and bool(user_any.get("is_blocked")):
-        await message.answer(
-            "Твой аккаунт заблокирован администратором. Восстановление недоступно.",
-            disable_notification=True,
-        )
-        return
+        reason = (user_any.get("block_reason") or "").strip()
+        # Админский бан: блокируем вход.
+        if reason.startswith("FULL_BAN:"):
+            await message.answer(
+                "Твой аккаунт заблокирован модератором. Восстановление недоступно.",
+                disable_notification=True,
+            )
+            return
+        # Неадминский блок (например, юзер блокировал бота) — снимаем.
+        try:
+            await db.set_user_block_status_by_tg_id(int(message.from_user.id), is_blocked=False, reason=None, until_iso=None)
+        except Exception:
+            pass
 
     user = await db.get_user_by_tg_id(message.from_user.id)
     lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
@@ -397,7 +405,8 @@ async def cmd_start(message: Message, state: FSMContext):
         # Если был soft-delete, сбрасываем состояние на всякий случай
         await state.clear()
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
-        if payload and payload.startswith("ref_"):
+        # Но не даём реферальный бонус, если аккаунт уже существовал и был удалён.
+        if payload and payload.startswith("ref_") and not (user_any and user_any.get("is_deleted")):
             ref_code = payload[4:].strip()
             if ref_code:
                 try:
