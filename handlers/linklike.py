@@ -26,6 +26,7 @@ from database import (
     get_ratings_count_for_photo,
     is_user_premium_active,
 )
+from handlers.upload import _tag_label, _device_emoji
 
 router = Router()
 
@@ -322,7 +323,9 @@ async def _load_photo_with_access(callback: CallbackQuery, photo_id: int) -> tup
 
     return photo, owner_user
 
-async def _build_share_links(bot_username: str, code: str, owner_tg_id: int, photo_id: int) -> tuple[str, str, int]:
+async def _build_share_links(
+    bot_username: str, code: str, owner_tg_id: int, photo_id: int
+) -> tuple[str, str, int, int]:
     photos = await _get_active_photos_for_share(owner_tg_id)
     link_pack = f"https://t.me/{bot_username}?start=rate_{code}"
 
@@ -333,12 +336,16 @@ async def _build_share_links(bot_username: str, code: str, owner_tg_id: int, pho
             break
 
     link_one = f"{link_pack}_p{idx + 1}"
-    return link_pack, link_one, idx
+    return link_pack, link_one, idx, len(photos)
 
-def _build_share_text_links(photo: dict, link_one: str, link_pack: str, link_cnt: int | None, total_cnt: int | None) -> str:
+def _build_share_text_links(photo: dict, link_one: str, link_cnt: int | None, total_cnt: int | None) -> str:
     title = escape((photo.get("title") or "Фотография").strip())
-    device = escape((photo.get("device") or "").strip())
-    tag = escape((photo.get("tag") or "").strip())
+    device_raw = (photo.get("device") or "").strip()
+    device_emoji = _device_emoji(device_raw) or ""
+    device = escape(device_raw + (f" {device_emoji}" if device_emoji and device_raw else device_emoji))
+    raw_tag = (photo.get("tag") or "").strip()
+    tag_label = _tag_label(raw_tag)
+    tag = escape(tag_label)
 
     lines = [
         "🔗✨ Поделиться фотографией",
@@ -347,16 +354,13 @@ def _build_share_text_links(photo: dict, link_one: str, link_pack: str, link_cnt
         f"<i>\"{title}\"</i>" + (f" ({device})" if device else ""),
     ]
     if tag:
-        lines.append(f"🏷 Тег: {tag}")
+        lines.append(f"Тег: {tag}")
 
     lines.extend(
         [
             "",
             "🧭 Ссылка на эту фотографию:",
             f"<code>{link_one}</code>",
-            "",
-            "🗂 Общая ссылка (подборка):",
-            f"<code>{link_pack}</code>",
             "",
             f"📊 Оценки по ссылке: <b>{link_cnt}</b>" if link_cnt is not None else "📊 Оценки по ссылке: —",
             f"✨ Всего оценок: <b>{total_cnt}</b>" if total_cnt is not None else "✨ Всего оценок: —",
@@ -366,43 +370,72 @@ def _build_share_text_links(photo: dict, link_one: str, link_pack: str, link_cnt
 
 def _build_share_text_tgk(photo: dict, link_one: str) -> str:
     title = escape((photo.get("title") or "Фотография").strip())
-    device = escape((photo.get("device") or "").strip())
-    tag = escape((photo.get("tag") or "").strip())
+    device_raw = (photo.get("device") or "").strip()
+    device_emoji = _device_emoji(device_raw) or ""
+    device = escape(device_raw + (f" {device_emoji}" if device_emoji and device_raw else device_emoji))
+    raw_tag = (photo.get("tag") or "").strip()
+    tag_label = _tag_label(raw_tag)
+    tag = escape(tag_label)
 
     lines = [
-        "📣 Текст для тгк",
-        "",
-        "Вы можете оценить мою фотографию!",
+        "Моя фотография есть в GlowShot!",
     ]
-    if device:
-        lines.append(f"\"{title}\" — {device}")
-    else:
-        lines.append(f"\"{title}\"")
+    lines.append(f"<i>\"{title}\"</i>" + (f" ({device} 📷)" if device else ""))
     if tag:
-        lines.append(f"тег: {tag}")
+        lines.append(f"Тег: {tag}")
 
-    lines.extend(["", "🔗 Ссылка:", f"<code>{link_one}</code>"])
+    lines.extend(
+        [
+            "",
+            "Вы можете анонимно оценить эту фотографию по ссылке:",
+            link_one,
+        ]
+    )
     return "\n".join(lines)
 
-def _share_links_kb(photo_id: int, link_one: str, link_pack: str) -> InlineKeyboardMarkup:
+def _share_links_kb(photo_id: int, link_one: str, link_pack: str, has_pack: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📣 Поделиться постом", callback_data=f"myphoto:share_tgk:{photo_id}"))
-    kb.row(
-        InlineKeyboardButton(text="📤 Поделиться этим фото 📸", url=f"https://t.me/share/url?url={quote(link_one)}"),
-        InlineKeyboardButton(text="📤 Поделиться всеми фото 🗂", url=f"https://t.me/share/url?url={quote(link_pack)}"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="👀 Предпросмотр", url=link_one),
-        InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:a:{photo_id}"),
-    )
+    kb.row(InlineKeyboardButton(text="📤 Поделиться этим фото 📸", url=f"https://t.me/share/url?url={quote(link_one)}"))
+    if has_pack:
+        kb.row(InlineKeyboardButton(text="📤 Поделиться всеми фото 🗂", url=f"https://t.me/share/url?url={quote(link_pack)}"))
+    kb.row(InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:a:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
     return kb.as_markup()
 
 def _share_tgk_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="🔙 Назад к ссылкам", callback_data=f"myphoto:share_backlinks:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:b:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="👀 Предпросмотр", callback_data=f"myphoto:share_preview:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:share_backlinks:{photo_id}"))
+    return kb.as_markup()
+
+def _preview_rate_kb(
+    *,
+    owner_tg_id: int,
+    photo_id: int,
+    idx: int,
+    code: str,
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        *[
+            InlineKeyboardButton(
+                text=str(i),
+                callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:1",
+            )
+            for i in range(1, 6)
+        ]
+    )
+    kb.row(
+        *[
+            InlineKeyboardButton(
+                text=str(i),
+                callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:1",
+            )
+            for i in range(6, 11)
+        ]
+    )
+    kb.row(InlineKeyboardButton(text="⬅️ Назад (видно только вам)", callback_data=f"myphoto:share_preview_back:{photo_id}"))
     return kb.as_markup()
 
 async def _edit_share_message(callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup):
@@ -422,15 +455,59 @@ async def _render_share_screen(
     mode: str = "a",
 ):
     bot_username = await _get_bot_username(callback)
-    link_pack, link_one, _ = await _build_share_links(bot_username, code, int(callback.from_user.id), int(photo["id"]))
+    link_pack, link_one, _, photos_count = await _build_share_links(
+        bot_username, code, int(callback.from_user.id), int(photo["id"])
+    )
     link_cnt, total_cnt = await _get_share_counts(int(photo["id"]))
+    has_pack = photos_count >= 2
 
     if mode == "b":
         text = _build_share_text_tgk(photo, link_one)
         kb = _share_tgk_kb(int(photo["id"]))
     else:
-        text = _build_share_text_links(photo, link_one, link_pack, link_cnt, total_cnt)
-        kb = _share_links_kb(int(photo["id"]), link_one, link_pack)
+        text = _build_share_text_links(photo, link_one, link_cnt, total_cnt)
+        kb = _share_links_kb(int(photo["id"]), link_one, link_pack, has_pack)
+
+    await _edit_share_message(callback, text, kb)
+
+async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str):
+    bot_username = await _get_bot_username(callback)
+    _, link_one, idx, _ = await _build_share_links(
+        bot_username, code, int(callback.from_user.id), int(photo["id"])
+    )
+    _ = link_pack
+
+    owner_user = await get_user_by_id(int(photo["user_id"]))
+    owner_username = (owner_user or {}).get("username")
+
+    title = (photo.get("title") or "Фотография").strip()
+    pub = _fmt_pub_date(photo)
+    pub_inline = f"  <i>{pub}</i>" if pub else ""
+
+    is_rateable = bool(photo.get("ratings_enabled", True))
+    if not is_rateable:
+        title_line = f"<b>\"{title}\"</b>{pub_inline}"
+        author_line = (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+        text = (
+            "🔗⭐️ <b>Оценка по ссылке (предпросмотр)</b>\n\n"
+            f"{title_line}\n"
+            f"{author_line}"
+            "\n🚫 Эта фотография недоступна для оценок.\n"
+        )
+    else:
+        text = (
+            "🔗⭐️ <b>Оценка по ссылке (предпросмотр)</b>\n\n"
+            f"<b>\"{title}\"</b>{pub_inline}\n"
+            + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+            + "\nПоставь оценку от 1 до 10 👇"
+        )
+
+    kb = _preview_rate_kb(
+        owner_tg_id=int(callback.from_user.id),
+        photo_id=int(photo["id"]),
+        idx=idx,
+        code=code,
+    )
 
     await _edit_share_message(callback, text, kb)
 
@@ -448,6 +525,30 @@ async def myphoto_share(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("myphoto:share_tgk:"))
 async def myphoto_share_tgk(callback: CallbackQuery):
+    photo_id = int(callback.data.split(":")[2])
+    photo, _ = await _load_photo_with_access(callback, photo_id)
+    if not photo:
+        return
+
+    code = await get_or_create_share_link_code(int(callback.from_user.id))
+    await _render_share_screen(callback, photo, code, mode="b")
+
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("myphoto:share_preview:"))
+async def myphoto_share_preview(callback: CallbackQuery):
+    photo_id = int(callback.data.split(":")[2])
+    photo, _ = await _load_photo_with_access(callback, photo_id)
+    if not photo:
+        return
+
+    code = await get_or_create_share_link_code(int(callback.from_user.id))
+    await _render_share_preview(callback, photo, code)
+
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("myphoto:share_preview_back:"))
+async def myphoto_share_preview_back(callback: CallbackQuery):
     photo_id = int(callback.data.split(":")[2])
     photo, _ = await _load_photo_with_access(callback, photo_id)
     if not photo:
