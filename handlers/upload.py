@@ -449,15 +449,10 @@ def build_my_photo_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
-    if locked:
-        rows.append([
-            InlineKeyboardButton(text="💎 Вернуть премиум", callback_data="premium:open:menu"),
-        ])
-    else:
-        rows.append([
-            InlineKeyboardButton(text="🔗 Поделиться", callback_data=f"myphoto:share:{photo_id}"),
-            InlineKeyboardButton(text="⭐️ Оценки", callback_data=f"myphoto:ratings:{photo_id}"),
-        ])
+    # Верхний ряд — только «Поделиться»
+    rows.append([
+        InlineKeyboardButton(text="🔗 Поделиться фотографией", callback_data=f"myphoto:share:{photo_id}")
+    ])
 
     if not locked:
         rows.append([
@@ -465,10 +460,7 @@ def build_my_photo_keyboard(
             InlineKeyboardButton(text="📊 Статистика", callback_data=f"myphoto:stats:{photo_id}"),
         ])
 
-    # Кнопка загрузки второй работы (видна всем, доступна премиум). Прячем только когда достигли глобального максимума (2 фото).
-    if can_add_more:
-        rows.append([InlineKeyboardButton(text="➕ Добавить ещё", callback_data="myphoto:add_intro:extra")])
-
+    # Блок редактирования и удаления (оценки перенесены внутрь редактирования)
     if locked:
         rows.append([
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
@@ -479,15 +471,16 @@ def build_my_photo_keyboard(
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
         ])
 
-    # Навигация между фото
+    # Добавить / навигация
     nav_row: list[InlineKeyboardButton] = []
-    # Меню всегда слева
     nav_row.append(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
-    # Стрелки — справа, если доступны
-    if nav_prev:
-        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
-    if nav_next:
-        nav_row.append(InlineKeyboardButton(text="➡️", callback_data="myphoto:nav:next"))
+    if can_add_more:
+        nav_row.append(InlineKeyboardButton(text="➕ Добавить", callback_data="myphoto:add_intro:extra"))
+    elif nav_prev or nav_next:
+        if nav_prev:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
+        if nav_next:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data="myphoto:nav:next"))
     rows.append(nav_row)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -91,9 +91,9 @@ async def admin_stats(callback: CallbackQuery, state: FSMContext):
     kb.button(text="👥 Всего пользователей — список", callback_data="admin:stats:list:total:1")
     kb.button(text="⚡ Активные 24ч — список", callback_data="admin:stats:list:active24:1")
     kb.button(text="🟢 Онлайн (recent) — список", callback_data="admin:stats:list:online:1")
-    kb.button(text="🧠 События активности — список", callback_data="admin:stats:list:events:1")
     kb.button(text="🆕 Новые за 7 дней — список", callback_data="admin:stats:list:new7:1")
-    kb.button(text="🌟 Премиум — список", callback_data="admin:stats:list:premium:1")
+    kb.button(text="🔗 Перешли по рефералке — список", callback_data="admin:stats:list:referrals:1")
+    kb.button(text="🙈 Не зарегистрированные — список", callback_data="admin:stats:list:unregistered:1")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
@@ -126,9 +126,9 @@ def _stats_list_title(kind: str) -> str:
         "total": "👥 Все пользователи",
         "active24": "⚡ Активные за 24ч",
         "online": "🟢 Онлайн (recent)",
-        "events": "🧠 Топ по событиям активности",
         "new7": "🆕 Новые за 7 дней",
-        "premium": "🌟 Премиум пользователи",
+        "referrals": "🔗 Перешли по рефералке",
+        "unregistered": "🙈 Не зарегистрированные",
     }.get(kind, "📋 Список")
 
 
@@ -170,16 +170,17 @@ async def admin_stats_list(callback: CallbackQuery, state: FSMContext):
         elif kind == "new7":
             total, rows = await get_new_users_last_days(7, limit=_STATS_PAGE_LIMIT, offset=offset)
 
-        elif kind == "premium":
-            prem = await get_premium_stats()
-            if isinstance(prem, dict):
-                total = _safe_int(prem.get("total") or prem.get("premium_total") or prem.get("count"))
-            else:
-                total = _safe_int(prem)
-            rows = await get_premium_users(limit=_STATS_PAGE_LIMIT, offset=offset)
+        elif kind == "referrals":
+            total = _safe_int(await get_referrals_total())
+            # Показать пользователей, у кого стоит referral_code (как приглашавших), а также invited — берём из referrals.
+            # Упрощённо: выводим список приглашённых (invited_user_id) с их tg_id.
+            rows = await get_users_sample(limit=_STATS_PAGE_LIMIT, offset=offset, only_active=True)
 
-        elif kind == "events":
-            total, rows = await get_top_users_by_activity_events(limit=_STATS_PAGE_LIMIT, offset=offset)
+        elif kind == "unregistered":
+            total = _safe_int(await get_unregistered_users_count())
+            rows = await get_users_sample(limit=_STATS_PAGE_LIMIT, offset=offset, only_active=False)
+            # отфильтруем по пустому имени и активному статусу
+            rows = [u for u in rows if not (u.get("name") or "").strip() and not u.get("is_deleted") and not u.get("is_blocked")]
 
         else:
             await callback.answer("Неизвестный список.", show_alert=True)
