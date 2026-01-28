@@ -966,6 +966,11 @@ async def _edit_or_replace_my_photo_message(
     """
     msg = callback.message
     chat_id = msg.chat.id
+    user = None
+    try:
+        user = await get_user_by_tg_id(int(callback.from_user.id))
+    except Exception:
+        user = None
 
     data = await state.get_data()
     ids: list[int] = data.get("myphoto_ids") or []
@@ -973,7 +978,6 @@ async def _edit_or_replace_my_photo_message(
     # Если state потерял список фото (например, после долгого времени или выхода из FSM),
     # восстанавливаем его из БД, чтобы не терять навигацию и кнопку стрелок.
     if not ids:
-        user = await get_user_by_tg_id(int(callback.from_user.id))
         if user:
             try:
                 fresh_photos = await get_latest_photos_for_user(int(user["id"]), limit=10)
