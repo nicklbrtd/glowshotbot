@@ -609,7 +609,6 @@ async def build_profile_view(user: dict):
 
     kb = InlineKeyboardBuilder()
     kb.button(text=t("profile.btn.awards", lang), callback_data="profile:awards")
-    kb.button(text=t("profile.btn.results", lang), callback_data="myresults:0")
     kb.button(text=t("profile.btn.edit", lang), callback_data="profile:edit")
     kb.button(text=t("profile.btn.settings", lang), callback_data="profile:settings")
     kb.button(text=t("profile.btn.streak", lang), callback_data="profile:streak")
@@ -618,7 +617,7 @@ async def build_profile_view(user: dict):
     kb.button(text=premium_button_text, callback_data="profile:premium")
 
     kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
-    kb.adjust(2, 2, 2, 1, 1)
+    kb.adjust(2, 2, 2)
     return text, kb.as_markup()
 
 

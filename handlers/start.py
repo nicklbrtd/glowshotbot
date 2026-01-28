@@ -15,6 +15,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 import database as db
 from keyboards.common import build_main_menu
+from handlers.premium import maybe_send_premium_expiry_warning
 from utils.time import get_moscow_now, get_moscow_today
 
 router = Router()
@@ -535,6 +536,17 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
         if sent_message is not None:
             data["menu_msg_id"] = sent_message.message_id
             await state.set_data(data)
+
+        # Напоминание о скором окончании премиума (за 2 дня)
+        try:
+            await maybe_send_premium_expiry_warning(
+                message.bot,
+                tg_id=message.from_user.id,
+                chat_id=chat_id,
+                lang=lang,
+            )
+        except Exception:
+            pass
     try:
         await message.delete()
     except Exception:

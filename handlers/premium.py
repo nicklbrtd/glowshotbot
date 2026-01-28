@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import datetime, timedelta
 
 from utils.time import get_moscow_now
@@ -16,6 +16,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import html
 
 router = Router(name="premium")
+
+_PREMIUM_EXPIRY_CACHE: dict[int, str] = {}
 
 
 def _get_lang(user: object | None) -> str:
@@ -110,6 +112,112 @@ def _format_until_and_days_left(until_iso: str | None, lang: str) -> tuple[str, 
         return (human, f"({days_left} дней)")
     except Exception:
         return (str(until_iso), "")
+
+
+def _build_expiry_warning_text(lang: str) -> str:
+    if lang == "en":
+        return (
+            "💎 Your Premium will expire in 2 days.\n"
+            "To keep Premium, tap “Renew subscription”."
+        )
+    return (
+        "💎 Ваша премиум подписка закончится через 2 дня.\n"
+        "Чтобы оставаться с премиум, нажмите «Продлить подписку»."
+    )
+
+
+def _build_expiry_warning_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📋 Преимущества", callback_data="premium:expiry:benefits")
+    kb.button(text="🔁 Продлить подписку", callback_data="premium:plans")
+    kb.button(text="✖️ Понятно", callback_data="premium:expiry:dismiss")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _build_expiry_benefits_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="premium:expiry:back")
+    kb.button(text="🔁 Продлить подписку", callback_data="premium:plans")
+    kb.button(text="✖️ Понятно", callback_data="premium:expiry:dismiss")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def maybe_send_premium_expiry_warning(bot, tg_id: int, chat_id: int, lang: str):
+    """
+    Best-effort напоминание за 2 дня до окончания премиума.
+    Шлёт одно сообщение в сутки (кэш внутри процесса).
+    """
+    status = await get_user_premium_status(tg_id)
+    until_iso = (status or {}).get("premium_until")
+    if not until_iso:
+        return
+    try:
+        until_dt = datetime.fromisoformat(until_iso)
+    except Exception:
+        return
+
+    now = get_moscow_now()
+    delta_days = (until_dt.date() - now.date()).days
+    if delta_days != 2:
+        return
+
+    cache_key = f"{tg_id}:{now.date().isoformat()}"
+    if _PREMIUM_EXPIRY_CACHE.get(tg_id) == cache_key:
+        return
+    _PREMIUM_EXPIRY_CACHE[tg_id] = cache_key
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=_build_expiry_warning_text(lang),
+            reply_markup=_build_expiry_warning_kb(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "premium:expiry:benefits")
+async def premium_expiry_benefits(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    text = await build_premium_benefits_text(lang)
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=_build_expiry_benefits_kb(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "premium:expiry:back")
+async def premium_expiry_back(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    try:
+        await callback.message.edit_text(
+            _build_expiry_warning_text(lang),
+            reply_markup=_build_expiry_warning_kb(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "premium:expiry:dismiss")
+async def premium_expiry_dismiss(callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
 
 
 async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:profile", *, from_menu: bool = False):

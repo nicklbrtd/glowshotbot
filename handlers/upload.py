@@ -446,6 +446,7 @@ def build_my_photo_keyboard(
     nav_prev: bool = False,
     nav_next: bool = False,
     locked: bool = False,
+    show_premium_cta: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -462,9 +463,11 @@ def build_my_photo_keyboard(
 
     # Блок редактирования и удаления (оценки перенесены внутрь редактирования)
     if locked:
-        rows.append([
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"),
-        ])
+        row = []
+        if show_premium_cta:
+            row.append(InlineKeyboardButton(text="💎 Премиум", callback_data="profile:premium"))
+        row.append(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"myphoto:delete:{photo_id}"))
+        rows.append(row)
     else:
         rows.append([
             InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"myphoto:edit:{photo_id}"),
@@ -1002,6 +1005,7 @@ async def _edit_or_replace_my_photo_message(
         nav_prev=bool(nav_prev),
         nav_next=bool(nav_next),
         locked=bool(locked),
+        show_premium_cta=bool(locked and not is_premium_user and len(ids) > 1),
     )
 
     # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
@@ -2224,7 +2228,15 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ок")
         return
     caption = await build_my_photo_main_text(photo)
-    kb = build_my_photo_keyboard(photo["id"], ratings_enabled=_photo_ratings_enabled(photo))
+    # show_premium_cta: если фото залочено и у пользователя нет премиума, но есть 2 фото
+    data = await state.get_data()
+    ids = data.get("myphoto_ids") or []
+    is_premium_user = await is_user_premium_active(user["tg_id"])
+    kb = build_my_photo_keyboard(
+        photo["id"],
+        ratings_enabled=_photo_ratings_enabled(photo),
+        show_premium_cta=bool(photo.get("locked") or (len(ids) > 1 and not is_premium_user)),
+    )
     try:
         if callback.message.photo:
             await callback.message.edit_caption(caption=caption, reply_markup=kb)

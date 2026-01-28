@@ -320,21 +320,6 @@ async def _load_photo_with_access(callback: CallbackQuery, photo_id: int) -> tup
         await callback.answer("Нет доступа", show_alert=True)
         return None, None
 
-    premium_active = False
-    try:
-        premium_active = await is_user_premium_active(int(callback.from_user.id))
-    except Exception:
-        premium_active = False
-    if not premium_active:
-        try:
-            owner_photos = await get_active_photos_for_user(int(owner_user["id"]), limit=2)
-            owner_photos = sorted(owner_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
-            if len(owner_photos) > 1 and int(photo_id) != int(owner_photos[0]["id"]):
-                await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
-                return None, None
-        except Exception:
-            pass
-
     return photo, owner_user
 
 async def _build_share_links(
@@ -398,8 +383,8 @@ def _build_share_text_links(
     lines.extend(
         [
             "",
-            f"📊 Оценки по ссылке: <b>{link_cnt}</b>" if link_cnt is not None else "📊 Оценки по ссылке: —",
-            f"✨ Всего оценок: <b>{total_cnt}</b>" if total_cnt is not None else "✨ Всего оценок: —",
+            f"🔗⭐️ Оценки по ссылке: <b>{link_cnt}</b>" if link_cnt is not None else "⛓️‍💥⭐️ Оценки по ссылке: —",
+            f"⭐️ Всего оценок: <b>{total_cnt}</b>" if total_cnt is not None else "⭐️ Всего оценок: —",
         ]
     )
     return "\n".join(lines)
@@ -644,6 +629,11 @@ async def start_rate_link(message: Message, command: CommandObject):
         idx=photo_idx or 0,
         single_mode=photo_idx is not None,
     )
+    # Удаляем служебное /start, чтобы в чате осталось только фото для оценки
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 @router.callback_query(F.data.startswith("lr:set:"))
 async def lr_set(callback: CallbackQuery):
@@ -687,8 +677,43 @@ async def lr_set(callback: CallbackQuery):
     )
 
     await callback.answer("✅ Оценка учтена!" if ok else "Ты уже оценивал(а) этот кадр.", show_alert=not ok)
-    # Показать эту же карточку с итогом/кнопкой далее
-    await _render_link_photo(callback, owner_tg_id, code, idx=idx, single_mode=single_mode)
+
+    if not ok:
+        return
+
+    # После успешной оценки — удаляем фото и показываем итог с предложением зарегистрироваться/меню
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    owner_name = (owner_user or {}).get("name") or ""
+    title = (photo.get("title") or "Фотография").strip()
+    pub = _fmt_pub_date(photo)
+    pub_inline = f"  <i>{pub}</i>" if pub else ""
+
+    result_text = (
+        "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
+        f"<b>\"{title}\"</b>{pub_inline}\n"
+        + (f"Автор: {owner_name}\n" if owner_name else "Автор: —\n")
+        + f"\n<b>Твоя оценка:</b> {value}"
+    )
+
+    viewer_full = await get_user_by_tg_id(int(callback.from_user.id))
+    is_reg = _is_registered(viewer_full)
+    kb = InlineKeyboardBuilder()
+    if is_reg:
+        kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    else:
+        kb.row(InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data="auth:start"))
+
+    await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=result_text,
+        reply_markup=kb.as_markup(),
+        disable_notification=True,
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("lr:next:"))
