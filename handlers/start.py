@@ -381,6 +381,15 @@ async def cmd_start(message: Message, state: FSMContext):
             pass
         return
 
+    # Проверяем наличие пользователя даже если он помечен удалённым, чтобы учесть блокировки
+    user_any = await db.get_user_by_tg_id_any(message.from_user.id)
+    if user_any and bool(user_any.get("is_blocked")):
+        await message.answer(
+            "Твой аккаунт заблокирован администратором. Восстановление недоступно.",
+            disable_notification=True,
+        )
+        return
+
     user = await db.get_user_by_tg_id(message.from_user.id)
     lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 

@@ -1680,6 +1680,17 @@ async def get_user_by_tg_id(tg_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_user_by_tg_id_any(tg_id: int) -> dict | None:
+    """Вернёт пользователя вне зависимости от is_deleted (используется для восстановления)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM users WHERE tg_id=$1",
+            int(tg_id),
+        )
+    return dict(row) if row else None
+
+
 async def is_user_soft_deleted(tg_id: int) -> bool:
     """
     Проверяет, помечен ли пользователь как удалённый (is_deleted=1).

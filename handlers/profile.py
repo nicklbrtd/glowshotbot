@@ -2180,7 +2180,7 @@ async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("profile.delete.btn.restart", lang), callback_data="auth:start")
+    kb.button(text="↩️ Вернуться", callback_data="profile:delete:return")
     kb.adjust(2, 2, 1, 1)
 
     await callback.message.edit_text(
@@ -2189,3 +2189,37 @@ async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
     )
     await callback.answer(t("profile.delete.done.toast", lang))
+
+
+@router.callback_query(F.data == "profile:delete:return")
+async def profile_delete_return(callback: CallbackQuery, state: FSMContext):
+    """Удаляет сообщение об удалении и показывает приветствие для регистрации."""
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    welcome_text = (
+        "GlowShot — это новый Телеграм бот для тех, кто любит фотографию.\n"
+        "Выкладывай фото, делись им по ссылке, получай оценки.\n"
+        "Начнем? Жми «Сыыыыр»"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Наш телеграм", url="https://t.me/glowshotchannel")
+    kb.button(text="🥛 Сыыыыр", callback_data="auth:start")
+    kb.adjust(1, 1)
+
+    try:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=welcome_text,
+            reply_markup=kb.as_markup(),
+        )
+    except Exception:
+        pass
+
+    try:
+        await callback.answer()
+    except Exception:
+        pass
