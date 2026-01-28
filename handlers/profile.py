@@ -613,10 +613,9 @@ async def build_profile_view(user: dict):
     kb.button(text=t("profile.btn.settings", lang), callback_data="profile:settings")
     kb.button(text=t("profile.btn.streak", lang), callback_data="profile:streak")
 
-    premium_button_text = t("profile.btn.premium.my", lang) if premium_active else t("profile.btn.premium.buy", lang)
-    kb.button(text=premium_button_text, callback_data="profile:premium")
-
+    premium_button_text = t("profile.btn.premium.my", lang) if premium_active else "💎 Оформить"
     kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
+    kb.button(text=premium_button_text, callback_data="profile:premium")
     kb.adjust(2, 2, 2)
     return text, kb.as_markup()
 

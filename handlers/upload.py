@@ -450,10 +450,11 @@ def build_my_photo_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
-    # Верхний ряд — только «Поделиться»
-    rows.append([
-        InlineKeyboardButton(text="🔗 Поделиться фотографией", callback_data=f"myphoto:share:{photo_id}")
-    ])
+    # Верхний ряд — «Поделиться» (только если не залочено или есть премиум)
+    if not locked or is_premium_user:
+        rows.append([
+            InlineKeyboardButton(text="🔗 Поделиться фотографией", callback_data=f"myphoto:share:{photo_id}")
+        ])
 
     if not locked:
         rows.append([
