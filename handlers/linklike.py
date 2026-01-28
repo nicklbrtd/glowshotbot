@@ -242,7 +242,7 @@ async def _render_link_photo(
     has_next_unrated = False if single_mode else any(rv is None for j, rv in enumerate(ratings_cache) if j != idx)
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
-    owner_username = (owner_user or {}).get("username")
+    owner_name = (owner_user or {}).get("name") or (owner_user or {}).get("username") or ""
 
     title = (photo.get("title") or "Фотография").strip()
     pub = _fmt_pub_date(photo)
@@ -251,7 +251,7 @@ async def _render_link_photo(
     is_rateable = bool(photo.get("ratings_enabled", True))
     if not is_rateable:
         title_line = f"<b>\"{title}\"</b>{pub_inline}"
-        author_line = (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+        author_line = (f"Автор: {owner_name}\n" if owner_name else "Автор: —\n")
         text = (
             "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"{title_line}\n"
@@ -262,14 +262,14 @@ async def _render_link_photo(
         text = (
             "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"<b>\"{title}\"</b>{pub_inline}\n"
-            + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+            + (f"Автор: {owner_name}\n" if owner_name else "Автор: —\n")
             + "\nПоставь оценку от 1 до 10 👇\n"
         )
     else:
         text = (
             "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"<b>\"{title}\"</b>{pub_inline}\n"
-            + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+            + (f"Автор: {owner_name}\n" if owner_name else "Автор: —\n")
             + f"\n<b>Твоя оценка:</b> {rated_value}"
         )
 
@@ -404,7 +404,7 @@ def _build_share_text_links(
     )
     return "\n".join(lines)
 
-def _build_share_text_tgk(photo: dict, link_one: str) -> str:
+def _build_share_text_tgk(photo: dict, link_one: str, owner_name: str | None) -> str:
     title = escape((photo.get("title") or "Фотография").strip())
     device_raw = (photo.get("device") or "").strip()
     device_emoji = _device_emoji(device_raw) or ""
@@ -423,6 +423,8 @@ def _build_share_text_tgk(photo: dict, link_one: str) -> str:
     lines.append(title_line)
     if tag_label:
         lines.append(f"Тег: {tag}")
+    if owner_name:
+        lines.append(f"Автор: {escape(owner_name)}")
 
     lines.extend(
         [
@@ -436,9 +438,10 @@ def _build_share_text_tgk(photo: dict, link_one: str) -> str:
 def _share_links_kb(photo_id: int, link_one: str, link_pack: str, photos_count: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📣 Поделиться постом", callback_data=f"myphoto:share_tgk:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="📤 Отправить ссылку (1)", url=f"https://t.me/share/url?url={quote(link_one)}"))
     if photos_count >= 2:
         kb.row(InlineKeyboardButton(text="📤 Отправить ссылку (2)", url=f"https://t.me/share/url?url={quote(link_pack)}"))
+    else:
+        kb.row(InlineKeyboardButton(text="📤 Отправить ссылку (1)", url=f"https://t.me/share/url?url={quote(link_one)}"))
     kb.row(InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:a:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
     return kb.as_markup()
@@ -477,9 +480,11 @@ async def _render_share_screen(
         bot_username, code, int(callback.from_user.id), int(photo["id"])
     )
     link_cnt, total_cnt = await _get_share_counts(int(photo["id"]))
+    owner_user = await get_user_by_id(int(photo["user_id"]))
+    owner_name = (owner_user or {}).get("name") or (owner_user or {}).get("username") or ""
 
     if mode == "b":
-        text = _build_share_text_tgk(photo, link_one)
+        text = _build_share_text_tgk(photo, link_one, owner_name)
         kb = _share_tgk_kb(int(photo["id"]))
     else:
         text = _build_share_text_links(photo, link_one, link_cnt, total_cnt, photos_count)
@@ -494,7 +499,7 @@ async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str)
     )
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
-    owner_username = (owner_user or {}).get("username")
+    owner_name = (owner_user or {}).get("name") or (owner_user or {}).get("username") or ""
 
     title = (photo.get("title") or "Фотография").strip()
     pub = _fmt_pub_date(photo)
@@ -503,7 +508,7 @@ async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str)
     is_rateable = bool(photo.get("ratings_enabled", True))
     if not is_rateable:
         title_line = f"<b>\"{title}\"</b>{pub_inline}"
-        author_line = (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+        author_line = (f"Автор: {owner_name}\n" if owner_name else "Автор: —\n")
         text = (
             "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"{title_line}\n"
@@ -514,7 +519,7 @@ async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str)
         text = (
             "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"<b>\"{title}\"</b>{pub_inline}\n"
-            + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
+            + (f"Автор: {owner_name}\n" if owner_name else "Автор: —\n")
             + "\nПоставь оценку от 1 до 10 👇\n"
         )
 
