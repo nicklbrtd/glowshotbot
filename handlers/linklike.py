@@ -119,6 +119,21 @@ def _fmt_pub_date(photo: dict) -> str:
             return raw.split("T", 1)[0]
         return raw
 
+def _fmt_pub_date_short(photo: dict) -> str:
+    raw = (photo.get("created_at") or "").strip()
+    if not raw:
+        return ""
+    try:
+        from datetime import datetime
+
+        s = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%d.%m")
+    except Exception:
+        if "T" in raw:
+            return raw.split("T", 1)[0][:5]
+        return raw[:5]
+
 
 async def _get_active_photos_for_share(owner_tg_id: int) -> list[dict]:
     """Вернёт активные фото автора (до 2 шт.), отсортированные по дате создания (старше -> новее)."""
@@ -376,19 +391,23 @@ def _build_share_text_tgk(photo: dict, link_one: str) -> str:
     raw_tag = (photo.get("tag") or "").strip()
     tag_label = _tag_label(raw_tag)
     tag = escape(tag_label)
+    pub_short = _fmt_pub_date_short(photo)
 
     lines = [
-        "Моя фотография есть в GlowShot!",
+        "<b>Моя фотография есть в GlowShot!</b>",
     ]
-    lines.append(f"<i>\"{title}\"</i>" + (f" ({device} 📷)" if device else ""))
+    title_line = f"<code>\"{title}\"</code>" + (f" ({device})" if device else "")
+    if pub_short:
+        title_line += f" — {pub_short}"
+    lines.append(title_line)
     if tag:
         lines.append(f"Тег: {tag}")
 
     lines.extend(
         [
             "",
-            "Вы можете анонимно оценить эту фотографию по ссылке:",
-            link_one,
+            "<b>Вы можете анонимно оценить эту фотографию по ссылке:</b>",
+            f"<blockquote>{link_one}</blockquote>",
         ]
     )
     return "\n".join(lines)
@@ -409,32 +428,10 @@ def _share_tgk_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:share_backlinks:{photo_id}"))
     return kb.as_markup()
 
-def _preview_rate_kb(
-    *,
-    owner_tg_id: int,
-    photo_id: int,
-    idx: int,
-    code: str,
-) -> InlineKeyboardMarkup:
+def _preview_static_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(
-        *[
-            InlineKeyboardButton(
-                text=str(i),
-                callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:1",
-            )
-            for i in range(1, 6)
-        ]
-    )
-    kb.row(
-        *[
-            InlineKeyboardButton(
-                text=str(i),
-                callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:1",
-            )
-            for i in range(6, 11)
-        ]
-    )
+    kb.row(*[InlineKeyboardButton(text=str(i), callback_data="myphoto:share_preview_noop") for i in range(1, 6)])
+    kb.row(*[InlineKeyboardButton(text=str(i), callback_data="myphoto:share_preview_noop") for i in range(6, 11)])
     kb.row(InlineKeyboardButton(text="⬅️ Назад (видно только вам)", callback_data=f"myphoto:share_preview_back:{photo_id}"))
     return kb.as_markup()
 
@@ -472,10 +469,9 @@ async def _render_share_screen(
 
 async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str):
     bot_username = await _get_bot_username(callback)
-    _, link_one, idx, _ = await _build_share_links(
+    _, _, idx, _ = await _build_share_links(
         bot_username, code, int(callback.from_user.id), int(photo["id"])
     )
-    _ = link_pack
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
     owner_username = (owner_user or {}).get("username")
@@ -489,25 +485,21 @@ async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str)
         title_line = f"<b>\"{title}\"</b>{pub_inline}"
         author_line = (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
         text = (
-            "🔗⭐️ <b>Оценка по ссылке (предпросмотр)</b>\n\n"
+            "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"{title_line}\n"
             f"{author_line}"
             "\n🚫 Эта фотография недоступна для оценок.\n"
         )
     else:
         text = (
-            "🔗⭐️ <b>Оценка по ссылке (предпросмотр)</b>\n\n"
+            "🔗⭐️ <b>Оценка по ссылке</b>\n\n"
             f"<b>\"{title}\"</b>{pub_inline}\n"
             + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
-            + "\nПоставь оценку от 1 до 10 👇"
+            + "\nПоставь оценку от 1 до 10 👇\n"
+            + "<i>Предпросмотр: оценки не сохраняются.</i>"
         )
 
-    kb = _preview_rate_kb(
-        owner_tg_id=int(callback.from_user.id),
-        photo_id=int(photo["id"]),
-        idx=idx,
-        code=code,
-    )
+    kb = _preview_static_kb(int(photo["id"]))
 
     await _edit_share_message(callback, text, kb)
 
@@ -546,6 +538,10 @@ async def myphoto_share_preview(callback: CallbackQuery):
     await _render_share_preview(callback, photo, code)
 
     await callback.answer()
+
+@router.callback_query(F.data == "myphoto:share_preview_noop")
+async def myphoto_share_preview_noop(callback: CallbackQuery):
+    await callback.answer("Это предпросмотр, оценки не сохраняются.")
 
 @router.callback_query(F.data.startswith("myphoto:share_preview_back:"))
 async def myphoto_share_preview_back(callback: CallbackQuery):
