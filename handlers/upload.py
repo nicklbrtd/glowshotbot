@@ -500,6 +500,7 @@ EDIT_TAGS: list[tuple[str, str]] = [
 
 def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⭐️ Оценки", callback_data=f"myphoto:ratings:{photo_id}"))
     kb.row(InlineKeyboardButton(text="📷 Устройство", callback_data=f"myphoto:edit:device:{photo_id}"))
     kb.row(InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
@@ -541,6 +542,7 @@ def _build_edit_menu_text(photo: dict) -> str:
     device_type = (photo.get("device_type") or "").strip()
     desc = (photo.get("description") or "").strip()
     tag = (photo.get("tag") or "").strip()
+    ratings_enabled = bool(photo.get("ratings_enabled", True))
 
     tag_label = "🚫 Без тега" if tag == "" else tag
     for k, lbl in EDIT_TAGS:
@@ -561,8 +563,7 @@ def _build_edit_menu_text(photo: dict) -> str:
     text = "✏️ <b>Редактирование</b>\n\n"
     text += f"<b>{header}</b>\n"
     text += f"Тег: <b>{_esc_html(tag_line)}</b>\n"
-    if desc:
-        text += "\nОписание больше не редактируется."
+    text += f"Оценки: <b>{'включены' if ratings_enabled else 'выключены'}</b>"
     return text
 
 
