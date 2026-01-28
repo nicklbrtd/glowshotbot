@@ -523,9 +523,8 @@ def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text="📱 Смартфон", callback_data=f"myphoto:device:set:{photo_id}:phone"),
-        InlineKeyboardButton(text="📷 Камера", callback_data=f"myphoto:device:set:{photo_id}:camera"),
+        InlineKeyboardButton(text="📸 Камера", callback_data=f"myphoto:device:set:{photo_id}:camera"),
     )
-    kb.row(InlineKeyboardButton(text="📸 Другое", callback_data=f"myphoto:device:set:{photo_id}:other"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
     return kb.as_markup()
 
@@ -650,8 +649,6 @@ def _device_emoji(device_type_raw: str) -> str | None:
     if "смартфон" in dt or "phone" in dt:
         return "📱"
     if "фотокамера" in dt or "camera" in dt:
-        return "📷"
-    if dt:
         return "📸"
     return None
 
@@ -961,6 +958,26 @@ async def _edit_or_replace_my_photo_message(
 
     data = await state.get_data()
     ids: list[int] = data.get("myphoto_ids") or []
+
+    # Если state потерял список фото (например, после долгого времени или выхода из FSM),
+    # восстанавливаем его из БД, чтобы не терять навигацию и кнопку стрелок.
+    if not ids:
+        user = await get_user_by_tg_id(int(callback.from_user.id))
+        if user:
+            try:
+                fresh_photos = await get_latest_photos_for_user(int(user["id"]), limit=10)
+                fresh_photos = sorted(fresh_photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
+                fresh_photos = fresh_photos[:2]
+                ids = [p["id"] for p in fresh_photos]
+                # обновляем state, чтобы навигация и блокировки работали корректно
+                await state.update_data(
+                    myphoto_ids=ids,
+                    myphoto_last_id=photo.get("id"),
+                    # оставляем остальные поля как есть, чтобы не затирать is_premium/locked
+                )
+            except Exception:
+                ids = []
+
     current_idx = 0
     if photo.get("id") in ids:
         current_idx = ids.index(photo["id"])

@@ -242,7 +242,7 @@ async def _render_link_photo(
     has_next_unrated = False if single_mode else any(rv is None for j, rv in enumerate(ratings_cache) if j != idx)
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
-    owner_name = (owner_user or {}).get("name") or (owner_user or {}).get("username") or ""
+    owner_name = (owner_user or {}).get("name") or ""
 
     title = (photo.get("title") or "Фотография").strip()
     pub = _fmt_pub_date(photo)
@@ -481,7 +481,7 @@ async def _render_share_screen(
     )
     link_cnt, total_cnt = await _get_share_counts(int(photo["id"]))
     owner_user = await get_user_by_id(int(photo["user_id"]))
-    owner_name = (owner_user or {}).get("name") or (owner_user or {}).get("username") or ""
+    owner_name = (owner_user or {}).get("name") or ""
 
     if mode == "b":
         text = _build_share_text_tgk(photo, link_one, owner_name)
