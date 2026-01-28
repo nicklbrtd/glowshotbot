@@ -18,12 +18,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .common import _ensure_admin, BroadcastStates
-from database import(
+from database import (
     get_moderators,
     get_support_users,
     get_helpers,
     get_all_users_tg_ids,
-    get_premium_users
+    get_premium_users,
+    get_user_by_tg_id_any,
 )
 from config import BOT_TOKEN
 
@@ -313,11 +314,25 @@ async def admin_broadcast_send(callback: CallbackQuery, state: FSMContext):
     # Собираем аудиторию
     tg_ids: list[int] = []
 
+    def _is_valid_user(u: dict) -> bool:
+        # Фильтр: активный (is_deleted=0), не заблокирован, есть имя
+        if not u:
+            return False
+        if u.get("is_deleted"):
+            return False
+        if u.get("is_blocked"):
+            return False
+        name = (u.get("name") or "").strip()
+        if not name:
+            return False
+        return True
+
     if target == "all":
+        # get_all_users_tg_ids уже фильтрует is_deleted/is_blocked/empty name
         tg_ids = await get_all_users_tg_ids()
     elif target == "premium":
         users = await get_premium_users()
-        tg_ids = [int(u["tg_id"]) for u in users if u.get("tg_id")]
+        tg_ids = [int(u["tg_id"]) for u in users if u.get("tg_id") and _is_valid_user(u)]
     elif target == "test":
         tg_ids = [callback.from_user.id]
     elif target == "moderators":

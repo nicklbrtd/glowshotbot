@@ -16,9 +16,9 @@ from database import (
     get_users_sample,
     get_active_users_last_24h,
     get_online_users_recent,
-    get_total_activity_events,
     get_new_users_last_days,
-    get_premium_stats,
+    get_referrals_total,
+    get_unregistered_users_count,
     get_premium_users,
     get_top_users_by_activity_events,
 )
@@ -41,6 +41,7 @@ async def admin_stats(callback: CallbackQuery, state: FSMContext):
         return
 
     total_users = active_24h = online_recent = total_events = new_7d = premium_total = 0
+    referrals_total = unregistered_total = 0
 
     try:
         total_users = _safe_int(await get_total_users())
@@ -61,22 +62,18 @@ async def admin_stats(callback: CallbackQuery, state: FSMContext):
         pass
 
     try:
-        total_events = _safe_int(await get_total_activity_events())
-    except Exception:
-        pass
-
-    try:
         new_total, _ = await get_new_users_last_days(7, limit=1, offset=0)
         new_7d = _safe_int(new_total)
     except Exception:
         pass
 
     try:
-        prem = await get_premium_stats()
-        if isinstance(prem, dict):
-            premium_total = _safe_int(prem.get("total") or prem.get("premium_total") or prem.get("count"))
-        else:
-            premium_total = _safe_int(prem)
+        referrals_total = _safe_int(await get_referrals_total())
+    except Exception:
+        pass
+
+    try:
+        unregistered_total = _safe_int(await get_unregistered_users_count())
     except Exception:
         pass
 
@@ -85,9 +82,9 @@ async def admin_stats(callback: CallbackQuery, state: FSMContext):
         f"👥 Всего пользователей: <b>{total_users}</b>\n"
         f"⚡ Активных за 24ч: <b>{active_24h}</b>\n"
         f"🟢 Онлайн (recent): <b>{online_recent}</b>\n"
-        f"🧠 Всего событий активности: <b>{total_events}</b>\n"
         f"🆕 Новых за 7 дней: <b>{new_7d}</b>\n"
-        f"🌟 Премиум (всего): <b>{premium_total}</b>\n"
+        f"🔗 Перешли по рефералке: <b>{referrals_total}</b>\n"
+        f"🙈 Не зарегистрированы: <b>{unregistered_total}</b>\n"
     )
 
     kb = InlineKeyboardBuilder()

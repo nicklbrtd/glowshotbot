@@ -416,17 +416,20 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             pass
 
     user = await db.get_user_by_tg_id(message.from_user.id)
+
+    # Если запись существует, но помечена удалённой — считаем это деактивацией: по /start включаем обратно
+    if user is None and user_any and user_any.get("is_deleted"):
+        try:
+            await db.reactivate_user_by_tg_id(int(message.from_user.id))
+            user = await db.get_user_by_tg_id(message.from_user.id)
+        except Exception:
+            user = None
+
     lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
     if user is None:
         # Если был soft-delete, сбрасываем состояние на всякий случай
         await state.clear()
-        # Реактивируем запись (снимаем is_deleted), если она была
-        if user_any and user_any.get("is_deleted"):
-            try:
-                await db.reactivate_user_by_tg_id(int(message.from_user.id))
-            except Exception:
-                pass
 
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
         # Но не даём реферальный бонус, если аккаунт уже существовал (даже если сейчас удалён).

@@ -4347,6 +4347,28 @@ async def get_total_users() -> int:
         )
     return int(v or 0)
 
+async def get_unregistered_users_count() -> int:
+    """Количество аккаунтов без имени (не завершили регистрацию), не удалённых и не заблокированных."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(is_blocked,0)=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NULL
+            """
+        )
+    return int(v or 0)
+
+async def get_referrals_total() -> int:
+    """Всего переходов/регистраций по реферальным ссылкам (referrals записей)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval("SELECT COUNT(*) FROM referrals")
+    return int(v or 0)
+
 
 async def get_all_users_tg_ids() -> list[int]:
     p = _assert_pool()
