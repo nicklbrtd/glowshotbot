@@ -1660,6 +1660,7 @@ async def create_user(tg_id: int, username: str | None, name: str | None, gender
                   gender=EXCLUDED.gender,
                   age=EXCLUDED.age,
                   bio=EXCLUDED.bio,
+                  is_deleted=0,
                   updated_at=EXCLUDED.updated_at
             RETURNING *
             """,
@@ -1982,11 +1983,15 @@ async def set_ads_enabled_by_tg_id(tg_id: int, enabled: bool) -> dict | None:
     return dict(row) if row else None
 
 
-async def soft_delete_user(user_id: int) -> None:
+async def soft_delete_user(tg_id: int) -> None:
+    """Mark user as deleted by tg_id (soft delete, keeps row for audits)."""
     p = _assert_pool()
     async with p.acquire() as conn:
-        await conn.execute("UPDATE users SET is_deleted=1, updated_at=$1 WHERE id=$2",
-                           get_moscow_now_iso(), int(user_id))
+        await conn.execute(
+            "UPDATE users SET is_deleted=1, updated_at=$1 WHERE tg_id=$2",
+            get_moscow_now_iso(),
+            int(tg_id),
+        )
 
 
 # -------------------- roles / blocks --------------------
@@ -2465,8 +2470,12 @@ async def get_top_users_by_activity_events(limit: int = 20, offset: int = 0) -> 
             SELECT COUNT(*)
             FROM (
               SELECT user_id
-              FROM activity_events
-              WHERE user_id IS NOT NULL
+              FROM activity_events ae
+              JOIN users u ON u.id = ae.user_id
+              WHERE ae.user_id IS NOT NULL
+                AND u.is_deleted=0
+                AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+                AND COALESCE(u.is_blocked,0)=0
               GROUP BY user_id
             ) t
             """
@@ -2479,6 +2488,8 @@ async def get_top_users_by_activity_events(limit: int = 20, offset: int = 0) -> 
             JOIN users u ON u.id = a.user_id
             WHERE a.user_id IS NOT NULL
               AND u.is_deleted=0
+              AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+              AND COALESCE(u.is_blocked,0)=0
             GROUP BY u.id
             ORDER BY COUNT(a.id) DESC, u.updated_at DESC NULLS LAST, u.id DESC
             OFFSET $1 LIMIT $2
@@ -4303,14 +4314,30 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
 async def get_total_users() -> int:
     p = _assert_pool()
     async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_deleted=0")
+        v = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked, 0)=0
+            """
+        )
     return int(v or 0)
 
 
 async def get_all_users_tg_ids() -> list[int]:
     p = _assert_pool()
     async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT tg_id FROM users WHERE is_deleted=0")
+        rows = await conn.fetch(
+            """
+            SELECT tg_id
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked, 0)=0
+            """
+        )
     return [int(r["tg_id"]) for r in rows]
 
 
@@ -4371,7 +4398,10 @@ async def get_premium_users(limit: int = 20, offset: int = 0) -> list[dict]:
             """
             SELECT *
             FROM users
-            WHERE is_premium=1 AND is_deleted=0
+            WHERE is_premium=1
+              AND is_deleted=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked,0)=0
             ORDER BY premium_until DESC NULLS LAST, id DESC
             OFFSET $1 LIMIT $2
             """,
@@ -4395,7 +4425,13 @@ async def get_users_sample(
       - get_users_sample(limit=20, only_active=False)
     """
     p = _assert_pool()
-    where = "WHERE is_deleted=0" if only_active else ""
+    base_filter = [
+        "COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL",
+        "COALESCE(is_blocked,0)=0",
+    ]
+    if only_active:
+        base_filter.append("is_deleted=0")
+    where = "WHERE " + " AND ".join(base_filter)
     off = int(offset or 0)
 
     async with p.acquire() as conn:
@@ -4432,6 +4468,8 @@ async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[i
                 LIMIT 1
               ) ae ON TRUE
               WHERE u.is_deleted=0
+                AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+                AND COALESCE(u.is_blocked,0)=0
                 AND (
                   ae IS NOT NULL
                   OR COALESCE(u.updated_at, u.created_at) >= $1
@@ -4450,6 +4488,8 @@ async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[i
               LIMIT 1
             ) ae ON TRUE
             WHERE u.is_deleted=0
+              AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+              AND COALESCE(u.is_blocked,0)=0
               AND (
                 ae IS NOT NULL
                 OR COALESCE(u.updated_at, u.created_at) >= $1
@@ -4486,6 +4526,8 @@ async def get_online_users_recent(window_minutes: int = 5, limit: int = 20, offs
                 LIMIT 1
               ) ae ON TRUE
               WHERE u.is_deleted=0
+                AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+                AND COALESCE(u.is_blocked,0)=0
                 AND (
                   ae IS NOT NULL
                   OR COALESCE(u.updated_at, u.created_at) >= $1
@@ -4504,6 +4546,8 @@ async def get_online_users_recent(window_minutes: int = 5, limit: int = 20, offs
               LIMIT 1
             ) ae ON TRUE
             WHERE u.is_deleted=0
+              AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+              AND COALESCE(u.is_blocked,0)=0
               AND (
                 ae IS NOT NULL
                 OR COALESCE(u.updated_at, u.created_at) >= $1
@@ -4552,13 +4596,23 @@ async def get_premium_stats(limit: int = 20) -> dict:
     now_dt = get_moscow_now()
     async with p.acquire() as conn:
         total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND is_premium=1"
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted=0
+              AND is_premium=1
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked,0)=0
+            """
         )
         active = await conn.fetchval(
             """
             SELECT COUNT(*)
             FROM users
-            WHERE is_deleted=0 AND is_premium=1
+            WHERE is_deleted=0
+              AND is_premium=1
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked,0)=0
               AND (
                 premium_until IS NULL
                 OR premium_until = ''
@@ -4572,7 +4626,10 @@ async def get_premium_stats(limit: int = 20) -> dict:
             """
             SELECT *
             FROM users
-            WHERE is_deleted=0 AND is_premium=1
+            WHERE is_deleted=0
+              AND is_premium=1
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked,0)=0
             ORDER BY premium_until DESC NULLS LAST, id DESC
             LIMIT $1
             """,
@@ -4592,14 +4649,24 @@ async def get_new_users_last_days(days: int = 3, limit: int = 20, offset: int = 
     cutoff = (get_moscow_now() - timedelta(days=int(days))).isoformat()
     async with p.acquire() as conn:
         total = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND created_at >= $1",
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked,0)=0
+              AND created_at >= $1
+            """,
             cutoff,
         )
         rows = await conn.fetch(
             """
             SELECT *
             FROM users
-            WHERE is_deleted=0 AND created_at >= $1
+            WHERE is_deleted=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND COALESCE(is_blocked,0)=0
+              AND created_at >= $1
             ORDER BY created_at DESC, id DESC
             OFFSET $2 LIMIT $3
             """,
