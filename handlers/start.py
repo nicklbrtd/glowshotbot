@@ -404,6 +404,19 @@ async def cmd_start(message: Message, state: FSMContext):
         except Exception:
             pass
 
+    # Если пользователь существовал, но помечен удалённым и не забанен — реактивируем
+    if user_any and bool(user_any.get("is_deleted")):
+        try:
+            await db.reactivate_user_by_tg_id(int(message.from_user.id))
+            await db.set_user_block_status_by_tg_id(
+                int(message.from_user.id),
+                is_blocked=False,
+                reason=None,
+                until_iso=None,
+            )
+        except Exception:
+            pass
+
     user = await db.get_user_by_tg_id(message.from_user.id)
     lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
@@ -451,6 +464,7 @@ async def cmd_start(message: Message, state: FSMContext):
             try:
                 await message.answer(welcome_text)
             except Exception:
+                # Последний шанс — игнорируем, чтобы не падать
                 pass
         try:
             await message.delete()
