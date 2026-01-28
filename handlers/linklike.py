@@ -264,7 +264,6 @@ async def _render_link_photo(
             f"<b>\"{title}\"</b>{pub_inline}\n"
             + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
             + "\nПоставь оценку от 1 до 10 👇\n"
-            + "<i>Регистрация не нужна, чтобы оценить.</i>"
         )
     else:
         text = (
@@ -353,7 +352,13 @@ async def _build_share_links(
     link_one = f"{link_pack}_p{idx + 1}"
     return link_pack, link_one, idx, len(photos)
 
-def _build_share_text_links(photo: dict, link_one: str, link_cnt: int | None, total_cnt: int | None) -> str:
+def _build_share_text_links(
+    photo: dict,
+    link_one: str,
+    link_cnt: int | None,
+    total_cnt: int | None,
+    photos_count: int,
+) -> str:
     title = escape((photo.get("title") or "Фотография").strip())
     device_raw = (photo.get("device") or "").strip()
     device_emoji = _device_emoji(device_raw) or ""
@@ -368,14 +373,30 @@ def _build_share_text_links(photo: dict, link_one: str, link_cnt: int | None, to
         "📸 <b>Эта фотография:</b>",
         f"<i>\"{title}\"</i>" + (f" ({device})" if device else ""),
     ]
-    if tag:
+    if tag_label:
         lines.append(f"Тег: {tag}")
+
+    if photos_count <= 1:
+        lines.extend(
+            [
+                "",
+                "Поделиться ссылкой на эту фотографию можно по кнопке «Отправить ссылку (1)».",
+                f"<code>{link_one}</code>",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Ссылка на эту фотографию:",
+                f"<code>{link_one}</code>",
+                "",
+                'Также можно поделиться двумя фотографиями сразу по кнопке «Отправить ссылку (2)».',
+            ]
+        )
 
     lines.extend(
         [
-            "",
-            "🧭 Ссылка на эту фотографию:",
-            f"<code>{link_one}</code>",
             "",
             f"📊 Оценки по ссылке: <b>{link_cnt}</b>" if link_cnt is not None else "📊 Оценки по ссылке: —",
             f"✨ Всего оценок: <b>{total_cnt}</b>" if total_cnt is not None else "✨ Всего оценок: —",
@@ -400,7 +421,7 @@ def _build_share_text_tgk(photo: dict, link_one: str) -> str:
     if pub_short:
         title_line += f" — {pub_short}"
     lines.append(title_line)
-    if tag:
+    if tag_label:
         lines.append(f"Тег: {tag}")
 
     lines.extend(
@@ -412,12 +433,12 @@ def _build_share_text_tgk(photo: dict, link_one: str) -> str:
     )
     return "\n".join(lines)
 
-def _share_links_kb(photo_id: int, link_one: str, link_pack: str, has_pack: bool) -> InlineKeyboardMarkup:
+def _share_links_kb(photo_id: int, link_one: str, link_pack: str, photos_count: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📣 Поделиться постом", callback_data=f"myphoto:share_tgk:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="📤 Поделиться этим фото 📸", url=f"https://t.me/share/url?url={quote(link_one)}"))
-    if has_pack:
-        kb.row(InlineKeyboardButton(text="📤 Поделиться всеми фото 🗂", url=f"https://t.me/share/url?url={quote(link_pack)}"))
+    kb.row(InlineKeyboardButton(text="📤 Отправить ссылку (1)", url=f"https://t.me/share/url?url={quote(link_one)}"))
+    if photos_count >= 2:
+        kb.row(InlineKeyboardButton(text="📤 Отправить ссылку (2)", url=f"https://t.me/share/url?url={quote(link_pack)}"))
     kb.row(InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:a:{photo_id}"))
     kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
     return kb.as_markup()
@@ -456,14 +477,13 @@ async def _render_share_screen(
         bot_username, code, int(callback.from_user.id), int(photo["id"])
     )
     link_cnt, total_cnt = await _get_share_counts(int(photo["id"]))
-    has_pack = photos_count >= 2
 
     if mode == "b":
         text = _build_share_text_tgk(photo, link_one)
         kb = _share_tgk_kb(int(photo["id"]))
     else:
-        text = _build_share_text_links(photo, link_one, link_cnt, total_cnt)
-        kb = _share_links_kb(int(photo["id"]), link_one, link_pack, has_pack)
+        text = _build_share_text_links(photo, link_one, link_cnt, total_cnt, photos_count)
+        kb = _share_links_kb(int(photo["id"]), link_one, link_pack, photos_count)
 
     await _edit_share_message(callback, text, kb)
 
@@ -496,7 +516,6 @@ async def _render_share_preview(callback: CallbackQuery, photo: dict, code: str)
             f"<b>\"{title}\"</b>{pub_inline}\n"
             + (f"Автор: @{owner_username}\n" if owner_username else "Автор: —\n")
             + "\nПоставь оценку от 1 до 10 👇\n"
-            + "<i>Предпросмотр: оценки не сохраняются.</i>"
         )
 
     kb = _preview_static_kb(int(photo["id"]))
