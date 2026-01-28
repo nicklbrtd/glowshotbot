@@ -291,6 +291,18 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    try:
+        await _cmd_start_inner(message, state)
+    except Exception as e:
+        try:
+            await message.answer("Не удалось обработать /start, попробуй ещё раз через минуту.")
+        except Exception:
+            pass
+        # Для отладки оставляем исключение в логах
+        raise
+
+
+async def _cmd_start_inner(message: Message, state: FSMContext):
     payload = None
     if message.text:
         parts = message.text.split(maxsplit=1)
@@ -431,8 +443,8 @@ async def cmd_start(message: Message, state: FSMContext):
                 pass
 
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
-        # Но не даём реферальный бонус, если аккаунт уже существовал и был удалён.
-        if payload and payload.startswith("ref_") and not (user_any and user_any.get("is_deleted")):
+        # Но не даём реферальный бонус, если аккаунт уже существовал (даже если сейчас удалён).
+        if payload and payload.startswith("ref_") and not user_any:
             ref_code = payload[4:].strip()
             if ref_code:
                 try:
