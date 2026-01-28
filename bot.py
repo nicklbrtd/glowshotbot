@@ -220,19 +220,15 @@ class BlockGuardMiddleware(BaseMiddleware):
         if tg_user_id is None:
             return await handler(event, data)
 
-        # Если аккаунт удалён — даём один шанс на /start и реанимируем, иначе игнорируем.
+        # Если аккаунт удалён — разрешаем только /start (для повторной регистрации), остальное игнорируем.
         try:
             if await is_user_soft_deleted(int(tg_user_id)):
                 # Разрешаем только стартовое сообщение для восстановления
                 if isinstance(event, Update) and event.message:
                     text = (event.message.text or "").strip()
                     if text.startswith("/start"):
-                        try:
-                            await reactivate_user_by_tg_id(int(tg_user_id))
-                            await set_user_block_status_by_tg_id(int(tg_user_id), is_blocked=False, reason=None, until_iso=None)
-                        except Exception:
-                            pass
-                        # продолжаем в хендлеры
+                        # даём пройти дальше в хендлеры; реанимация произойдёт после регистрации
+                        pass
                     else:
                         # всё остальное гасим
                         raise SkipHandler
