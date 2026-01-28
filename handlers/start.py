@@ -238,7 +238,7 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
         lines.append("")
         lines.append(_pick_advice(photos, user, is_premium))
         lines.append("")
-        tagline = "публикуй · Оценивай · Побеждай"
+        tagline = "Публикуй · Оценивай · Побеждай"
         lines.append(f"💎 {tagline}" if is_premium else tagline)
         return "\n".join(lines)
 
