@@ -1704,6 +1704,17 @@ async def is_user_soft_deleted(tg_id: int) -> bool:
     return bool(v)
 
 
+async def reactivate_user_by_tg_id(tg_id: int) -> None:
+    """Снимает флаг is_deleted у пользователя (используется при повторной регистрации)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_deleted=0, updated_at=$1 WHERE tg_id=$2",
+            get_moscow_now_iso(),
+            int(tg_id),
+        )
+
+
 async def get_user_by_username(username: str) -> dict | None:
     """
     Ищет пользователя по username (без @). Регистр игнорируется.

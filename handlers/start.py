@@ -14,6 +14,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import InlineKeyboardMarkup
 
 import database as db
+from database import reactivate_user_by_tg_id
 from keyboards.common import build_main_menu
 from utils.time import get_moscow_now, get_moscow_today
 
@@ -385,7 +386,7 @@ async def cmd_start(message: Message, state: FSMContext):
     user_any = await db.get_user_by_tg_id_any(message.from_user.id)
     if user_any and bool(user_any.get("is_blocked")):
         reason = (user_any.get("block_reason") or "").strip()
-        # Админский бан: блокируем вход.
+        # Админский/модераторский бан: блокируем вход.
         if reason.startswith("FULL_BAN:"):
             await message.answer(
                 "Твой аккаунт заблокирован модератором. Восстановление недоступно.",
@@ -394,7 +395,12 @@ async def cmd_start(message: Message, state: FSMContext):
             return
         # Неадминский блок (например, юзер блокировал бота) — снимаем.
         try:
-            await db.set_user_block_status_by_tg_id(int(message.from_user.id), is_blocked=False, reason=None, until_iso=None)
+            await db.set_user_block_status_by_tg_id(
+                int(message.from_user.id),
+                is_blocked=False,
+                reason=None,
+                until_iso=None,
+            )
         except Exception:
             pass
 
@@ -404,6 +410,13 @@ async def cmd_start(message: Message, state: FSMContext):
     if user is None:
         # Если был soft-delete, сбрасываем состояние на всякий случай
         await state.clear()
+        # Реактивируем запись (снимаем is_deleted), если она была
+        if user_any and user_any.get("is_deleted"):
+            try:
+                await db.reactivate_user_by_tg_id(int(message.from_user.id))
+            except Exception:
+                pass
+
         # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
         # Но не даём реферальный бонус, если аккаунт уже существовал и был удалён.
         if payload and payload.startswith("ref_") and not (user_any and user_any.get("is_deleted")):
