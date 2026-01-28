@@ -21,6 +21,7 @@ from database import (
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
     is_user_soft_deleted,
+    reactivate_user_by_tg_id,
     hide_active_photos_for_user,
     restore_photos_from_status,
     get_user_by_tg_id,
@@ -219,15 +220,24 @@ class BlockGuardMiddleware(BaseMiddleware):
         if tg_user_id is None:
             return await handler(event, data)
 
-        # Если аккаунт удалён — полностью игнорируем любые обращения.
+        # Если аккаунт удалён — даём один шанс на /start и реанимируем, иначе игнорируем.
         try:
             if await is_user_soft_deleted(int(tg_user_id)):
-                if isinstance(event, CallbackQuery):
-                    try:
-                        await event.answer()
-                    except Exception:
-                        pass
-                raise SkipHandler
+                # Разрешаем только стартовое сообщение для восстановления
+                if isinstance(event, Update) and event.message:
+                    text = (event.message.text or "").strip()
+                    if text.startswith("/start"):
+                        try:
+                            await reactivate_user_by_tg_id(int(tg_user_id))
+                            await set_user_block_status_by_tg_id(int(tg_user_id), is_blocked=False, reason=None, until_iso=None)
+                        except Exception:
+                            pass
+                        # продолжаем в хендлеры
+                    else:
+                        # всё остальное гасим
+                        raise SkipHandler
+                else:
+                    raise SkipHandler
         except SkipHandler:
             raise
         except Exception:
