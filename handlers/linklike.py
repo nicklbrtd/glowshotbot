@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from urllib.parse import quote
 
 from aiogram import Router, F
@@ -21,8 +22,6 @@ from database import (
     ensure_user_minimal_row,
     add_rating_by_tg_id,
     get_user_rating_value,
-    get_link_ratings_count_for_photo,
-    get_ratings_count_for_photo,
     is_user_premium_active,
 )
 
@@ -45,25 +44,6 @@ def _is_registered(u: dict | None) -> bool:
         return False
     return bool((u.get("name") or "").strip())
 
-def _share_kb(photo_id: int, link: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={quote(link)}"))
-    kb.row(InlineKeyboardButton(text="♻️ Обновить ссылку", callback_data=f"myphoto:share_refresh:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
-    return kb.as_markup()
-
-async def _get_share_counts(photo_id: int) -> tuple[int | None, int | None]:
-    """Return (link_ratings_count, total_ratings_count). Uses best-effort DB helpers."""
-    try:
-        # Prefer dedicated helpers if they exist
-
-        link_cnt = await get_link_ratings_count_for_photo(int(photo_id))
-        total_cnt = await get_ratings_count_for_photo(int(photo_id))
-        return int(link_cnt or 0), int(total_cnt or 0)
-    except Exception:
-        # Fallback: do not break share UI if counts are unavailable
-        return None, None
-
 def _rate_kb(
     *,
     owner_tg_id: int,
@@ -74,19 +54,27 @@ def _rate_kb(
     is_registered: bool,
     has_next_unrated: bool,
     is_rateable: bool,
+    single_mode: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    flag = "1" if single_mode else "0"
 
     if is_rateable and rated_value is None:
         kb.row(
             *[
-                InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}")
+                InlineKeyboardButton(
+                    text=str(i),
+                    callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:{flag}",
+                )
                 for i in range(1, 6)
             ]
         )
         kb.row(
             *[
-                InlineKeyboardButton(text=str(i), callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}")
+                InlineKeyboardButton(
+                    text=str(i),
+                    callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:{flag}",
+                )
                 for i in range(6, 11)
             ]
         )
@@ -121,7 +109,7 @@ def _fmt_pub_date(photo: dict) -> str:
 
 
 async def _get_active_photos_for_share(owner_tg_id: int) -> list[dict]:
-    """Вернёт список активных фото автора (до 2 шт.), отсортированных по дате создания (старая -> новая)."""
+    """Вернёт активные фото автора (до 2 шт.), отсортированные по дате создания (новая -> старше)."""
     owner = await get_user_by_tg_id(int(owner_tg_id))
     if not owner:
         return []
@@ -132,16 +120,23 @@ async def _get_active_photos_for_share(owner_tg_id: int) -> list[dict]:
         premium_active = False
     try:
         photos = await get_active_photos_for_user(int(owner["id"]), limit=2)
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""))
+        photos = sorted(photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
     except Exception:
         photos = []
     photos = photos[:2]
     if premium_active:
         return photos
-    # Без премиума — оставляем только одну (самую раннюю в списке)
+    # Без премиума — оставляем только одну (самую свежую в списке)
     return photos[:1]
 
-async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, code: str, idx: int = 0):
+async def _render_link_photo(
+    target: Message | CallbackQuery,
+    owner_tg_id: int,
+    code: str,
+    idx: int = 0,
+    *,
+    single_mode: bool = False,
+):
     viewer_tg_id = target.from_user.id
     await ensure_user_minimal_row(viewer_tg_id, username=target.from_user.username)
     viewer_full = await get_user_by_tg_id(int(viewer_tg_id))
@@ -169,7 +164,7 @@ async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, 
         if rv is None and unrated_idx is None:
             unrated_idx = i
 
-    if unrated_idx is None:
+    if not single_mode and unrated_idx is None:
         # Все фото оценены — показываем финальный экран
         done_text = (
             "🔗⭐️ Все доступные фото автора уже оценены.\n\n"
@@ -208,11 +203,14 @@ async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, 
             )
         return
 
-    idx = unrated_idx if idx >= len(photos) else idx
-    idx = max(0, min(idx, len(photos) - 1))
+    if single_mode:
+        idx = max(0, min(idx, len(photos) - 1))
+    else:
+        idx = unrated_idx if idx >= len(photos) else idx
+        idx = max(0, min(idx, len(photos) - 1))
     photo = photos[idx]
     rated_value = ratings_cache[idx]
-    has_next_unrated = any(rv is None for j, rv in enumerate(ratings_cache) if j != idx)
+    has_next_unrated = False if single_mode else any(rv is None for j, rv in enumerate(ratings_cache) if j != idx)
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
     owner_username = (owner_user or {}).get("username")
@@ -256,6 +254,7 @@ async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, 
         is_registered=is_reg,
         has_next_unrated=has_next_unrated,
         is_rateable=is_rateable,
+        single_mode=single_mode,
     )
 
     # Всегда показываем с фотографией. Удаляем старое сообщение, чтобы избежать багов с media.
@@ -282,19 +281,17 @@ async def _render_link_photo(target: Message | CallbackQuery, owner_tg_id: int, 
             parse_mode="HTML",
         )
 
-@router.callback_query(F.data.startswith("myphoto:share:"))
-async def myphoto_share(callback: CallbackQuery):
-    photo_id = int(callback.data.split(":")[2])
+async def _load_photo_with_access(callback: CallbackQuery, photo_id: int) -> tuple[dict | None, dict | None]:
     photo = await get_photo_by_id(photo_id)
     if not photo or photo.get("is_deleted"):
         await callback.answer("Фотография не найдена", show_alert=True)
-        return
+        return None, None
 
     owner_user = await get_user_by_id(int(photo["user_id"]))
     if not owner_user or int(owner_user.get("tg_id") or 0) != int(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
-        return
-    # Если фото заблокировано из-за отсутствия премиума (вторая активная) — не даём делиться
+        return None, None
+
     premium_active = False
     try:
         premium_active = await is_user_premium_active(int(callback.from_user.id))
@@ -306,34 +303,90 @@ async def myphoto_share(callback: CallbackQuery):
             owner_photos = sorted(owner_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
             if len(owner_photos) > 1 and int(photo_id) != int(owner_photos[0]["id"]):
                 await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
-                return
+                return None, None
         except Exception:
             pass
 
-    code = await get_or_create_share_link_code(int(callback.from_user.id))
-    bot_username = await _get_bot_username(callback)
-    link = f"https://t.me/{bot_username}?start=rate_{code}"
+    return photo, owner_user
 
-    text = (
-        "🔗 <b>Поделиться фотографией</b>\n\n"
-        "Не хватает оценок до проходного?\n\n"
-        "Ты можешь поделиться ссылкой:\n"
-        "Например: в профиле, в тгк или с друзьями.\n"
-        "Но учти: там тоже можно поставить <b>плохую</b> оценку!\n\n"
-        "✨ <b>Твоя ссылка — скопируй или жми Поделиться</b>\n"
-        f"<code>{link}</code>"
+async def _build_share_links(bot_username: str, code: str, owner_tg_id: int, photo_id: int) -> tuple[str, str, int]:
+    photos = await _get_active_photos_for_share(owner_tg_id)
+    link_pack = f"https://t.me/{bot_username}?start=rate_{code}"
+
+    idx = 0
+    for i, ph in enumerate(photos):
+        if int(ph.get("id") or 0) == int(photo_id):
+            idx = i
+            break
+
+    link_one = f"{link_pack}_p{idx + 1}"
+    return link_pack, link_one, idx
+
+def _build_share_text_links(photo: dict, link_one: str, link_pack: str) -> str:
+    title = escape((photo.get("title") or "Фотография").strip())
+    device = escape((photo.get("device") or "").strip())
+    tag = escape((photo.get("tag") or "").strip())
+
+    lines = [
+        "🔗 Ссылка для оценки",
+        "",
+        f"\"{title}\"",
+    ]
+    if device:
+        lines.append(f"Устройство: {device}")
+    if tag:
+        lines.append(f"тег: {tag}")
+
+    lines.extend(
+        [
+            "",
+            "Индивидуальная ссылка:",
+            f"<code>{link_one}</code>",
+            "",
+            "Общая ссылка (подборка):",
+            f"<code>{link_pack}</code>",
+        ]
     )
+    return "\n".join(lines)
 
-    link_cnt, total_cnt = await _get_share_counts(photo_id)
-    if link_cnt is not None and total_cnt is not None:
-        text += (
-            "\n\n"
-            f"🔗⭐️ Кол-во оценок по ссылке: <b>{link_cnt}</b>\n"
-            f"⭐️ Всего оценок: <b>{total_cnt}</b>"
-        )
+def _build_share_text_tgk(photo: dict, link_one: str) -> str:
+    title = escape((photo.get("title") or "Фотография").strip())
+    device = escape((photo.get("device") or "").strip())
+    tag = escape((photo.get("tag") or "").strip())
 
-    kb = _share_kb(photo_id, link)
+    lines = [
+        "📣 Текст для тгк",
+        "",
+        "Вы можете оценить мою фотографию!",
+    ]
+    if device:
+        lines.append(f"\"{title}\" — {device}")
+    else:
+        lines.append(f"\"{title}\"")
+    if tag:
+        lines.append(f"тег: {tag}")
 
+    lines.extend(["", "Ссылка:", f"<code>{link_one}</code>"])
+    return "\n".join(lines)
+
+def _share_links_kb(photo_id: int, link_one: str, link_pack: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="📣 В тгк (текст)", callback_data=f"myphoto:share_tgk:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="📤 Поделиться этой фотографией", url=f"https://t.me/share/url?url={quote(link_one)}"))
+    kb.row(InlineKeyboardButton(text="📤 Поделиться подборкой", url=f"https://t.me/share/url?url={quote(link_pack)}"))
+    kb.row(InlineKeyboardButton(text="👀 Предпросмотр", url=link_one))
+    kb.row(InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:a:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    return kb.as_markup()
+
+def _share_tgk_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔙 Назад к ссылкам", callback_data=f"myphoto:share_backlinks:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="♻️ Обновить ссылки", callback_data=f"myphoto:share_refresh:b:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    return kb.as_markup()
+
+async def _edit_share_message(callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup):
     try:
         if callback.message.photo:
             await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
@@ -342,64 +395,86 @@ async def myphoto_share(callback: CallbackQuery):
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             raise
+
+async def _render_share_screen(
+    callback: CallbackQuery,
+    photo: dict,
+    code: str,
+    mode: str = "a",
+):
+    bot_username = await _get_bot_username(callback)
+    link_pack, link_one, _ = await _build_share_links(bot_username, code, int(callback.from_user.id), int(photo["id"]))
+
+    if mode == "b":
+        text = _build_share_text_tgk(photo, link_one)
+        kb = _share_tgk_kb(int(photo["id"]))
+    else:
+        text = _build_share_text_links(photo, link_one, link_pack)
+        kb = _share_links_kb(int(photo["id"]), link_one, link_pack)
+
+    await _edit_share_message(callback, text, kb)
+
+@router.callback_query(F.data.startswith("myphoto:share:"))
+async def myphoto_share(callback: CallbackQuery):
+    photo_id = int(callback.data.split(":")[2])
+    photo, _ = await _load_photo_with_access(callback, photo_id)
+    if not photo:
+        return
+
+    code = await get_or_create_share_link_code(int(callback.from_user.id))
+    await _render_share_screen(callback, photo, code, mode="a")
+
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("myphoto:share_tgk:"))
+async def myphoto_share_tgk(callback: CallbackQuery):
+    photo_id = int(callback.data.split(":")[2])
+    photo, _ = await _load_photo_with_access(callback, photo_id)
+    if not photo:
+        return
+
+    code = await get_or_create_share_link_code(int(callback.from_user.id))
+    await _render_share_screen(callback, photo, code, mode="b")
+
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("myphoto:share_backlinks:"))
+async def myphoto_share_backlinks(callback: CallbackQuery):
+    photo_id = int(callback.data.split(":")[2])
+    photo, _ = await _load_photo_with_access(callback, photo_id)
+    if not photo:
+        return
+
+    code = await get_or_create_share_link_code(int(callback.from_user.id))
+    await _render_share_screen(callback, photo, code, mode="a")
 
     await callback.answer()
 
 @router.callback_query(F.data.startswith("myphoto:share_refresh:"))
 async def myphoto_share_refresh(callback: CallbackQuery):
-    photo_id = int(callback.data.split(":")[2])
-
-    owner_user = await get_user_by_tg_id(int(callback.from_user.id))
-    premium_active = False
+    parts = (callback.data or "").split(":")
+    mode = "a"
+    photo_id_part = None
+    if len(parts) >= 4:
+        mode = parts[2]
+        photo_id_part = parts[3]
+    elif len(parts) >= 3:
+        photo_id_part = parts[2]
     try:
-        premium_active = await is_user_premium_active(int(callback.from_user.id))
-    except Exception:
-        premium_active = False
-    if not premium_active and owner_user:
-        try:
-            owner_photos = await get_active_photos_for_user(int(owner_user["id"]), limit=2)
-            owner_photos = sorted(owner_photos, key=lambda p: (p.get("created_at") or ""), reverse=True)
-            if len(owner_photos) > 1 and int(photo_id) != int(owner_photos[0]["id"]):
-                await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
-                return
-        except Exception:
-            pass
+        photo_id = int(photo_id_part or 0)
+    except ValueError:
+        await callback.answer("Фотография не найдена", show_alert=True)
+        return
+    mode = mode if mode in ("a", "b") else "a"
 
-    # Issue a new active code and render it immediately in the same message
+    photo, _ = await _load_photo_with_access(callback, photo_id)
+    if not photo:
+        return
+
     code = await refresh_share_link_code(int(callback.from_user.id))
-    bot_username = await _get_bot_username(callback)
-    link = f"https://t.me/{bot_username}?start=rate_{code}"
+    await _render_share_screen(callback, photo, code, mode=mode)
 
-    text = (
-        "🔗 <b>Поделиться фотографией</b>\n\n"
-        "Не хватает оценок до проходного?\n\n"
-        "Ты можешь поделиться ссылкой:\n"
-        "Например: в профиле, в тгк или с друзьями.\n"
-        "Но учти: там тоже можно поставить <b>плохую</b> оценку!\n\n"
-        "✨ <b>Твоя ссылка — скопируй или жми Поделиться</b>\n"
-        f"<code>{link}</code>"
-    )
-
-    link_cnt, total_cnt = await _get_share_counts(photo_id)
-    if link_cnt is not None and total_cnt is not None:
-        text += (
-            "\n\n"
-            f"🔗⭐️ Кол-во оценок по ссылке: <b>{link_cnt}</b>\n"
-            f"⭐️ Всего оценок: <b>{total_cnt}</b>"
-        )
-
-    kb = _share_kb(photo_id, link)
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
-
-    await callback.answer("♻️ Ссылка обновлена!")
+    await callback.answer("Ссылки обновлены")
 
 @router.message(CommandStart())
 async def start_rate_link(message: Message, command: CommandObject):
@@ -407,17 +482,36 @@ async def start_rate_link(message: Message, command: CommandObject):
     if not args.startswith("rate_"):
         raise SkipHandler
 
-    code = args.replace("rate_", "", 1).strip()
+    payload = args.replace("rate_", "", 1).strip()
+    photo_idx = None
+    if "_p" in payload:
+        base, suffix = payload.rsplit("_p", 1)
+        if suffix in ("1", "2") and base:
+            payload = base
+            photo_idx = int(suffix) - 1
+
+    code = payload
     owner_tg_id = await get_owner_tg_id_by_share_code(code)
     if not owner_tg_id:
         await message.answer("❌ Эта ссылка не активна или устарела.", disable_notification=True)
         return
 
-    await _render_link_photo(message, int(owner_tg_id), code, idx=0)
+    await _render_link_photo(
+        message,
+        int(owner_tg_id),
+        code,
+        idx=photo_idx or 0,
+        single_mode=photo_idx is not None,
+    )
 
 @router.callback_query(F.data.startswith("lr:set:"))
 async def lr_set(callback: CallbackQuery):
-    _, _, owner_tg_id_s, photo_id_s, idx_s, value_s, code = (callback.data or "").split(":", 6)
+    parts = (callback.data or "").split(":")
+    # lr:set:<owner_tg_id>:<photo_id>:<idx>:<value>:<code>[:single_flag]
+    _, _, owner_tg_id_s, photo_id_s, idx_s, value_s, code = parts[:7]
+    single_mode = False
+    if len(parts) >= 8:
+        single_mode = parts[7] == "1"
     owner_tg_id = int(owner_tg_id_s)
     photo_id = int(photo_id_s)
     idx = int(idx_s)
@@ -453,7 +547,7 @@ async def lr_set(callback: CallbackQuery):
 
     await callback.answer("✅ Оценка учтена!" if ok else "Ты уже оценивал(а) этот кадр.", show_alert=not ok)
     # Показать эту же карточку с итогом/кнопкой далее
-    await _render_link_photo(callback, owner_tg_id, code, idx=idx)
+    await _render_link_photo(callback, owner_tg_id, code, idx=idx, single_mode=single_mode)
 
 
 @router.callback_query(F.data.startswith("lr:next:"))
