@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from keyboards.common import build_back_to_menu_kb
 from utils.i18n import t
@@ -13,11 +14,17 @@ from utils.time import get_moscow_now, get_moscow_today
 
 from database_results import (
     PERIOD_DAY,
+    PERIOD_ALL_TIME,
     SCOPE_GLOBAL,
     SCOPE_CITY,
     SCOPE_COUNTRY,
     KIND_TOP_PHOTOS,
+    ALL_TIME_MIN_VOTES,
     get_results_items,
+    get_all_time_top,
+    update_hall_of_fame_from_top,
+    get_hof_items,
+    refresh_hof_statuses,
 )
 
 from services.results_engine import recalc_day_global, get_day_eligibility
@@ -80,7 +87,9 @@ def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text=t("results.btn.day", lang), callback_data="results:day"),
                 InlineKeyboardButton(text=t("results.btn.me", lang), callback_data="results:me"),
+                InlineKeyboardButton(text="🏆 За всё время", callback_data="results:alltime"),
             ],
+            [InlineKeyboardButton(text="👑 Зал славы", callback_data="results:hof")],
             [
                 InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
             ],
@@ -94,6 +103,30 @@ def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("results.btn.back_results", lang), callback_data="results:menu")],
         ]
     )
+
+
+def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if mode != "top10":
+        kb.button(text="📜 Топ 10", callback_data="results:alltime:top10")
+    if mode != "top50":
+        kb.button(text="📜 Топ 50", callback_data="results:alltime:top50")
+    kb.button(text="👑 Зал славы", callback_data="results:hof")
+    kb.button(text=t("results.btn.back_results", lang), callback_data="results:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_alltime_paged_kb(mode: str, page: int, max_page: int, lang: str = "ru") -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if page > 0:
+        kb.button(text="⬅️", callback_data=f"results:{mode}:{page-1}")
+    if page < max_page:
+        kb.button(text="➡️", callback_data=f"results:{mode}:{page+1}")
+    kb.button(text=t("results.btn.back_results", lang), callback_data="results:alltime")
+    buttons = kb.export()
+    kb.adjust(len(buttons) if buttons else 1)
+    return kb.as_markup()
 
 
 def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboardMarkup:
@@ -210,6 +243,125 @@ def _label_for_day(day_key: str) -> str:
     return f"дня {day_key}"
 
 
+# ===== ALL-TIME =====
+
+
+def _fmt_score(v) -> str:
+    try:
+        return f"{float(v):.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(v)
+
+
+def _fmt_date_str(dt_str: str | None) -> str:
+    if not dt_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
+        return dt.strftime("%d.%m.%Y")
+    except Exception:
+        try:
+            return str(dt_str)[:10]
+        except Exception:
+            return ""
+
+
+async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int = 0) -> None:
+    user = await get_user_by_tg_id(int(callback.from_user.id)) if callback.from_user else None
+    lang = _lang(user)
+    # Refresh HoF lazily
+    try:
+        top_items = await get_all_time_top(limit=max(50, limit), min_votes=ALL_TIME_MIN_VOTES)
+        await update_hall_of_fame_from_top(top_items)
+    except Exception:
+        top_items = []
+
+    if not top_items:
+        text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."
+        await _show_text(callback, text, build_back_to_results_kb(lang))
+        return
+
+    if limit == 3:
+        items = top_items[:3]
+        lines = ["🏆 За всё время", ""]
+        for idx, it in enumerate(items, start=1):
+            title = (it.get("title") or "Без названия").strip()
+            author = (it.get("author_name") or it.get("username") or "").strip()
+            score = _fmt_score(it.get("bayes_score"))
+            votes = int(it.get("ratings_count") or 0)
+            pub = _fmt_date_str(it.get("created_at"))
+            line = f"{idx}. \"{title}\" — {author or 'Автор'}\nРейтинг: {score} • v={votes}"
+            if pub:
+                line += f" • {pub}"
+            lines.append(line)
+            lines.append("")
+
+        kb = build_alltime_menu_kb("top3", lang)
+        await _show_text(callback, "\n".join(lines).strip(), kb)
+        return
+
+    # paged top10/50 list
+    items = top_items[:limit]
+    per_page = 10
+    max_page = max((len(items) - 1) // per_page, 0)
+    page = max(0, min(page, max_page))
+    chunk = items[page * per_page : (page + 1) * per_page]
+
+    lines = ["🏆 За всё время", ""]
+    for idx, it in enumerate(chunk, start=page * per_page + 1):
+        title = (it.get("title") or "Без названия").strip()
+        author = (it.get("author_name") or it.get("username") or "").strip()
+        score = _fmt_score(it.get("bayes_score"))
+        votes = int(it.get("ratings_count") or 0)
+        line = f"{idx}. \"{title}\" — {author or 'Автор'} — {score} — v={votes}"
+        lines.append(line)
+
+    kb = build_alltime_paged_kb("alltime:top10" if limit == 10 else "alltime:top50", page, max_page, lang)
+    await _show_text(callback, "\n".join(lines), kb)
+
+
+async def _render_hof(callback: CallbackQuery, page: int = 0) -> None:
+    user = await get_user_by_tg_id(int(callback.from_user.id)) if callback.from_user else None
+    lang = _lang(user)
+    try:
+        await refresh_hof_statuses()
+        items = await get_hof_items(limit=50)
+    except Exception:
+        items = []
+
+    if not items:
+        await _show_text(callback, "👑 Зал славы\n\nПока пусто.", build_back_to_results_kb(lang))
+        return
+
+    per_page = 10
+    max_page = max((len(items) - 1) // per_page, 0)
+    page = max(0, min(page, max_page))
+    chunk = items[page * per_page : (page + 1) * per_page]
+
+    lines = ["👑 Зал славы", ""]
+    for it in chunk:
+        rank = int(it.get("best_rank") or 0)
+        title = (it.get("title_snapshot") or "Без названия").strip()
+        author = (it.get("author_snapshot") or "Автор").strip()
+        score = _fmt_score(it.get("best_score"))
+        votes = int(it.get("votes_at_best") or 0)
+        achieved = _fmt_date_str(it.get("achieved_at"))
+        status = str(it.get("status") or "active")
+        status_line = ""
+        if status == "deleted_by_author":
+            status_line = " (фото удалено автором)"
+        elif status == "hidden":
+            status_line = " (фото скрыто)"
+        elif status == "moderated":
+            status_line = " (модерация)"
+        lines.append(f"🏅 #{rank} — \"{title}\" — {author}{status_line}")
+        lines.append(f"Рейтинг: {score} • Оценок: {votes} • Дата: {achieved}")
+        lines.append("")
+
+    kb = build_alltime_paged_kb("hof", page, max_page, lang)
+    await _show_text(callback, "\n".join(lines).strip(), kb)
+
+
 async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, limit: int = 10) -> list[dict]:
     items = await get_results_items(
         period=PERIOD_DAY,
@@ -258,6 +410,8 @@ async def results_menu(callback: CallbackQuery):
         "🏁 <b>Итоги</b>\n\n"
         "Доступны:\n"
         "• 📅 Итоги дня\n"
+        "• 🏆 За всё время\n"
+        "• 👑 Зал славы\n"
         "• 👤 Мои итоги (soon)\n\n"
         "Остальные разделы подключим позже."
     )
@@ -277,6 +431,52 @@ async def results_menu(callback: CallbackQuery):
     except Exception:
         pass
     await callback.answer()
+
+
+@router.callback_query(F.data == "results:alltime")
+async def results_alltime(callback: CallbackQuery):
+    await _render_alltime_top(callback, limit=3)
+
+
+@router.callback_query(F.data.startswith("results:alltime:top10"))
+async def results_alltime_top10(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    page = 0
+    if len(parts) == 4:
+        try:
+            page = int(parts[3])
+        except Exception:
+            page = 0
+    await _render_alltime_top(callback, limit=10, page=page)
+
+
+@router.callback_query(F.data.startswith("results:alltime:top50"))
+async def results_alltime_top50(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    page = 0
+    if len(parts) == 4:
+        try:
+            page = int(parts[3])
+        except Exception:
+            page = 0
+    await _render_alltime_top(callback, limit=50, page=page)
+
+
+@router.callback_query(F.data == "results:hof")
+async def results_hof(callback: CallbackQuery):
+    await _render_hof(callback, page=0)
+
+
+@router.callback_query(F.data.startswith("results:hof:"))
+async def results_hof_nav(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    page = 0
+    if len(parts) == 3:
+        try:
+            page = int(parts[2])
+        except Exception:
+            page = 0
+    await _render_hof(callback, page=page)
 
 
 # =========================
