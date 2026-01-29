@@ -349,7 +349,7 @@ async def admin_broadcast_send(callback: CallbackQuery, state: FSMContext):
     tg_ids = list({uid for uid in tg_ids if uid})
 
     if target == "all":
-        header = "📢 <b>Обновление GlowShot</b>"
+        header = ""
     elif target == "premium":
         header = "💎 <b>Сообщение для GlowShot Premium</b>"
     elif target == "test":
@@ -357,7 +357,7 @@ async def admin_broadcast_send(callback: CallbackQuery, state: FSMContext):
     else:
         header = "👥 <b>Сообщение для команды GlowShot</b>"
 
-    send_text = f"{header}\n\n{text_body}"
+    send_text = text_body if not header else f"{header}\n\n{text_body}"
 
     notif_kb = InlineKeyboardBuilder()
     notif_kb.button(text="✅ Просмотрено", callback_data="admin:notif_read")
