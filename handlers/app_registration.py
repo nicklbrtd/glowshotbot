@@ -5,6 +5,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from database import get_user_by_tg_id
 
 router = Router()
+router.priority = 100
 
 
 @router.message(CommandStart(deep_link=True))
