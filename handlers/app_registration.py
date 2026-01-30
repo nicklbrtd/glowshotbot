@@ -1,6 +1,6 @@
 from aiogram import Router
-from aiogram.filters import CommandStart
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CommandObject
+from aiogram.filters import CommandStart, CommandObject
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 router = Router()
 
