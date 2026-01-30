@@ -14,11 +14,9 @@ async def handle_app_start(message: Message, command: CommandObject):
     args_raw = (command.args or "").strip()
     args = args_raw.lower()
     if args.startswith("ios_app"):
-        deep_link = "glowshot://registered"
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Открыть GlowShot", url="https://glowshot.app/ios")],
-                [InlineKeyboardButton(text="Вернуться в приложение", url=deep_link)],
             ]
         )
 
@@ -57,12 +55,9 @@ async def handle_app_start(message: Message, command: CommandObject):
         if bio:
             params["bio"] = bio
 
-        deep_link = "glowshot://registered?" + urlencode(params)
-
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Открыть GlowShot", url="https://glowshot.app/ios")],
-                [InlineKeyboardButton(text="Вернуться в приложение", url=deep_link)],
             ]
         )
 
