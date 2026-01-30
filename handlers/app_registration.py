@@ -10,7 +10,8 @@ router.priority = 100
 
 @router.message(CommandStart(deep_link=True))
 async def handle_app_start(message: Message, command: CommandObject):
-    args = (command.args or "").strip().lower()
+    args_raw = (command.args or "").strip()
+    args = args_raw.lower()
     if args.startswith("ios_app"):
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -52,3 +53,7 @@ async def handle_app_start(message: Message, command: CommandObject):
         )
 
         await message.answer("\n".join(lines), reply_markup=kb, disable_web_page_preview=True)
+
+    else:
+        # Let other routers handle /start without relevant payload
+        return
