@@ -3,7 +3,7 @@ import io
 import os
 from typing import Tuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont # type: ignore[import]
 
 
 _ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"

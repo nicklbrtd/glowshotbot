@@ -1976,6 +1976,20 @@ async def toggle_user_allow_ratings_by_tg_id(tg_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def set_all_active_photos_ratings_enabled(user_id: int) -> None:
+    """Принудительно включить оценки на всех активных фотографиях пользователя."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE photos SET ratings_enabled=1 WHERE user_id=$1 AND is_deleted=0",
+            int(user_id),
+        )
+
+
+# backward-compatible alias
+set_all_user_photos_ratings_enabled = set_all_active_photos_ratings_enabled
+
+
 # -------------------- ads settings --------------------
 
 async def get_ads_enabled_by_tg_id(tg_id: int) -> bool | None:
@@ -3121,14 +3135,8 @@ async def create_today_photo(
     async with p.acquire() as conn:
         enabled = ratings_enabled
         if enabled is None:
-            try:
-                pref = await conn.fetchval(
-                    "SELECT allow_ratings FROM users WHERE id=$1",
-                    int(user_id),
-                )
-                enabled = bool(pref) if pref is not None else True
-            except Exception:
-                enabled = True
+            # По умолчанию оценки включены, глобальный флаг больше не используем
+            enabled = True
 
         public_id = file_id_public or file_id
         orig_id = file_id_original or file_id
