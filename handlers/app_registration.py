@@ -3,6 +3,7 @@ from aiogram.filters import CommandStart, CommandObject
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import get_user_by_tg_id
+from urllib.parse import urlencode
 
 router = Router()
 router.priority = 100
@@ -13,9 +14,11 @@ async def handle_app_start(message: Message, command: CommandObject):
     args_raw = (command.args or "").strip()
     args = args_raw.lower()
     if args.startswith("ios_app"):
+        deep_link = "glowshot://registered"
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Открыть GlowShot", url="https://glowshot.app/ios")],
+                [InlineKeyboardButton(text="Вернуться в приложение", url=deep_link)],
             ]
         )
 
@@ -45,9 +48,21 @@ async def handle_app_start(message: Message, command: CommandObject):
             f"Описание: {bio if bio else '—'}",
         ]
 
+        params = {
+            "name": name,
+            "gender": gender,
+        }
+        if age is not None:
+            params["age"] = str(age)
+        if bio:
+            params["bio"] = bio
+
+        deep_link = "glowshot://registered?" + urlencode(params)
+
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Открыть GlowShot", url="https://glowshot.app/ios")],
+                [InlineKeyboardButton(text="Вернуться в приложение", url=deep_link)],
             ]
         )
 
