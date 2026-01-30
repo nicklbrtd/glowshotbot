@@ -16,7 +16,6 @@ async def handle_app_start(message: Message, command: CommandObject):
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Открыть GlowShot", url="https://glowshot.app/ios")],
-                [InlineKeyboardButton(text="Вернуться в приложение", url="glowshot://registered")],
             ]
         )
 
@@ -48,7 +47,7 @@ async def handle_app_start(message: Message, command: CommandObject):
 
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="Вернуться в приложение", url="glowshot://registered")],
+                [InlineKeyboardButton(text="Открыть GlowShot", url="https://glowshot.app/ios")],
             ]
         )
 
