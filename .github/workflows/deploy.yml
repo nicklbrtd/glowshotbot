@@ -33,14 +33,16 @@ jobs:
           /home/nick/glowshotbot/venv/bin/python -m pip install --upgrade pip
           /home/nick/glowshotbot/venv/bin/pip install -r requirements.txt
 
+          # Важно: runner работает без интерактивного TTY, поэтому sudo должен быть без пароля.
+          # `-n` заставит sudo НЕ спрашивать пароль и упасть сразу, если прав нет.
           echo "➡️ Перезапускаю сервисы..."
-          sudo systemctl restart glowshot-bot
-          sudo systemctl restart glowshot-support
-          sudo systemctl restart tbank-webhook
+          sudo -n /bin/systemctl restart glowshot-bot
+          sudo -n /bin/systemctl restart glowshot-support
+          sudo -n /bin/systemctl restart tbank-webhook
 
           echo "➡️ Проверяю статус..."
-          sudo systemctl --no-pager --full status glowshot-bot || true
-          sudo systemctl --no-pager --full status glowshot-support || true
-          sudo systemctl --no-pager --full status tbank-webhook || true
+          sudo -n /bin/systemctl --no-pager --full status glowshot-bot || true
+          sudo -n /bin/systemctl --no-pager --full status glowshot-support || true
+          sudo -n /bin/systemctl --no-pager --full status tbank-webhook || true
 
           echo "🎉 Деплой успешно завершён!"
