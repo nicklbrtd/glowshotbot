@@ -616,39 +616,51 @@ def build_rate_keyboard(
     link_button: tuple[str, str] | None = None,
     lang: str = "ru",
 ) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
+    rows: list[list[InlineKeyboardButton]] = []
 
     if link_button:
         link_text, link_url = link_button
-        kb.row(InlineKeyboardButton(text=link_text, url=link_url))
+        rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
 
-    # 1..10 (две строки по 5)
-    for i in range(1, 11):
-        kb.button(text=str(i), callback_data=f"rate:score:{photo_id}:{i}")
-    kb.adjust(5, 5)
-
-    # 💬 + 🚫
-    kb.row(
-        InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
-        InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
+    rows.append(
+        [
+            InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}")
+            for i in range(1, 6)
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}")
+            for i in range(6, 11)
+        ]
     )
 
-    # Супер/ачивка — только при раскрытии и для премиум, отдельной строкой
+    rows.append(
+        [
+            InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
+            InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
+        ]
+    )
+
     if show_details and is_premium:
-        kb.row(
-            InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
-            InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}"),
+        rows.append(
+            [
+                InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
+                InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}"),
+            ]
         )
 
-    # «В меню» слева, «Еще/Скрыть» справа
-    kb.row(
-        InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
-        InlineKeyboardButton(
-            text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
-            callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
-        ),
+    rows.append(
+        [
+            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+            InlineKeyboardButton(
+                text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
+                callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
+            ),
+        ]
     )
-    return kb.as_markup()
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_view_only_keyboard(
@@ -659,26 +671,33 @@ def build_view_only_keyboard(
     link_button: tuple[str, str] | None = None,
     lang: str = "ru",
 ) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
+    rows: list[list[InlineKeyboardButton]] = []
+
     if link_button:
         link_text, link_url = link_button
-        kb.row(InlineKeyboardButton(text=link_text, url=link_url))
-    kb.row(
-        InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
-        InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}"),
+        rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
+
+    rows.append(
+        [
+            InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
+            InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}"),
+        ]
     )
+
     if show_details and is_premium:
-        kb.row(
-            InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}"),
-        )
-    kb.row(
-        InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
-        InlineKeyboardButton(
-            text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
-            callback_data=f"rate:more:{photo_id}:{0 if show_details else 1}",
-        ),
+        rows.append([InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}")])
+
+    rows.append(
+        [
+            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+            InlineKeyboardButton(
+                text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
+                callback_data=f"rate:more:{photo_id}:{0 if show_details else 1}",
+            ),
+        ]
     )
-    return kb.as_markup()
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_comment_notification_keyboard() -> InlineKeyboardMarkup:
@@ -799,7 +818,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             pass
 
     premium_badge = "💎 " if is_author_premium else ""
-    title_mono = f"<b><code>{escape(title)}</code></b>"
+    title_mono = f"«<b><code>{escape(title)}</code></b>»"
     lines.append(f"{premium_badge}{title_mono}")
 
     tag_badge = _tag_badge(str(photo.get("tag") or ""))
