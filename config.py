@@ -28,6 +28,16 @@ if _MODERATION_CHAT_ID_RAW:
     except ValueError:
         MODERATION_CHAT_ID = None
 
+# ===== Author verification submissions =====
+# Optional: separate group chat for author verification requests. If empty, bot falls back to MODERATION_CHAT_ID.
+_AUTHOR_APPLICATIONS_CHAT_ID_RAW = (os.getenv("AUTHOR_APPLICATIONS_CHAT_ID") or "").strip()
+AUTHOR_APPLICATIONS_CHAT_ID = None
+if _AUTHOR_APPLICATIONS_CHAT_ID_RAW:
+    try:
+        AUTHOR_APPLICATIONS_CHAT_ID = int(_AUTHOR_APPLICATIONS_CHAT_ID_RAW)
+    except ValueError:
+        AUTHOR_APPLICATIONS_CHAT_ID = None
+
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)
 MANUAL_RUB_ENABLED = os.getenv("MANUAL_RUB_ENABLED", "1").strip().lower() in ("1", "true", "yes")

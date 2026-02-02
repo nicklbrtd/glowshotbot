@@ -5,7 +5,7 @@ import hashlib
 from utils.i18n import t
 from datetime import datetime, timedelta
 from aiogram import Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, LinkPreviewOptions
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
@@ -323,8 +323,25 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
 
     return "\n".join(lines)
 
+
+@router.message(Command("chatid"))
+async def cmd_chatid(message: Message):
+    chat_type = getattr(message.chat, "type", "unknown")
+    await message.answer(
+        f"chat_id: <code>{message.chat.id}</code>\nтип: <code>{chat_type}</code>",
+        parse_mode="HTML",
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    # Запрещаем /start в группах, чтобы не спамить меню
+    if getattr(message.chat, "type", None) in ("group", "supergroup"):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
     try:
         await _cmd_start_inner(message, state)
     except Exception as e:

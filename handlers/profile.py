@@ -13,6 +13,7 @@ from handlers.streak import (
     toggle_profile_streak_notify_and_status,
 )
 from handlers.premium import _render_premium_menu
+from config import AUTHOR_APPLICATIONS_CHAT_ID, MODERATION_CHAT_ID
 
 from database import (
     get_user_by_tg_id,
@@ -113,6 +114,9 @@ class ProfileEditStates(StatesGroup):
     waiting_new_city = State()
     # legacy: country is derived from city, but keep state to avoid crashes from old callbacks
     waiting_new_country = State()
+
+class AuthorApplyStates(StatesGroup):
+    waiting_photos = State()
 
 
 
@@ -609,6 +613,7 @@ async def build_profile_view(user: dict):
     text = "\n".join(text_lines)
 
     kb = InlineKeyboardBuilder()
+    kb.button(text=t("profile.btn.be_author", lang), callback_data="profile:be_author")
     kb.button(text=t("profile.btn.awards", lang), callback_data="profile:awards")
     kb.button(text=t("profile.btn.edit", lang), callback_data="profile:edit")
     kb.button(text=t("profile.btn.settings", lang), callback_data="profile:settings")
@@ -617,7 +622,7 @@ async def build_profile_view(user: dict):
     premium_button_text = t("profile.btn.premium.my", lang) if premium_active else "💎 Оформить"
     kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
     kb.button(text=premium_button_text, callback_data="profile:premium")
-    kb.adjust(2, 2, 2)
+    kb.adjust(1, 2, 2, 2)
     return text, kb.as_markup()
 
 
@@ -644,6 +649,163 @@ async def profile_menu(callback: CallbackQuery):
 
     await callback.answer()
 
+
+def _author_target_chat_id() -> int | None:
+    """
+    Returns chat id where author applications should be sent.
+    Prefers AUTHOR_APPLICATIONS_CHAT_ID, falls back to MODERATION_CHAT_ID.
+    """
+    return AUTHOR_APPLICATIONS_CHAT_ID or MODERATION_CHAT_ID
+
+
+def _author_apply_kb(lang: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t("profile.author.apply.submit_btn", lang), callback_data="profile:author:submit")
+    kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="profile:author:cancel")
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+@router.callback_query(F.data == "profile:be_author")
+async def profile_be_author(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
+        return
+
+    lang = _get_lang(user)
+    await state.set_state(AuthorApplyStates.waiting_photos)
+    await state.update_data(author_apply_photos=[])
+
+    text = (
+        f"{t('profile.author.apply.title', lang)}\n\n"
+        f"{t('profile.author.apply.hint', lang)}"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=_author_apply_kb(lang),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "profile:author:cancel")
+async def profile_author_cancel(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    await state.clear()
+    await callback.message.edit_text(
+        t("profile.author.apply.cancelled", lang),
+        reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AuthorApplyStates.waiting_photos, F.photo)
+async def profile_author_collect_photo(message: Message, state: FSMContext):
+    user = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(user)
+    data = await state.get_data()
+    photos: list[str] = list(data.get("author_apply_photos") or [])
+
+    if len(photos) >= 10:
+        await message.reply(t("profile.author.apply.too_many", lang), parse_mode="HTML")
+        return
+
+    file_id = message.photo[-1].file_id
+    if file_id not in photos:
+        photos.append(file_id)
+        await state.update_data(author_apply_photos=photos)
+
+    await message.reply(
+        t("profile.author.apply.count", lang, count=len(photos)),
+        parse_mode="HTML",
+        reply_markup=_author_apply_kb(lang),
+    )
+
+
+@router.message(AuthorApplyStates.waiting_photos)
+async def profile_author_waiting_other(message: Message, state: FSMContext):
+    # Gently remind to send photos only
+    user = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(user)
+    await message.reply(
+        t("profile.author.apply.hint", lang),
+        parse_mode="HTML",
+        reply_markup=_author_apply_kb(lang),
+    )
+
+
+@router.callback_query(F.data == "profile:author:submit")
+async def profile_author_submit(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    data = await state.get_data()
+    photos: list[str] = list(data.get("author_apply_photos") or [])
+
+    if not photos or len(photos) < 5:
+        await callback.answer(t("profile.author.apply.need_more", lang, count=len(photos or [])), show_alert=True)
+        return
+    if len(photos) > 10:
+        await callback.answer(t("profile.author.apply.too_many", lang), show_alert=True)
+        return
+
+    target_chat_id = _author_target_chat_id()
+    if target_chat_id is None:
+        await callback.answer(t("profile.author.apply.no_chat", lang), show_alert=True)
+        return
+
+    # Build summary
+    name = (user.get("name") or user.get("display_name") or "—") if user else "—"
+    username = user.get("username") if user else None
+    tg_id = callback.from_user.id
+    author_code = "—"
+    try:
+        author_code = await ensure_user_author_code(int(tg_id))
+    except Exception:
+        author_code = "—"
+
+    summary_lines = [
+        "🧑‍🎨 <b>Новая заявка на авторство</b>",
+        f"Имя: {html.escape(str(name), quote=False)}",
+        f"Username: @{username}" if username else "Username: —",
+        f"TG ID: <code>{tg_id}</code>",
+        f"Код автора: <code>{html.escape(str(author_code), quote=False)}</code>",
+        f"Фото: {len(photos)} шт.",
+    ]
+
+    try:
+        await callback.message.bot.send_message(
+            chat_id=target_chat_id,
+            text="\n".join(summary_lines),
+            parse_mode="HTML",
+        )
+
+        media = []
+        for idx, fid in enumerate(photos):
+            if idx == 0:
+                media.append(InputMediaPhoto(media=fid, caption="Фото для подтверждения авторства"))
+            else:
+                media.append(InputMediaPhoto(media=fid))
+
+        await callback.message.bot.send_media_group(chat_id=target_chat_id, media=media)
+    except Exception as e:
+        # Notify user that sending failed
+        await callback.message.edit_text(
+            "Не удалось отправить заявку, попробуй позже или напиши в поддержку.",
+            reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+        )
+        await callback.answer()
+        raise e
+
+    await state.clear()
+    await callback.message.edit_text(
+        t("profile.author.apply.sent", lang),
+        reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+        parse_mode="HTML",
+    )
+    await callback.answer("Отправили модераторам")
 
 @router.callback_query(F.data == "profile:premium_toggle_admin")
 async def profile_premium_toggle_admin(callback: CallbackQuery):
