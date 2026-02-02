@@ -929,14 +929,7 @@ async def _show_my_photo_section(
         lang=lang,
     )
 
-    # 1. Удаляем старое служебное сообщение, если оно ещё существует
-    try:
-        await service_message.delete()
-    except Exception:
-        # Если удаление не удалось (например, сообщение уже удалено) — просто игнорируем
-        pass
-
-    # 2. Отправляем новое сообщение с фото, подписью и кнопками
+    # 1. Отправляем новое сообщение с фото, подписью и кнопками
     sent_photo = await service_message.bot.send_photo(
         chat_id=chat_id,
         photo=_photo_public_id(photo),
@@ -945,8 +938,15 @@ async def _show_my_photo_section(
         disable_notification=True,
     )
 
-    # 3. Сохраняем id сообщения с фотографией и id самой фотографии в FSM
+    # 2. Сохраняем id сообщения с фотографией и id самой фотографии в FSM
     await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
+
+    # 3. После успешной отправки удаляем старое служебное сообщение (меню/шаг мастера)
+    try:
+        await service_message.delete()
+    except Exception:
+        # Если удаление не удалось (например, сообщение уже удалено) — просто игнорируем
+        pass
 
 
 async def _edit_or_replace_my_photo_message(

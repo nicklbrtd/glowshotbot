@@ -2214,7 +2214,7 @@ async def rate_start(callback: CallbackQuery) -> None:
     await rate_root(callback, replace_message=True)
 
 @router.callback_query(F.data == "menu:rate")
-async def rate_root(callback: CallbackQuery, replace_message: bool = False) -> None:
+async def rate_root(callback: CallbackQuery, replace_message: bool = True) -> None:
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
