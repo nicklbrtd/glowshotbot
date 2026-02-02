@@ -995,6 +995,7 @@ async def ensure_schema() -> None:
               file_id TEXT NOT NULL,
               file_id_original TEXT,
               file_id_public TEXT,
+              file_id_support TEXT,
               title TEXT,
               description TEXT,
               category TEXT DEFAULT 'photo',
@@ -1356,6 +1357,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS ratings_enabled INTEGER NOT NULL DEFAULT 1;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_original TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_public TEXT;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_support TEXT;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -3768,6 +3770,18 @@ async def set_photo_moderation_status(photo_id: int, status: str) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
         await conn.execute("UPDATE photos SET moderation_status=$1 WHERE id=$2", str(status), int(photo_id))
+
+
+async def set_photo_file_id_support(photo_id: int, file_id_support: str) -> None:
+    if not file_id_support:
+        return
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE photos SET file_id_support=$1 WHERE id=$2",
+            str(file_id_support),
+            int(photo_id),
+        )
 
 
 async def add_moderator_review(moderator_user_id: int, photo_id: int, action: str, note: str | None = None) -> None:

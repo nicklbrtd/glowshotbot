@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InputMediaPhoto, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State, StatesGroup
@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from datetime import timedelta, datetime
 from utils.time import get_moscow_now
 from html import escape
+import io
 
 from database import (
     get_user_by_tg_id,
@@ -31,10 +32,85 @@ from database import (
     get_user_by_username,
     hide_active_photos_for_user,
     restore_photos_from_status,
+    set_photo_file_id_support,
 )
+from config import BOT_TOKEN, SUPPORT_BOT_TOKEN
 
 # Роутер раздела модерации
 router = Router()
+
+_main_media_bot: Bot | None = None
+
+
+def _is_support_bot(bot: Bot) -> bool:
+    try:
+        return bool(SUPPORT_BOT_TOKEN) and getattr(bot, "token", None) == SUPPORT_BOT_TOKEN
+    except Exception:
+        return False
+
+
+async def _get_main_media_bot() -> Bot | None:
+    global _main_media_bot
+    if not BOT_TOKEN:
+        return None
+    if _main_media_bot is None:
+        _main_media_bot = Bot(BOT_TOKEN)
+    return _main_media_bot
+
+
+async def _download_photo_bytes_from_main_bot(file_id: str) -> bytes | None:
+    main_bot = await _get_main_media_bot()
+    if main_bot is None:
+        return None
+    try:
+        tg_file = await main_bot.get_file(file_id)
+        buff = io.BytesIO()
+        await main_bot.download_file(tg_file.file_path, destination=buff)
+        return buff.getvalue()
+    except Exception:
+        return None
+
+
+async def _send_photo_with_fallback(
+    *,
+    bot: Bot,
+    chat_id: int,
+    file_id: str,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup,
+    parse_mode: str = "HTML",
+) -> tuple[bool, str | None]:
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=file_id,
+            caption=caption,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_notification=True,
+        )
+        return True, None
+    except Exception:
+        pass
+
+    if _is_support_bot(bot):
+        data = await _download_photo_bytes_from_main_bot(file_id)
+        if data:
+            try:
+                sent = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=BufferedInputFile(data, filename="photo.jpg"),
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                    disable_notification=True,
+                )
+                support_file_id = sent.photo[-1].file_id if sent and sent.photo else None
+                return True, support_file_id
+            except Exception:
+                pass
+
+    return False, None
 
 
 class ModeratorStates(StatesGroup):
@@ -433,15 +509,28 @@ async def show_next_photo_for_moderation(callback: CallbackQuery) -> None:
     )
 
     # Отправляем карточку с фото для модерации
-    try:
-        await callback.message.bot.send_photo(
+    is_support = _is_support_bot(callback.message.bot)
+    file_id = (
+        photo.get("file_id_support")
+        if is_support and photo.get("file_id_support")
+        else (photo.get("file_id_public") or photo.get("file_id"))
+    )
+    sent = False
+    new_support_id = None
+    if file_id:
+        sent, new_support_id = await _send_photo_with_fallback(
+            bot=callback.message.bot,
             chat_id=chat_id,
-            photo=photo["file_id"],
+            file_id=str(file_id),
             caption=caption,
             reply_markup=build_moderation_photo_keyboard(photo["id"], source="queue"),
         )
-    except TelegramBadRequest:
-        # На случай, если file_id по какой-то причине не валиден
+    if new_support_id:
+        try:
+            await set_photo_file_id_support(int(photo["id"]), str(new_support_id))
+        except Exception:
+            pass
+    if not sent:
         await callback.message.bot.send_message(
             chat_id=chat_id,
             text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
@@ -485,47 +574,52 @@ async def show_next_photo_for_self_check(callback: CallbackQuery) -> None:
     chat_id = callback.message.chat.id
     caption = await _build_self_check_caption(photo)
 
+    is_support = _is_support_bot(callback.message.bot)
+    file_id = (
+        photo.get("file_id_support")
+        if is_support and photo.get("file_id_support")
+        else (photo.get("file_id_public") or photo.get("file_id"))
+    )
     try:
-        if callback.message.photo:
+        if callback.message.photo and file_id:
             await callback.message.edit_media(
-                media=InputMediaPhoto(media=photo["file_id"], caption=caption, parse_mode="HTML"),
+                media=InputMediaPhoto(media=str(file_id), caption=caption, parse_mode="HTML"),
                 reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
             )
-        else:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.bot.send_photo(
-                chat_id=chat_id,
-                photo=photo["file_id"],
-                caption=caption,
-                reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
-                parse_mode="HTML",
-            )
+            return
     except Exception:
+        pass
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    sent = False
+    new_support_id = None
+    if file_id:
+        sent, new_support_id = await _send_photo_with_fallback(
+            bot=callback.message.bot,
+            chat_id=chat_id,
+            file_id=str(file_id),
+            caption=caption,
+            reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
+        )
+    if new_support_id:
         try:
-            await callback.message.delete()
+            await set_photo_file_id_support(int(photo["id"]), str(new_support_id))
         except Exception:
             pass
+    if not sent:
         try:
-            await callback.message.bot.send_photo(
+            await callback.message.bot.send_message(
                 chat_id=chat_id,
-                photo=photo["file_id"],
-                caption=caption,
+                text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
                 reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
                 parse_mode="HTML",
             )
         except Exception:
-            try:
-                await callback.message.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
-                    reply_markup=build_moderation_photo_keyboard(photo["id"], source="self"),
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
+            pass
 
 
 async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
@@ -557,14 +651,28 @@ async def show_next_photo_for_deep_check(callback: CallbackQuery) -> None:
         show_stats=True,
     )
 
-    try:
-        await callback.message.bot.send_photo(
+    is_support = _is_support_bot(callback.message.bot)
+    file_id = (
+        photo.get("file_id_support")
+        if is_support and photo.get("file_id_support")
+        else (photo.get("file_id_public") or photo.get("file_id"))
+    )
+    sent = False
+    new_support_id = None
+    if file_id:
+        sent, new_support_id = await _send_photo_with_fallback(
+            bot=callback.message.bot,
             chat_id=chat_id,
-            photo=photo["file_id"],
+            file_id=str(file_id),
             caption=caption,
             reply_markup=build_moderation_photo_keyboard(photo["id"], source="deep"),
         )
-    except TelegramBadRequest:
+    if new_support_id:
+        try:
+            await set_photo_file_id_support(int(photo["id"]), str(new_support_id))
+        except Exception:
+            pass
+    if not sent:
         await callback.message.bot.send_message(
             chat_id=chat_id,
             text=caption + "\n\n⚠️ Не удалось загрузить превью фотографии.",
