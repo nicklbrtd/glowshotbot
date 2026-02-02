@@ -102,6 +102,7 @@ async def recalc_day_global(*, day_key: str, limit: int = 10) -> int:
 
     for r in rows:
         ratings_count = int(r.get("ratings_count") or 0)
+        ratings_weighted_count = float(r.get("ratings_weighted_count") or ratings_count)
         comments_count = int(r.get("comments_count") or 0)
         pending_reports = int(r.get("pending_reports") or 0)
         invited = int(r.get("invited_qualified") or 0)
@@ -124,7 +125,7 @@ async def recalc_day_global(*, day_key: str, limit: int = 10) -> int:
         sum_values = float(r.get("sum_values") or 0.0)
         bayes = bayes_score(
             sum_values=sum_values,
-            n=ratings_count,
+            n=ratings_weighted_count,
             global_mean=float(global_mean),
             prior=prior,
         )
@@ -132,7 +133,7 @@ async def recalc_day_global(*, day_key: str, limit: int = 10) -> int:
             continue
 
         score = float(bayes)
-        score += rating_weight * math.log1p(max(ratings_count, 0))
+        score += rating_weight * math.log1p(max(ratings_weighted_count, 0.0))
         score += comments_weight * math.log1p(max(comments_count, 0))
         if pending_reports:
             score -= reports_penalty * pending_reports

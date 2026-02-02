@@ -1,18 +1,41 @@
 from __future__ import annotations
 
+import os
 import asyncpg
+
+
+def _link_rating_weight() -> float:
+    try:
+        w = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
+    except Exception:
+        w = 0.5
+    if w <= 0:
+        return 0.0
+    return w
 
 
 async def get_global_mean_and_count(conn: asyncpg.Connection) -> tuple[float, int]:
     """Global mean for all ratings in DB."""
+    try:
+        w = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
+    except Exception:
+        w = 0.5
     row = await conn.fetchrow(
-        "SELECT AVG(value)::float AS mean, COUNT(*)::int AS cnt FROM ratings"
+        """
+        SELECT
+            COALESCE(SUM(value * CASE WHEN source='link' THEN $1 ELSE 1 END), 0)::float AS sum_w,
+            COALESCE(SUM(CASE WHEN source='link' THEN $1 ELSE 1 END), 0)::float AS cnt_w,
+            COUNT(*)::int AS cnt_raw
+        FROM ratings
+        """,
+        float(w),
     )
-    cnt = int(row["cnt"] or 0) if row else 0
-    mean_raw = row["mean"] if row else None
+    cnt = int(row["cnt_raw"] or 0) if row else 0
+    sum_w = float(row["sum_w"]) if row and row["sum_w"] is not None else 0.0
+    cnt_w = float(row["cnt_w"]) if row and row["cnt_w"] is not None else 0.0
 
     # Neutral default if bot is new / no ratings
-    mean = float(mean_raw) if mean_raw is not None else 7.0
+    mean = (sum_w / cnt_w) if cnt_w > 0 else 7.0
     return mean, cnt
 
 
@@ -21,6 +44,7 @@ async def get_day_photo_rows_global(conn: asyncpg.Connection, *, day_key: str) -
 
     Включает: оценки, комменты, количество приглашённых друзей, pending жалобы, last_win_date.
     """
+    w = _link_rating_weight()
     rows = await conn.fetch(
         """
         SELECT
@@ -35,8 +59,14 @@ async def get_day_photo_rows_global(conn: asyncpg.Connection, *, day_key: str) -
 
             COUNT(r.id)::int AS ratings_count,
             COUNT(DISTINCT r.user_id)::int AS rated_users,
-            COALESCE(SUM(r.value), 0)::float AS sum_values,
-            AVG(r.value)::float AS avg_rating,
+            COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS sum_values,
+            COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_weighted_count,
+            CASE
+                WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0) > 0 THEN
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float
+                    / COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)
+                ELSE NULL
+            END AS avg_rating,
 
             p.created_at AS created_at,
 
@@ -53,12 +83,14 @@ async def get_day_photo_rows_global(conn: asyncpg.Connection, *, day_key: str) -
         GROUP BY p.id, p.user_id, p.file_id, p.title, u.name, u.username, p.created_at, p.last_win_date
         """,
         str(day_key),
+        float(w),
     )
     return [dict(r) for r in rows]
 
 
 async def get_day_photo_rows_user(conn: asyncpg.Connection, *, day_key: str, user_id: int) -> list[dict]:
     """Агрегаты по фото конкретного пользователя за день (для чеклиста допуска)."""
+    w = _link_rating_weight()
     rows = await conn.fetch(
         """
         SELECT
@@ -73,8 +105,14 @@ async def get_day_photo_rows_user(conn: asyncpg.Connection, *, day_key: str, use
 
             COUNT(r.id)::int AS ratings_count,
             COUNT(DISTINCT r.user_id)::int AS rated_users,
-            COALESCE(SUM(r.value), 0)::float AS sum_values,
-            AVG(r.value)::float AS avg_rating,
+            COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float AS sum_values,
+            COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float AS ratings_weighted_count,
+            CASE
+                WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0) > 0 THEN
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float
+                    / COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)
+                ELSE NULL
+            END AS avg_rating,
 
             p.created_at AS created_at,
 
@@ -94,6 +132,7 @@ async def get_day_photo_rows_user(conn: asyncpg.Connection, *, day_key: str, use
         """,
         str(day_key),
         int(user_id),
+        float(w),
     )
     return [dict(r) for r in rows]
 
@@ -131,6 +170,7 @@ async def count_active_authors_country(conn: asyncpg.Connection, *, country: str
 
 
 async def get_day_photo_rows_city(conn: asyncpg.Connection, *, day_key: str, city: str) -> list[dict]:
+    w = _link_rating_weight()
     rows = await conn.fetch(
         """
         SELECT
@@ -143,8 +183,14 @@ async def get_day_photo_rows_city(conn: asyncpg.Connection, *, day_key: str, cit
 
             COUNT(r.id)::int AS ratings_count,
             COUNT(DISTINCT r.user_id)::int AS rated_users,
-            COALESCE(SUM(r.value), 0)::float AS sum_values,
-            AVG(r.value)::float AS avg_rating,
+            COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float AS sum_values,
+            COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float AS ratings_weighted_count,
+            CASE
+                WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0) > 0 THEN
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float
+                    / COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)
+                ELSE NULL
+            END AS avg_rating,
 
             p.created_at AS created_at,
 
@@ -162,11 +208,13 @@ async def get_day_photo_rows_city(conn: asyncpg.Connection, *, day_key: str, cit
         """,
         str(day_key),
         str(city),
+        float(w),
     )
     return [dict(r) for r in rows]
 
 
 async def get_day_photo_rows_country(conn: asyncpg.Connection, *, day_key: str, country: str) -> list[dict]:
+    w = _link_rating_weight()
     rows = await conn.fetch(
         """
         SELECT
@@ -179,8 +227,14 @@ async def get_day_photo_rows_country(conn: asyncpg.Connection, *, day_key: str, 
 
             COUNT(r.id)::int AS ratings_count,
             COUNT(DISTINCT r.user_id)::int AS rated_users,
-            COALESCE(SUM(r.value), 0)::float AS sum_values,
-            AVG(r.value)::float AS avg_rating,
+            COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float AS sum_values,
+            COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float AS ratings_weighted_count,
+            CASE
+                WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0) > 0 THEN
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)::float
+                    / COALESCE(SUM(CASE WHEN r.source='link' THEN $3 ELSE 1 END), 0)
+                ELSE NULL
+            END AS avg_rating,
 
             p.created_at AS created_at,
 
@@ -198,5 +252,6 @@ async def get_day_photo_rows_country(conn: asyncpg.Connection, *, day_key: str, 
         """,
         str(day_key),
         str(country),
+        float(w),
     )
     return [dict(r) for r in rows]

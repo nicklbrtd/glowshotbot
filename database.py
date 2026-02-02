@@ -20,6 +20,17 @@ pool: asyncpg.Pool | None = None
 # Stored as (ts, mean, count)
 _GLOBAL_RATING_CACHE: tuple[float, float, int] | None = None
 _GLOBAL_RATING_TTL_SECONDS = 300
+LINK_RATING_WEIGHT = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
+
+
+def _link_rating_weight() -> float:
+    try:
+        w = float(LINK_RATING_WEIGHT)
+    except Exception:
+        w = 0.5
+    if w <= 0:
+        return 0.0
+    return w
 
 
 def _bayes_prior_weight() -> int:
@@ -42,21 +53,32 @@ async def _get_global_rating_mean(conn: asyncpg.Connection) -> tuple[float, int]
         if (now - ts) < _GLOBAL_RATING_TTL_SECONDS:
             return float(mean), int(cnt)
 
-    row = await conn.fetchrow("SELECT AVG(value)::float AS mean, COUNT(*)::int AS cnt FROM ratings")
-    cnt = int(row["cnt"]) if row and row["cnt"] is not None else 0
-    mean_raw = row["mean"] if row else None
+    w = _link_rating_weight()
+    row = await conn.fetchrow(
+        """
+        SELECT
+            COALESCE(SUM(value * CASE WHEN source='link' THEN $1 ELSE 1 END), 0)::float AS sum_w,
+            COALESCE(SUM(CASE WHEN source='link' THEN $1 ELSE 1 END), 0)::float AS cnt_w,
+            COUNT(*)::int AS cnt_raw
+        FROM ratings
+        """,
+        float(w),
+    )
+    cnt = int(row["cnt_raw"]) if row and row["cnt_raw"] is not None else 0
+    sum_w = float(row["sum_w"]) if row and row["sum_w"] is not None else 0.0
+    cnt_w = float(row["cnt_w"]) if row and row["cnt_w"] is not None else 0.0
 
     # If the bot is new / no ratings yet, use a neutral default.
-    mean = float(mean_raw) if mean_raw is not None else 7.0
+    mean = (sum_w / cnt_w) if cnt_w > 0 else 7.0
 
     _GLOBAL_RATING_CACHE = (now, mean, cnt)
     return mean, cnt
 
 
-def _bayes_score(*, sum_values: float, n: int, global_mean: float, prior: int) -> float | None:
+def _bayes_score(*, sum_values: float, n: float, global_mean: float, prior: int) -> float | None:
     if n <= 0:
         return None
-    return (prior * float(global_mean) + float(sum_values)) / (prior + int(n))
+    return (prior * float(global_mean) + float(sum_values)) / (prior + float(n))
 
 
 def _assert_pool() -> asyncpg.Pool:
@@ -775,10 +797,12 @@ async def get_photo_ratings_stats(photo_id: int) -> dict:
       rated_users: int (distinct user_id)
     """
     p = _assert_pool()
+    w = _link_rating_weight()
     query = """
         SELECT
             COUNT(*)::int AS ratings_count,
-            AVG(value)::float AS avg_rating,
+            COALESCE(SUM(value * CASE WHEN source='link' THEN $2 ELSE 1 END), 0)::float AS sum_values,
+            COALESCE(SUM(CASE WHEN source='link' THEN $2 ELSE 1 END), 0)::float AS sum_weights,
             SUM(CASE WHEN value >= 6 THEN 1 ELSE 0 END)::int AS good_count,
             SUM(CASE WHEN value <= 5 THEN 1 ELSE 0 END)::int AS bad_count,
             COUNT(DISTINCT user_id)::int AS rated_users
@@ -787,7 +811,7 @@ async def get_photo_ratings_stats(photo_id: int) -> dict:
     """
 
     async with p.acquire() as conn:
-        row = await conn.fetchrow(query, int(photo_id))
+        row = await conn.fetchrow(query, int(photo_id), float(w))
         last = await conn.fetchval(
             "SELECT value FROM ratings WHERE photo_id=$1 ORDER BY created_at DESC, id DESC LIMIT 1",
             int(photo_id),
@@ -803,9 +827,13 @@ async def get_photo_ratings_stats(photo_id: int) -> dict:
             "rated_users": 0,
         }
 
+    sum_values = float(row["sum_values"] or 0.0)
+    sum_weights = float(row["sum_weights"] or 0.0)
+    avg_rating = (sum_values / sum_weights) if sum_weights > 0 else None
+
     return {
         "ratings_count": int(row["ratings_count"] or 0),
-        "avg_rating": row["avg_rating"],
+        "avg_rating": avg_rating,
         "last_rating": int(last) if last is not None else None,
         "good_count": int(row["good_count"] or 0),
         "bad_count": int(row["bad_count"] or 0),
@@ -823,22 +851,29 @@ async def get_photo_stats(photo_id: int) -> dict:
       bayes_score: float|None
     """
     p = _assert_pool()
+    w = _link_rating_weight()
     async with p.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT
               COUNT(r.id)::int AS ratings_count,
-              AVG(r.value)::float AS avg_rating,
-              COALESCE(SUM(r.value), 0)::float AS sum_values
+              COUNT(DISTINCT r.user_id)::int AS rated_users,
+              COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS sum_values,
+              COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS sum_weights,
+              AVG(r.value)::float AS avg_raw
             FROM ratings r
             WHERE r.photo_id = $1
             """,
             int(photo_id),
+            float(w),
         )
 
         ratings_count = int(row["ratings_count"] or 0) if row else 0
-        avg_rating = row["avg_rating"] if row else None
+        rated_users = int(row["rated_users"] or 0) if row else 0
         sum_values = float(row["sum_values"] or 0) if row else 0.0
+        sum_weights = float(row["sum_weights"] or 0) if row else 0.0
+        avg_raw = row["avg_raw"] if row else None
+        avg_rating = (sum_values / sum_weights) if sum_weights > 0 else avg_raw
         comments_count = await conn.fetchval(
             "SELECT COUNT(*) FROM comments WHERE photo_id=$1",
             int(photo_id),
@@ -848,7 +883,7 @@ async def get_photo_stats(photo_id: int) -> dict:
         prior = _bayes_prior_weight()
         bayes = _bayes_score(
             sum_values=sum_values,
-            n=ratings_count,
+            n=sum_weights,
             global_mean=global_mean,
             prior=prior,
         )
@@ -858,6 +893,7 @@ async def get_photo_stats(photo_id: int) -> dict:
         "avg_rating": avg_rating,
         "bayes_score": bayes,
         "comments_count": int(comments_count or 0),
+        "rated_users": rated_users,
     }
 
 
@@ -3919,12 +3955,14 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
 
         global_mean, _global_cnt = await _get_global_rating_mean(conn)
 
+        w = _link_rating_weight()
         rows = await conn.fetch(
             """
             SELECT
               ph.id AS photo_id,
               COUNT(r.id)::int AS ratings_count,
-              COALESCE(SUM(r.value), 0)::float AS sum_values,
+              COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS sum_values_weighted,
+              COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_weighted_count,
               MAX(ph.created_at) AS created_at_max
             FROM photos ph
             LEFT JOIN ratings r ON r.photo_id = ph.id
@@ -3932,18 +3970,19 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
               AND ph.moderation_status IN ('active','good')
             GROUP BY ph.id
             ORDER BY created_at_max DESC NULLS LAST, ph.id DESC
-            LIMIT $2
+            LIMIT $3
             """,
             int(user_id),
+            float(w),
             int(limit_photos),
         )
 
     total_points = 0.0
     for row in rows or []:
-        n = int(row["ratings_count"] or 0)
-        s = float(row["sum_values"] or 0.0)
-        bayes = _bayes_score(sum_values=s, n=n, global_mean=global_mean, prior=prior)
-        total_points += _photo_points(bayes_score=bayes, ratings_count=n)
+        n_weighted = float(row.get("ratings_weighted_count") or 0.0)
+        s = float(row.get("sum_values_weighted") or 0.0)
+        bayes = _bayes_score(sum_values=s, n=n_weighted, global_mean=global_mean, prior=prior)
+        total_points += _photo_points(bayes_score=bayes, ratings_count=int(round(n_weighted)))
 
     # -------- Бонус за оценки других фото (anti-spam по дням) --------
     ratings_rows = []
@@ -4153,28 +4192,33 @@ async def get_user_rating_summary(user_id: int) -> dict:
             int(user_id),
         )
 
+        w = _link_rating_weight()
         row = await conn.fetchrow(
             """
             SELECT
                 COUNT(r.id)::int AS ratings_received,
-                COALESCE(SUM(r.value), 0)::float AS ratings_sum,
-                AVG(r.value)::float AS avg_received
+                COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_sum_w,
+                COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_weighted_count,
+                AVG(r.value)::float AS avg_raw
             FROM photos ph
             LEFT JOIN ratings r ON r.photo_id = ph.id
             WHERE ph.user_id=$1
               AND ph.moderation_status IN ('active','good')
             """,
             int(user_id),
+            float(w),
         )
 
     ratings_received = int(row["ratings_received"] or 0) if row else 0
-    ratings_sum = float(row["ratings_sum"] or 0.0) if row else 0.0
-    avg_received = row["avg_received"] if row and row["avg_received"] is not None else None
+    ratings_sum = float(row["ratings_sum_w"] or 0.0) if row else 0.0
+    ratings_weighted_count = float(row["ratings_weighted_count"] or 0.0) if row else 0.0
+    avg_raw = row["avg_raw"] if row and row["avg_raw"] is not None else None
+    avg_received = (ratings_sum / ratings_weighted_count) if ratings_weighted_count > 0 else avg_raw
 
     # Smart Bayesian average (stabilizes score for small n)
     bayes = _bayes_score(
         sum_values=ratings_sum,
-        n=ratings_received,
+        n=ratings_weighted_count,
         global_mean=global_mean,
         prior=prior,
     )
@@ -4202,6 +4246,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
 
     async with p.acquire() as conn:
         global_mean, _ = await _get_global_rating_mean(conn)
+        w = _link_rating_weight()
 
         u = await conn.fetchrow(
             """
@@ -4228,8 +4273,14 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     SELECT
                         ph.*,
                         COUNT(r.id)::int AS ratings_count,
-                        COALESCE(SUM(r.value), 0)::float AS ratings_sum,
-                        AVG(r.value)::float AS avg_rating
+                        COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_sum_w,
+                        COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_weighted_count,
+                        CASE
+                            WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0) > 0 THEN
+                                COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float
+                                / COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)
+                            ELSE NULL
+                        END AS avg_rating
                     FROM photos ph
                     LEFT JOIN ratings r ON r.photo_id = ph.id
                     WHERE ph.user_id = ANY($1::bigint[])
@@ -4240,8 +4291,8 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 SELECT
                     s.*,
                     CASE
-                        WHEN s.ratings_count > 0 THEN
-                            ($2::float * $3::float + s.ratings_sum) / ($2::float + s.ratings_count)
+                        WHEN s.ratings_weighted_count > 0 THEN
+                            ($3::float * $4::float + s.ratings_sum_w) / ($3::float + s.ratings_weighted_count)
                         ELSE NULL
                     END AS bayes_score
                 FROM s
@@ -4252,7 +4303,7 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     id ASC
                 LIMIT 1
             """
-            return await conn.fetchrow(q, candidate_user_ids, float(prior), float(global_mean))
+            return await conn.fetchrow(q, candidate_user_ids, float(w), float(prior), float(global_mean))
 
         try:
             # 1) Активные с оценками
@@ -4283,8 +4334,14 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     ph.is_deleted,
                     ph.created_at,
                     COUNT(r.id)::int AS ratings_count,
-                    COALESCE(SUM(r.value), 0)::float AS ratings_sum,
-                    AVG(r.value)::float AS avg_rating
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_sum_w,
+                    COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_weighted_count,
+                    CASE
+                        WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0) > 0 THEN
+                            COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float
+                            / COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)
+                        ELSE NULL
+                    END AS avg_rating
                 FROM photos ph
                 LEFT JOIN ratings r ON r.photo_id = ph.id
                 WHERE ph.user_id = ANY($1::bigint[])
@@ -4295,8 +4352,8 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 SELECT
                     s.*,
                     CASE
-                        WHEN s.ratings_count > 0
-                            THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
+                        WHEN s.ratings_weighted_count > 0
+                            THEN (($3::float * $4::float) + s.ratings_sum_w) / (s.ratings_weighted_count + $3::float)
                         ELSE NULL
                     END::float AS bayes_score
                 FROM stats s
@@ -4315,8 +4372,14 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                     ph.id,
                     ph.user_id,
                     COUNT(r.id)::int AS ratings_count,
-                    COALESCE(SUM(r.value), 0)::float AS ratings_sum,
-                    AVG(r.value)::float AS avg_rating
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_sum_w,
+                    COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float AS ratings_weighted_count,
+                    CASE
+                        WHEN COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0) > 0 THEN
+                            COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)::float
+                            / COALESCE(SUM(CASE WHEN r.source='link' THEN $2 ELSE 1 END), 0)
+                        ELSE NULL
+                    END AS avg_rating
                 FROM photos ph
                 LEFT JOIN ratings r ON r.photo_id = ph.id
                 WHERE ph.user_id = ANY($1::bigint[])
@@ -4327,8 +4390,8 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
                 SELECT
                     s.*,
                     CASE
-                        WHEN s.ratings_count > 0
-                            THEN (($2::int * $3::float) + s.ratings_sum) / (s.ratings_count + $2::int)
+                        WHEN s.ratings_weighted_count > 0
+                            THEN (($3::float * $4::float) + s.ratings_sum_w) / (s.ratings_weighted_count + $3::float)
                         ELSE NULL
                     END::float AS bayes_score
                 FROM stats s
@@ -4342,9 +4405,9 @@ async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
         """
 
         try:
-            row = await conn.fetchrow(sql_full, candidate_ids, int(prior), float(global_mean))
+            row = await conn.fetchrow(sql_full, candidate_ids, float(w), float(prior), float(global_mean))
         except Exception:
-            row = await conn.fetchrow(sql_min, candidate_ids, int(prior), float(global_mean))
+            row = await conn.fetchrow(sql_min, candidate_ids, float(w), float(prior), float(global_mean))
 
         if not row:
             return None
@@ -4795,16 +4858,25 @@ async def get_photo_admin_stats(photo_id: int) -> dict:
     pid = int(photo_id)
 
     async with p.acquire() as conn:
+        w = _link_rating_weight()
         row = await conn.fetchrow(
             """
-            SELECT AVG(value) AS avg, COUNT(*) AS cnt
+            SELECT
+                COALESCE(SUM(value * CASE WHEN source='link' THEN $2 ELSE 1 END), 0)::float AS sum_w,
+                COALESCE(SUM(CASE WHEN source='link' THEN $2 ELSE 1 END), 0)::float AS cnt_w,
+                COUNT(*)::int AS cnt_raw,
+                AVG(value)::float AS avg_raw
             FROM ratings
             WHERE photo_id = $1
             """,
             pid,
+            float(w),
         )
-        avg_rating = float(row["avg"]) if row and row["avg"] is not None else None
-        ratings_count = int(row["cnt"] or 0) if row else 0
+        sum_w = float(row["sum_w"]) if row and row["sum_w"] is not None else 0.0
+        cnt_w = float(row["cnt_w"]) if row and row["cnt_w"] is not None else 0.0
+        avg_raw = float(row["avg_raw"]) if row and row["avg_raw"] is not None else None
+        avg_rating = (sum_w / cnt_w) if cnt_w > 0 else avg_raw
+        ratings_count = int(row["cnt_raw"] or 0) if row else 0
 
         super_ratings_count = int(
             (

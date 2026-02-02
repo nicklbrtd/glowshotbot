@@ -52,6 +52,7 @@ from database import (
     get_random_active_ad,
     get_ads_enabled_by_tg_id,
 )
+from handlers.upload import EDIT_TAGS
 from html import escape
 from config import MODERATION_CHAT_ID
 
@@ -80,6 +81,113 @@ def _fmt_pub_date(day_key: str | None) -> str:
 def _photo_public_id(photo: dict) -> str | None:
     pid = photo.get("file_id_public") or photo.get("file_id")
     return str(pid) if pid is not None else None
+
+
+def _shorten_text(text: str, limit: int = 220) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _tag_badge(tag_key: str) -> str:
+    t = (tag_key or "").strip()
+    if not t:
+        return "нет"
+    for k, lbl in EDIT_TAGS:
+        if k == t:
+            parts = (lbl or "").strip().split(" ", 1)
+            if parts and parts[0]:
+                return parts[0]
+            return lbl or t
+    return t
+
+
+def _extract_tg_username(raw_link: str) -> str | None:
+    s = (raw_link or "").strip()
+    if not s:
+        return None
+    if s.startswith("@"):
+        return s[1:].strip() or None
+
+    lower = s.lower()
+    prefixes = (
+        "https://t.me/",
+        "http://t.me/",
+        "t.me/",
+        "https://telegram.me/",
+        "http://telegram.me/",
+        "telegram.me/",
+    )
+    for pref in prefixes:
+        if lower.startswith(pref):
+            rest = s[len(pref):].strip()
+            rest = rest.split("/", 1)[0].split("?", 1)[0].strip()
+            if rest.startswith("@"):
+                rest = rest[1:].strip()
+            return rest or None
+
+    if "t.me/" in lower:
+        rest = s.split("t.me/", 1)[1]
+        rest = rest.split("/", 1)[0].split("?", 1)[0].strip()
+        if rest.startswith("@"):
+            rest = rest[1:].strip()
+        return rest or None
+    if "telegram.me/" in lower:
+        rest = s.split("telegram.me/", 1)[1]
+        rest = rest.split("/", 1)[0].split("?", 1)[0].strip()
+        if rest.startswith("@"):
+            rest = rest[1:].strip()
+        return rest or None
+
+    return None
+
+
+def _link_button_from_raw(raw_link: str) -> tuple[str, str] | None:
+    username = _extract_tg_username(raw_link)
+    if not username:
+        return None
+    label = f"@{username}"
+    return (f"🔗 {label}", f"https://t.me/{username}")
+
+
+def _author_is_premium(photo: dict, author: dict | None = None) -> bool:
+    if photo.get("user_is_premium"):
+        return True
+    if photo.get("user_premium_until"):
+        return True
+    if author:
+        if author.get("is_premium"):
+            return True
+        if author.get("premium_until"):
+            return True
+    return False
+
+
+def _get_link_button_from_photo(
+    photo: dict,
+    author: dict | None = None,
+    *,
+    require_premium: bool = False,
+) -> tuple[str, str] | None:
+    if require_premium and not _author_is_premium(photo, author):
+        return None
+
+    raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
+    if not raw_link and author and author.get("tg_channel_link"):
+        raw_link = (author.get("tg_channel_link") or "").strip()
+        if raw_link:
+            photo["user_tg_channel_link"] = raw_link
+    if not raw_link:
+        return None
+    button = _link_button_from_raw(raw_link)
+    if button:
+        return button
+    if raw_link.startswith("http://") or raw_link.startswith("https://"):
+        return (f"🔗 {raw_link}", raw_link)
+    return None
 
 def build_mod_report_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -313,6 +421,8 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
         except Exception:
             photo["user_is_premium"] = bool(author_user.get("is_premium"))
 
+    link_button = _get_link_button_from_photo(photo, author_user, require_premium=True)
+
     caption = await build_rate_caption(photo, viewer_tg_id=int(viewer_tg_id), show_details=False)
 
     is_premium_rater = False
@@ -332,6 +442,7 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
             int(photo["id"]),
             show_details=False,
             is_premium=is_premium_rater,
+            link_button=link_button,
             lang=rater_lang,
         )
     else:
@@ -339,6 +450,7 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
             int(photo["id"]),
             is_premium=is_premium_rater,
             show_details=False,
+            link_button=link_button,
             lang=rater_lang,
         )
     file_id_str = _photo_public_id(photo)
@@ -496,8 +608,19 @@ async def _apply_rating_card(
         except Exception:
             pass
 
-def build_rate_keyboard(photo_id: int, *, is_premium: bool = False, show_details: bool = False, lang: str = "ru") -> InlineKeyboardMarkup:
+def build_rate_keyboard(
+    photo_id: int,
+    *,
+    is_premium: bool = False,
+    show_details: bool = False,
+    link_button: tuple[str, str] | None = None,
+    lang: str = "ru",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+
+    if link_button:
+        link_text, link_url = link_button
+        kb.row(InlineKeyboardButton(text=link_text, url=link_url))
 
     # 1..10 (две строки по 5)
     for i in range(1, 11):
@@ -533,9 +656,13 @@ def build_view_only_keyboard(
     *,
     show_details: bool = False,
     is_premium: bool = False,
+    link_button: tuple[str, str] | None = None,
     lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    if link_button:
+        link_text, link_url = link_button
+        kb.row(InlineKeyboardButton(text=link_text, url=link_url))
     kb.row(
         InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
         InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}"),
@@ -601,8 +728,9 @@ def build_no_photos_text() -> str:
 # Специальная подпись для раздела оценивания
 async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool = False) -> str:
     """Карточка оценивания:
-    «Название» — Имя/username • (Фото 1/2) • 💎 если автор премиум
-    Описание: <bio автора>
+    💎 <b><code>Название</code></b>
+    [бейдж тега] · Имя · #1/2 (если две активные)
+    Описание (кратко / полностью по «Еще»)
     Реклама (только непремиум зрителям)
     При «Еще» — детали; для админов/модов включаем username и дату публикации."""
 
@@ -612,18 +740,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             return ""
         return f"<blockquote>{escape(text)}</blockquote>"
 
-    def device_emoji(device_type_raw: str) -> str:
-        dt = (device_type_raw or "").lower()
-        if "смартфон" in dt or "phone" in dt:
-            return "📱"
-        if "фотокамера" in dt or "camera" in dt:
-            return "📷"
-        if dt:
-            return "📸"
-        return ""
-
     title = (photo.get("title") or "").strip() or "Без названия"
-    device = device_emoji(photo.get("device_type") or "")
 
     # author tg_id
     author_tg_id = None
@@ -664,7 +781,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     lines: list[str] = []
     # Метка 1/2, если у автора две активные фото
-    photo_index_part = ""
+    photo_index_text = ""
     if author_user_id:
         try:
             active_photos = await get_active_photos_for_user(int(author_user_id))
@@ -677,33 +794,30 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
                 ids = [int(p.get("id") or 0) for p in active_photos]
                 if int(photo.get("id") or 0) in ids:
                     idx = ids.index(int(photo.get("id") or 0))
-                    photo_index_part = f" · #{idx + 1}/2"
+                    photo_index_text = f"#{idx + 1}/2"
         except Exception:
             pass
 
     premium_badge = "💎 " if is_author_premium else ""
-    title_mono = f"\"<code>{escape(title)}</code>\""
-    device_part = f" {device}" if device else ""
-    lines.append(f"{premium_badge}{title_mono}{device_part} — {escape(display_name)}{photo_index_part}")
+    title_mono = f"<b><code>{escape(title)}</code></b>"
+    lines.append(f"{premium_badge}{title_mono}")
 
-    raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
-    if raw_link:
-        link_label = raw_link
-        # если пользователь ввёл ссылку вида t.me/username, превращаем в @username
-        if raw_link.startswith("https://t.me/") or raw_link.startswith("http://t.me/") or raw_link.startswith("t.me/"):
-            uname = raw_link.split("t.me/", 1)[1].lstrip("@")
-            if uname:
-                link_label = f"@{uname}"
-        lines.append(f"Ссылка: {escape(link_label)}")
+    tag_badge = _tag_badge(str(photo.get("tag") or ""))
+    second_parts = [f"[{escape(tag_badge)}]", escape(display_name)]
+    if photo_index_text:
+        second_parts.append(photo_index_text)
+    lines.append(" · ".join(second_parts))
 
     # описание из био автора (а не из фото)
     description = ""
     if author:
         description = (author.get("bio") or "").strip()
-    desc_block: list[str] = []
+    description = description.strip()
+    if description and description.lower() == "нет":
+        description = ""
     if description:
-        desc_block.append("Описание:")
-        desc_block.append(quote(description))
+        desc_text = description if show_details else _shorten_text(description)
+        lines.append(escape(desc_text))
 
     # --- Реклама под описанием ---
     # Реклама: по умолчанию включена, но премиум может выключить в настройках
@@ -743,9 +857,6 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     if show_details:
         if bool(photo.get("has_beta_award")):
             lines.append("··· Бета-тестер бота ···")
-
-        if desc_block:
-            lines.extend(desc_block)
 
         rating_str = "—"
         good_cnt = 0
@@ -1230,8 +1341,10 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
         if photo_for_caption is None:
             photo_for_caption = await get_photo_by_id(int(photo_id))
 
+        link_button = None
         if photo_for_caption is not None:
             base_caption = await build_rate_caption(photo_for_caption, viewer_tg_id=int(message.from_user.id), show_details=False)
+            link_button = _get_link_button_from_photo(photo_for_caption, require_premium=True)
             success_caption = "✅ Комментарий отправлен!\n\n" + base_caption
         else:
             success_caption = "✅ Комментарий отправлен!\n\nМожешь поставить оценку этому кадру 👇"
@@ -1244,6 +1357,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 int(photo_id),
                 is_premium=is_premium_rater,
                 show_details=False,
+                link_button=link_button,
                 lang=rater_lang,
             ),
             parse_mode="HTML",
@@ -1930,13 +2044,25 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         except Exception:
             photo["has_beta_award"] = False
 
-    if "user_tg_channel_link" not in photo:
+    author = None
+    try:
+        author = await get_user_by_id(int(photo.get("user_id") or 0))
+    except Exception:
+        author = None
+
+    if author and author.get("tg_channel_link") and not photo.get("user_tg_channel_link"):
+        photo["user_tg_channel_link"] = author.get("tg_channel_link")
+
+    if "user_is_premium" not in photo:
         try:
-            author = await get_user_by_id(int(photo.get("user_id") or 0))
+            if author and author.get("tg_id"):
+                photo["user_is_premium"] = await is_user_premium_active(int(author["tg_id"]))
+            else:
+                photo["user_is_premium"] = bool((author or {}).get("is_premium") or (author or {}).get("premium_until"))
         except Exception:
-            author = None
-        if author and author.get("tg_channel_link"):
-            photo["user_tg_channel_link"] = author.get("tg_channel_link")
+            photo["user_is_premium"] = bool((author or {}).get("is_premium") or (author or {}).get("premium_until"))
+
+    link_button = _get_link_button_from_photo(photo, author, require_premium=True)
 
     is_rateable = bool((photo or {}).get("ratings_enabled", True))
     caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=to_show)
@@ -1944,12 +2070,19 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
 
     if is_rateable:
-        kb = build_rate_keyboard(photo_id, is_premium=viewer_is_premium, show_details=to_show, lang=viewer_lang)
+        kb = build_rate_keyboard(
+            photo_id,
+            is_premium=viewer_is_premium,
+            show_details=to_show,
+            link_button=link_button,
+            lang=viewer_lang,
+        )
     else:
         kb = build_view_only_keyboard(
             photo_id,
             show_details=to_show,
             is_premium=viewer_is_premium,
+            link_button=link_button,
             lang=viewer_lang,
         )
 

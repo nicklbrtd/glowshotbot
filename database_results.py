@@ -7,10 +7,11 @@ from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
 
 # We reuse the project's asyncpg pool stored in database.py
 try:
-    from database import _assert_pool, _bayes_prior_weight
+    from database import _assert_pool, _bayes_prior_weight, _link_rating_weight
 except Exception:  # pragma: no cover
     _assert_pool = None  # type: ignore
     _bayes_prior_weight = None  # type: ignore
+    _link_rating_weight = None  # type: ignore
 
 
 # ---- constants for results_v2 ----
@@ -64,6 +65,7 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
     """Return all-time leaderboard (unique best photo per author)."""
     p = _pool()
     prior = _bayes_prior_weight()
+    weight = _link_rating_weight() if _link_rating_weight is not None else 0.5
     async with p.acquire() as conn:
         from database import _get_global_rating_mean  # lazy import to avoid cycle
 
@@ -83,7 +85,8 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
                     u.username,
                     u.name AS author_name,
                     COUNT(r.id)::int AS ratings_count,
-                    COALESCE(SUM(r.value), 0)::float AS ratings_sum
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS ratings_sum,
+                    COALESCE(SUM(CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS ratings_weighted_count
                 FROM photos ph
                 LEFT JOIN ratings r ON r.photo_id = ph.id
                 LEFT JOIN users u ON u.id = ph.user_id
@@ -94,7 +97,7 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
             filtered AS (
                 SELECT *,
                     CASE
-                        WHEN ratings_count > 0 THEN (($1::float * $2::float) + ratings_sum) / ($1::float + ratings_count)
+                        WHEN ratings_weighted_count > 0 THEN (($1::float * $2::float) + ratings_sum) / ($1::float + ratings_weighted_count)
                         ELSE NULL
                     END AS bayes_score
                 FROM s
@@ -126,6 +129,7 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
             float(global_mean),
             int(min_votes),
             int(limit),
+            float(weight),
         )
 
     return [dict(r) for r in rows]

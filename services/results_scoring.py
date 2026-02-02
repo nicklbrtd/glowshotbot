@@ -59,11 +59,11 @@ def rules_for_scope(scope_type: str) -> ScoringRules:
     return ScoringRules(prior_weight=prior, min_ratings=common_min_ratings, min_unique_raters=common_min_unique)
 
 
-def bayes_score(*, sum_values: float, n: int, global_mean: float, prior: int) -> float | None:
+def bayes_score(*, sum_values: float, n: float, global_mean: float, prior: int) -> float | None:
     """Bayesian average for 1..10 ratings."""
     if n <= 0:
         return None
-    return (prior * float(global_mean) + float(sum_values)) / (prior + int(n))
+    return (prior * float(global_mean) + float(sum_values)) / (prior + float(n))
 
 
 def pick_top_photos(
@@ -95,10 +95,12 @@ def pick_top_photos(
         if rated_users < int(rules.min_unique_raters):
             continue
 
-        sum_values = float(r.get("sum_values") or 0.0)
+        sum_values = float(r.get("sum_values_weighted") or r.get("sum_values") or 0.0)
+        weighted_count = r.get("ratings_weighted_count")
+        n = float(weighted_count) if weighted_count is not None else float(ratings_count)
         b = bayes_score(
             sum_values=sum_values,
-            n=ratings_count,
+            n=n,
             global_mean=float(global_mean),
             prior=int(rules.prior_weight),
         )
