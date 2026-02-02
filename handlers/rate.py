@@ -105,6 +105,17 @@ def _tag_badge(tag_key: str) -> str:
     return t
 
 
+def _device_emoji(device_type_raw: str) -> str:
+    dt = (device_type_raw or "").lower()
+    if "смартфон" in dt or "phone" in dt:
+        return "📱"
+    if "фотокамера" in dt or "camera" in dt:
+        return "📷"
+    if dt:
+        return "📸"
+    return ""
+
+
 def _extract_tg_username(raw_link: str) -> str | None:
     s = (raw_link or "").strip()
     if not s:
@@ -154,21 +165,7 @@ def _link_button_from_raw(raw_link: str) -> tuple[str, str] | None:
 
 
 def _author_is_premium(photo: dict, author: dict | None = None) -> bool:
-    if photo.get("user_is_premium_active"):
-        return True
-    if author and author.get("is_premium_active"):
-        return True
-    # fallback to legacy flags if активность неизвестна
-    if photo.get("user_is_premium"):
-        return True
-    if photo.get("user_premium_until"):
-        return True
-    if author:
-        if author.get("is_premium"):
-            return True
-        if author.get("premium_until"):
-            return True
-    return False
+    return bool(photo.get("user_is_premium_active") or (author or {}).get("is_premium_active"))
 
 
 def _get_link_button_from_photo(
@@ -179,7 +176,6 @@ def _get_link_button_from_photo(
 ) -> tuple[str, str] | None:
     if require_premium and not _author_is_premium(photo, author):
         return None
-
     raw_link = (photo.get("user_tg_channel_link") or photo.get("tg_channel_link") or "").strip()
     if not raw_link and author and author.get("tg_channel_link"):
         raw_link = (author.get("tg_channel_link") or "").strip()
@@ -193,6 +189,37 @@ def _get_link_button_from_photo(
     if raw_link.startswith("http://") or raw_link.startswith("https://"):
         return (f"🔗 {raw_link}", raw_link)
     return None
+
+
+async def _ensure_author_premium_active(photo: dict, author: dict | None = None) -> bool:
+    """Returns active premium status; updates cached flags in photo/author."""
+    active: bool | None = None
+    tg_id = None
+    try:
+        tg_id = int(author.get("tg_id")) if author and author.get("tg_id") else None
+    except Exception:
+        tg_id = None
+
+    if tg_id:
+        try:
+            active = await is_user_premium_active(int(tg_id))
+        except Exception:
+            active = None
+
+    if active is None:
+        if "user_is_premium_active" in photo:
+            active = bool(photo.get("user_is_premium_active"))
+        elif author and "is_premium_active" in author:
+            active = bool(author.get("is_premium_active"))
+        else:
+            active = False
+
+    photo["user_is_premium_active"] = active
+    # keep legacy flag aligned for downstream code that still reads it
+    photo["user_is_premium"] = active
+    if author is not None:
+        author["is_premium_active"] = active
+    return active
 
 def build_mod_report_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -417,18 +444,7 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
         if not photo.get("user_tg_channel_link") and author_user.get("tg_channel_link"):
             photo["user_tg_channel_link"] = author_user.get("tg_channel_link")
 
-        try:
-            tg_id = author_user.get("tg_id")
-            if tg_id:
-                premium_active = await is_user_premium_active(int(tg_id))
-            else:
-                premium_active = bool(author_user.get("is_premium"))
-        except Exception:
-            premium_active = bool(author_user.get("is_premium"))
-
-        photo["user_is_premium_active"] = premium_active
-        # для совместимости оставляем старый флаг
-        photo["user_is_premium"] = premium_active
+        premium_active = await _ensure_author_premium_active(photo, author_user)
 
     link_button = _get_link_button_from_photo(photo, author_user, require_premium=True)
 
@@ -792,20 +808,7 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             if author.get("tg_channel_link"):
                 photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
-    is_author_premium = False
-    if author_tg_id:
-        try:
-            is_author_premium = await is_user_premium_active(int(author_tg_id))
-        except Exception:
-            is_author_premium = False
-    if not is_author_premium:
-        # fallback to cached flags if не смогли проверить
-        is_author_premium = bool(photo.get("user_is_premium_active") or photo.get("user_is_premium") or photo.get("user_premium_until"))
-
-    # кэшируем активность премиума для дальнейших кнопок/логики
-    photo["user_is_premium_active"] = is_author_premium
-    if author is not None:
-        author["is_premium_active"] = is_author_premium
+    is_author_premium = await _ensure_author_premium_active(photo, author)
 
     # имя/username автора
     display_name = author.get("name") if author else ""
@@ -839,7 +842,11 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     lines.append(f"{premium_badge}{title_mono}")
 
     tag_badge = _tag_badge(str(photo.get("tag") or ""))
+    device_icon = _device_emoji(photo.get("device_type") or photo.get("device_info") or "")
+
     second_parts = [f"[{escape(tag_badge)}]", escape(display_name)]
+    if device_icon:
+        second_parts.append(device_icon)
     if photo_index_text:
         second_parts.append(photo_index_text)
     lines.append(" · ".join(second_parts))
@@ -853,7 +860,8 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
         description = ""
     if description:
         desc_text = description if show_details else _shorten_text(description)
-        lines.append(escape(desc_text))
+        lines.append("")
+        lines.append(f"📜 {escape(desc_text)}")
 
     # --- Реклама под описанием ---
     # Реклама: по умолчанию включена, но премиум может выключить в настройках
@@ -1379,6 +1387,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
         link_button = None
         if photo_for_caption is not None:
+            await _ensure_author_premium_active(photo_for_caption, None)
             base_caption = await build_rate_caption(photo_for_caption, viewer_tg_id=int(message.from_user.id), show_details=False)
             link_button = _get_link_button_from_photo(photo_for_caption, require_premium=True)
             success_caption = "✅ Комментарий отправлен!\n\n" + base_caption
@@ -2090,17 +2099,7 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
     if "user_is_premium_active" not in photo:
-        try:
-            if author and author.get("tg_id"):
-                active = await is_user_premium_active(int(author["tg_id"]))
-            else:
-                active = bool((author or {}).get("is_premium"))
-        except Exception:
-            active = bool((author or {}).get("is_premium"))
-        photo["user_is_premium_active"] = active
-        photo["user_is_premium"] = active
-        if author is not None:
-            author["is_premium_active"] = active
+        await _ensure_author_premium_active(photo, author)
 
     link_button = _get_link_button_from_photo(photo, author, require_premium=True)
 
