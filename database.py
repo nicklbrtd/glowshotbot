@@ -1495,7 +1495,7 @@ async def get_active_photo_for_owner_tg_id(owner_tg_id: int) -> dict | None:
             """
             SELECT *
             FROM photos
-            WHERE user_id=$1 AND is_deleted=0 AND moderation_status='active'
+            WHERE user_id=$1 AND is_deleted=0 AND moderation_status IN ('active','good')
             ORDER BY created_at DESC, id DESC
             LIMIT 1
             """,
@@ -1551,10 +1551,11 @@ async def add_rating_by_tg_id(
                 "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
                 int(photo_id),
             )
+            status = str(photo_row.get("moderation_status") or "").lower()
             if (
                 not photo_row
                 or int(photo_row.get("is_deleted") or 0) != 0
-                or str(photo_row.get("moderation_status") or "").lower() != "active"
+                or status not in ("active", "good")
                 or not bool(photo_row.get("ratings_enabled", 1))
             ):
                 return False
@@ -2095,7 +2096,7 @@ async def set_user_block_status_by_tg_id(tg_id: int, is_blocked: bool,
 
 async def hide_active_photos_for_user(user_id: int, new_status: str = "blocked_by_ban") -> int:
     """
-    Скрыть все активные фото пользователя из выдачи (ставим новый статус).
+    Скрыть все активные/одобренные фото пользователя из выдачи (ставим новый статус).
     Возвращает количество обновлённых записей (best-effort).
     """
     p = _assert_pool()
@@ -2104,7 +2105,7 @@ async def hide_active_photos_for_user(user_id: int, new_status: str = "blocked_b
             """
             UPDATE photos
             SET moderation_status=$2
-            WHERE user_id=$1 AND is_deleted=0 AND moderation_status='active'
+            WHERE user_id=$1 AND is_deleted=0 AND moderation_status IN ('active','good')
             """,
             int(user_id),
             str(new_status),
@@ -3394,7 +3395,7 @@ async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | No
             FROM photos p
             JOIN users u ON u.id=p.user_id
             WHERE p.is_deleted=0
-              AND p.moderation_status IN ('active')
+              AND p.moderation_status IN ('active','good')
               AND COALESCE(p.ratings_enabled, 1)=1
               AND p.user_id <> $1
               AND (
@@ -3402,7 +3403,7 @@ async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | No
                 OR p.id IN (
                     SELECT id
                     FROM photos
-                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status='active'
+                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
                     ORDER BY created_at DESC, id DESC
                     LIMIT 1
                 )
@@ -3429,7 +3430,7 @@ async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | No
             FROM photos p
             JOIN users u ON u.id=p.user_id
             WHERE p.is_deleted=0
-              AND p.moderation_status IN ('active')
+              AND p.moderation_status IN ('active','good')
               AND COALESCE(p.ratings_enabled, 1)=0
               AND p.user_id <> $1
               AND (
@@ -3437,7 +3438,7 @@ async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | No
                 OR p.id IN (
                     SELECT id
                     FROM photos
-                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status='active'
+                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
                     ORDER BY created_at DESC, id DESC
                     LIMIT 1
                 )
@@ -3513,10 +3514,11 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
             "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
             int(photo_id),
         )
+        status = str(photo_row.get("moderation_status") or "").lower()
         if (
             not photo_row
             or int(photo_row.get("is_deleted") or 0) != 0
-            or str(photo_row.get("moderation_status") or "").lower() != "active"
+            or status not in ("active", "good")
             or not bool(photo_row.get("ratings_enabled", 1))
         ):
             return
@@ -3555,10 +3557,11 @@ async def set_super_rating(user_id: int, photo_id: int) -> bool:
             "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
             int(photo_id),
         )
+        status = str(photo_row.get("moderation_status") or "").lower()
         if (
             not photo_row
             or int(photo_row.get("is_deleted") or 0) != 0
-            or str(photo_row.get("moderation_status") or "").lower() != "active"
+            or status not in ("active", "good")
             or not bool(photo_row.get("ratings_enabled", 1))
         ):
             return False
@@ -3807,14 +3810,33 @@ async def get_next_photo_for_detailed_moderation() -> dict | None:
 async def get_next_photo_for_self_moderation(user_id: int | None = None) -> dict | None:
     p = _assert_pool()
     async with p.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT * FROM photos
-            WHERE is_deleted=0 AND moderation_status='active'
-            ORDER BY random()
-            LIMIT 1
-            """
-        )
+        if user_id is None:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM photos
+                WHERE is_deleted=0 AND moderation_status='active'
+                ORDER BY random()
+                LIMIT 1
+                """
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT p.*
+                FROM photos p
+                WHERE p.is_deleted=0
+                  AND p.moderation_status='active'
+                  AND p.user_id <> $1
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM moderator_reviews mr
+                      WHERE mr.moderator_user_id=$1 AND mr.photo_id=p.id
+                  )
+                ORDER BY random()
+                LIMIT 1
+                """,
+                int(user_id),
+            )
     return dict(row) if row else None
 
 
@@ -3838,7 +3860,7 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
     We intentionally DO NOT filter by is_deleted here.
     That way a user cannot "reset" rank by deleting photos.
 
-    We DO filter moderation_status='active' to exclude rejected/hidden content.
+    We DO filter moderation_status in ('active','good') to exclude rejected/hidden content.
 
     Returns an int suitable for caching in users.rank_points.
     """
@@ -3893,7 +3915,7 @@ async def calc_user_rank_points(user_id: int, *, limit_photos: int = 10) -> int:
             FROM photos ph
             LEFT JOIN ratings r ON r.photo_id = ph.id
             WHERE ph.user_id=$1
-              AND ph.moderation_status='active'
+              AND ph.moderation_status IN ('active','good')
             GROUP BY ph.id
             ORDER BY created_at_max DESC NULLS LAST, ph.id DESC
             LIMIT $2
@@ -4104,7 +4126,7 @@ async def get_user_rating_summary(user_id: int) -> dict:
 
     Important: ratings_received/avg include BOTH active and soft-deleted photos
     so users cannot reset their profile stats by deleting a photo.
-    Only moderation_status='active' photos are considered.
+    Only moderation_status in ('active','good') photos are considered.
     """
     p = _assert_pool()
     prior = _bayes_prior_weight()
@@ -4126,7 +4148,7 @@ async def get_user_rating_summary(user_id: int) -> dict:
             FROM photos ph
             LEFT JOIN ratings r ON r.photo_id = ph.id
             WHERE ph.user_id=$1
-              AND ph.moderation_status='active'
+              AND ph.moderation_status IN ('active','good')
             """,
             int(user_id),
         )

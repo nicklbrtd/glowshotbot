@@ -1006,7 +1006,7 @@ async def moderator_photo_ok(callback: CallbackQuery) -> None:
 
     # Возвращаем фотографию в обычную ротацию
     try:
-        await set_photo_moderation_status(photo_id, "active")
+        await set_photo_moderation_status(photo_id, "good")
     except Exception:
         await callback.answer("Не удалось обновить статус фотографии.", show_alert=True)
         return
@@ -1028,9 +1028,9 @@ async def moderator_photo_ok(callback: CallbackQuery) -> None:
             else:
                 review_source = source
             await add_moderator_review(
-                moderator_id=moderator["id"],
+                moderator_user_id=moderator["id"],
                 photo_id=photo_id,
-                source=review_source,
+                action=f"{review_source}:ok",
             )
         except Exception:
             # Не валим обработчик, если статистику не удалось записать
@@ -1136,7 +1136,7 @@ async def mod_report_ok(callback: CallbackQuery) -> None:
         return
 
     try:
-        await set_photo_moderation_status(photo_id, "active")
+        await set_photo_moderation_status(photo_id, "good")
     except Exception:
         await callback.answer("Не удалось обновить статус.", show_alert=True)
         return
@@ -1495,9 +1495,9 @@ async def moderator_photo_deep(callback: CallbackQuery) -> None:
     if moderator is not None:
         try:
             await add_moderator_review(
-                moderator_id=moderator["id"],
+                moderator_user_id=moderator["id"],
                 photo_id=photo_id,
-                source="report",
+                action="report:deep",
             )
         except Exception:
             # Не валим обработчик, если статистику не удалось записать
@@ -1867,9 +1867,9 @@ async def moderator_photo_skip(callback: CallbackQuery) -> None:
             else:
                 review_source = source
             await add_moderator_review(
-                moderator_id=moderator["id"],
+                moderator_user_id=moderator["id"],
                 photo_id=photo_id,
-                source=review_source,
+                action=f"{review_source}:skip",
             )
         except Exception:
             # Не валим обработчик, если статистику не удалось записать
@@ -2353,9 +2353,9 @@ async def moderator_ban_reason_input(message: Message, state: FSMContext) -> Non
     if moderator is not None:
         try:
             await add_moderator_review(
-                moderator_id=moderator["id"],
+                moderator_user_id=moderator["id"],
                 photo_id=int(photo_id),
-                source="report" if source == "queue" else "self",
+                action=f"{source}:{action}",
             )
         except Exception:
             pass

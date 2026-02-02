@@ -650,7 +650,11 @@ async def lr_set(callback: CallbackQuery):
 
     owner_user = await get_user_by_tg_id(owner_tg_id)
     photo = await get_photo_by_id(photo_id)
-    if not photo or photo.get("is_deleted") or photo.get("moderation_status") != "active":
+    if (
+        not photo
+        or photo.get("is_deleted")
+        or str(photo.get("moderation_status") or "").lower() not in ("active", "good")
+    ):
         await callback.answer("❌ Фото недоступно.", show_alert=True)
         return
     if owner_user and int(photo.get("user_id") or 0) != int(owner_user.get("id") or 0):

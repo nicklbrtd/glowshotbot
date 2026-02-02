@@ -49,7 +49,7 @@ async def get_day_photo_rows_global(conn: asyncpg.Connection, *, day_key: str) -
         WHERE
             p.day_key = $1
             AND COALESCE(p.is_deleted, 0) = 0
-            AND COALESCE(p.moderation_status, 'active') = 'active'
+            AND COALESCE(p.moderation_status, 'active') IN ('active','good')
         GROUP BY p.id, p.user_id, p.file_id, p.title, u.name, u.username, p.created_at, p.last_win_date
         """,
         str(day_key),
@@ -88,7 +88,7 @@ async def get_day_photo_rows_user(conn: asyncpg.Connection, *, day_key: str, use
             p.day_key = $1
             AND p.user_id = $2
             AND COALESCE(p.is_deleted, 0) = 0
-            AND COALESCE(p.moderation_status, 'active') = 'active'
+            AND COALESCE(p.moderation_status, 'active') IN ('active','good')
         GROUP BY p.id, p.user_id, p.file_id, p.title, u.name, u.username, p.created_at, p.last_win_date
         ORDER BY p.created_at ASC
         """,
@@ -106,7 +106,7 @@ async def count_active_authors_city(conn: asyncpg.Connection, *, city: str) -> i
         JOIN users u ON u.id=p.user_id
         WHERE
             COALESCE(p.is_deleted, 0) = 0
-            AND COALESCE(p.moderation_status, 'active') = 'active'
+            AND COALESCE(p.moderation_status, 'active') IN ('active','good')
             AND COALESCE(u.city,'') = $1
         """,
         str(city),
@@ -122,7 +122,7 @@ async def count_active_authors_country(conn: asyncpg.Connection, *, country: str
         JOIN users u ON u.id=p.user_id
         WHERE
             COALESCE(p.is_deleted, 0) = 0
-            AND COALESCE(p.moderation_status, 'active') = 'active'
+            AND COALESCE(p.moderation_status, 'active') IN ('active','good')
             AND COALESCE(u.country,'') = $1
         """,
         str(country),
@@ -156,7 +156,7 @@ async def get_day_photo_rows_city(conn: asyncpg.Connection, *, day_key: str, cit
         WHERE
             p.day_key = $1
             AND COALESCE(p.is_deleted, 0) = 0
-            AND COALESCE(p.moderation_status, 'active') = 'active'
+            AND COALESCE(p.moderation_status, 'active') IN ('active','good')
             AND COALESCE(u.city,'') = $2
         GROUP BY p.id, p.user_id, p.file_id, p.title, u.name, u.username, p.created_at
         """,
@@ -192,7 +192,7 @@ async def get_day_photo_rows_country(conn: asyncpg.Connection, *, day_key: str, 
         WHERE
             p.day_key = $1
             AND COALESCE(p.is_deleted, 0) = 0
-            AND COALESCE(p.moderation_status, 'active') = 'active'
+            AND COALESCE(p.moderation_status, 'active') IN ('active','good')
             AND COALESCE(u.country,'') = $2
         GROUP BY p.id, p.user_id, p.file_id, p.title, u.name, u.username, p.created_at
         """,

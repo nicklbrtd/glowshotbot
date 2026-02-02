@@ -7,9 +7,10 @@ from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
 
 # We reuse the project's asyncpg pool stored in database.py
 try:
-    from database import _assert_pool
+    from database import _assert_pool, _bayes_prior_weight
 except Exception:  # pragma: no cover
     _assert_pool = None  # type: ignore
+    _bayes_prior_weight = None  # type: ignore
 
 
 # ---- constants for results_v2 ----
@@ -87,7 +88,7 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
                 LEFT JOIN ratings r ON r.photo_id = ph.id
                 LEFT JOIN users u ON u.id = ph.user_id
                 WHERE ph.is_deleted = 0
-                  AND ph.moderation_status = 'active'
+                  AND ph.moderation_status IN ('active','good')
                 GROUP BY ph.id, ph.user_id, ph.title, ph.file_id_public, ph.created_at, ph.moderation_status, ph.is_deleted, u.username, u.name
             ),
             filtered AS (
@@ -148,7 +149,7 @@ async def update_hall_of_fame_from_top(top_items: list[dict]) -> None:
             for r in rows:
                 if r["is_deleted"]:
                     statuses[int(r["id"])] = HOF_STATUS_DELETED
-                elif str(r["moderation_status"] or "") != "active":
+                elif str(r["moderation_status"] or "") not in ("active", "good"):
                     statuses[int(r["id"])] = HOF_STATUS_HIDDEN
                 else:
                     statuses[int(r["id"])] = HOF_STATUS_ACTIVE
@@ -218,7 +219,7 @@ async def refresh_hof_statuses() -> None:
             SET status = CASE
                 WHEN ph.id IS NULL THEN $4
                 WHEN ph.is_deleted = 1 THEN $1
-                WHEN ph.moderation_status <> 'active' THEN $2
+                WHEN ph.moderation_status NOT IN ('active','good') THEN $2
                 ELSE $3
             END,
             updated_at = NOW()
