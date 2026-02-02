@@ -181,7 +181,6 @@ def _pick_rated_verb(user: dict | None, lang: str) -> str:
     return "оценил(а)"
 
 
-
 @router.callback_query(F.data.startswith("myresults:"))
 async def profile_my_results(callback: CallbackQuery):
     """Temporary stub: user said they will change the logic for "Мои итоги" later."""
