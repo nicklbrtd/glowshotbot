@@ -502,6 +502,7 @@ EDIT_TAGS: list[tuple[str, str]] = [
     ("architecture", "🏛 Архитектура"),
     ("travel", "🧳 Тревел"),
     ("macro", "🔎 Макро"),
+    ("cosplay", "🧝 Косплей"),
     ("other", "✨ Другое"),
     ("", "🚫 Без тега"),
 ]
@@ -2694,7 +2695,7 @@ async def myphoto_edit_tag(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Доступно с GlowShot Premium 💎.", show_alert=True)
         return
 
-    text = "🏷 <b>Тег</b>\n\nВыбери жанр:"
+    text = "🏷 <b>Тег</b>\n\nВыбери из списка:"
     await callback.message.edit_caption(caption=text, reply_markup=build_tag_kb(photo_id))
     await callback.answer()
 
