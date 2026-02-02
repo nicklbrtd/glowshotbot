@@ -37,6 +37,9 @@ if _AUTHOR_APPLICATIONS_CHAT_ID_RAW:
         AUTHOR_APPLICATIONS_CHAT_ID = int(_AUTHOR_APPLICATIONS_CHAT_ID_RAW)
     except ValueError:
         AUTHOR_APPLICATIONS_CHAT_ID = None
+else:
+    # Default group for author verification requests (fallback if .env is not set)
+    AUTHOR_APPLICATIONS_CHAT_ID = -1003728717861
 
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)
@@ -48,7 +51,7 @@ MANUAL_RECIPIENT = os.getenv("MANUAL_RECIPIENT", "").strip()
 MANUAL_BANK_HINT = os.getenv("MANUAL_BANK_HINT", "").strip() or "Любой банк"
 
 # Optional support contact shown in instructions
-MANUAL_CONTACT = os.getenv("MANUAL_CONTACT", "").strip() or os.getenv("SUPPORT_URL", "") or "@your_username"
+MANUAL_CONTACT = os.getenv("MANUAL_CONTACT", "").strip() or os.getenv("SUPPORT_URL", "") or "@nyqlbrtd"
 
 TB_PASSWORD = os.getenv("TB_PASSWORD", "")
 TB_TERMINAL_KEY = os.getenv("TB_TERMINAL_KEY", "")
