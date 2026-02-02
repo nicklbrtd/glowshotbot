@@ -3,40 +3,44 @@ name: Deploy GlowShot
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          script: |
-            echo "➡️ Перехожу в директорию проекта..."
-            cd /home/nick/glowshotbot
+      - name: Deploy on VDS
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            echo "➡️ Обновляю репозиторий..."
-            git fetch --all
-            git reset --hard origin/main
+          echo "➡️ Перехожу в директорию проекта..."
+          cd /home/nick/glowshotbot
 
-            echo "➡️ Устанавливаю зависимости..."
-            /home/nick/glowshotbot/venv/bin/pip install -r requirements.txt
+          echo "➡️ Обновляю репозиторий..."
+          git fetch --all
+          git reset --hard origin/main
 
-            echo "➡️ Перезапускаю сервисы..."
-            sudo systemctl restart glowshot-bot
-            sudo systemctl restart glowshot-support
-            sudo systemctl restart tbank-webhook
+          echo "➡️ Активирую venv и ставлю зависимости..."
+          /home/nick/glowshotbot/venv/bin/python -m pip install --upgrade pip
+          /home/nick/glowshotbot/venv/bin/pip install -r requirements.txt
 
-            echo "➡️ Проверяю статус..."
-            sudo systemctl status glowshot-bot --no-pager || true
-            sudo systemctl status glowshot-support --no-pager || true
-            sudo systemctl status tbank-webhook --no-pager || true
+          echo "➡️ Перезапускаю сервисы..."
+          sudo systemctl restart glowshot-bot
+          sudo systemctl restart glowshot-support
+          sudo systemctl restart tbank-webhook
 
-            echo "🎉 Деплой успешно завершён!"
+          echo "➡️ Проверяю статус..."
+          sudo systemctl --no-pager --full status glowshot-bot || true
+          sudo systemctl --no-pager --full status glowshot-support || true
+          sudo systemctl --no-pager --full status tbank-webhook || true
+
+          echo "🎉 Деплой успешно завершён!"
