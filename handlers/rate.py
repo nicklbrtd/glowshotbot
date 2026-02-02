@@ -839,7 +839,14 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     premium_badge = "💎 " if is_author_premium else ""
     title_mono = f"«<b><code>{escape(title)}</code></b>»"
-    lines.append(f"{premium_badge}{title_mono}")
+    verified_badge = ""
+    try:
+        if author and bool(author.get("is_author")):
+            verified_badge = " ✅ Автор подтвержден"
+    except Exception:
+        verified_badge = ""
+
+    lines.append(f"{premium_badge}{title_mono}{verified_badge}")
 
     tag_badge = _tag_badge(str(photo.get("tag") or ""))
     device_icon = _device_emoji(photo.get("device_type") or photo.get("device_info") or "")

@@ -30,6 +30,7 @@ RU = {
     "profile.btn.awards": "🏆 Награды",
     "profile.btn.results": "🏅 Итоги",
     "profile.btn.be_author": "🧑‍🎨 Стать автором",
+    "profile.btn.author_menu": "🧑‍🎨 Меню автора",
     "profile.btn.edit": "✏️ Редактировать профиль",
     "profile.btn.settings": "⚙️ Настройки",
     "profile.btn.streak": "🔥 Streak",
@@ -142,6 +143,7 @@ RU = {
 
     # Profile edit: channel
     "profile.edit.channel.premium_only": "Привязка ссылки доступна только с GlowShot Premium 💎",
+    "profile.edit.channel.author_allowed": "Для авторов ссылка доступна бесплатно.",
     "profile.edit.channel.ask": "📡 <b>Ссылка</b>\n\nОтправь ссылку на свой Telegram-канал или профиль.\n\nПринимаются только Telegram-ссылки:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.",
     "profile.edit.channel.bad_username": "Это не похоже на корректный @username.\n\nОтправь ссылку вида <code>https://t.me/username</code> или просто <code>@username</code>.",
     "profile.edit.channel.only_tg": "Можно указать только ссылку на Telegram.\n\nПодойдёт:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• или просто <code>@username</code>.",

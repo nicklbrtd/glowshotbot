@@ -608,7 +608,10 @@ async def build_profile_view(user: dict):
     text = "\n".join(text_lines)
 
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("profile.btn.be_author", lang), callback_data="profile:be_author")
+    if user.get("is_author"):
+        kb.button(text=t("profile.btn.author_menu", lang), callback_data="author:menu")
+    else:
+        kb.button(text=t("profile.btn.be_author", lang), callback_data="profile:be_author")
     kb.button(text=t("profile.btn.awards", lang), callback_data="profile:awards")
     kb.button(text=t("profile.btn.edit", lang), callback_data="profile:edit")
     kb.button(text=t("profile.btn.settings", lang), callback_data="profile:settings")
@@ -849,9 +852,11 @@ async def profile_edit_channel(callback: CallbackQuery, state: FSMContext):
         except Exception:
             is_active = False
 
-    if (not is_active) and not (user.get("tg_channel_link")):
+    is_author = bool(user.get("is_author"))
+
+    if (not is_active) and (not is_author) and not (user.get("tg_channel_link")):
         await callback.answer(
-            t("profile.edit.channel.premium_only", lang),
+            t("profile.edit.channel.premium_only", lang) + ("\n" + t("profile.edit.channel.author_allowed", lang) if is_author else ""),
             show_alert=True,
         )
         return

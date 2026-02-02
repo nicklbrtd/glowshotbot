@@ -30,6 +30,7 @@ EN = {
     "profile.btn.awards": "🏆 Awards",
     "profile.btn.results": "🏅 Results",
     "profile.btn.be_author": "🧑‍🎨 Become an author",
+    "profile.btn.author_menu": "🧑‍🎨 Author menu",
     "profile.btn.edit": "✏️ Edit profile",
     "profile.btn.settings": "⚙️ Settings",
     "profile.btn.streak": "🔥 Streak",
@@ -142,6 +143,7 @@ EN = {
 
     # Profile edit: channel
     "profile.edit.channel.premium_only": "Link is available only with GlowShot Premium 💎",
+    "profile.edit.channel.author_allowed": "Authors can set the link for free.",
     "profile.edit.channel.ask": "📡 <b>Link</b>\n\nSend your Telegram channel/profile link.\n\nOnly Telegram links are allowed:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.",
     "profile.edit.channel.bad_username": "That doesn't look like a valid @username.\n\nSend <code>https://t.me/username</code> or just <code>@username</code>.",
     "profile.edit.channel.only_tg": "You can set only a Telegram link.\n\nValid examples:\n• <code>https://t.me/username</code>\n• <code>https://telegram.me/username</code>\n• or just <code>@username</code>.",

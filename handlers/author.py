@@ -30,6 +30,23 @@ class AuthorApplyStates(StatesGroup):
     waiting_more_files = State()
 
 
+@router.callback_query(F.data == "author:menu")
+async def author_menu(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    lang = _get_lang(user)
+    text = (
+        "🧑‍🎨 <b>Меню автора</b>\n"
+        "Скоро добавим больше функций для авторов.\n"
+        "Пока доступно: повышенный вес оценок, особый вид карточек и канал в профиле."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
 def _author_target_chat_id() -> int | None:
     """
     Returns chat id where author applications should be sent.
@@ -393,6 +410,14 @@ async def submit_author_application(*, message: Message, state: FSMContext, work
     user = await get_user_by_tg_id(message.from_user.id)
     lang = _get_lang(user)
     total = len(works)
+    if total < 5 or total > 10:
+        await _edit_screen(
+            message.bot,
+            state,
+            t("profile.author.apply.need_more", lang, count=total),
+            _author_apply_kb(lang),
+        )
+        return False
 
     target_chat_id = _author_target_chat_id()
     if target_chat_id is None:
@@ -516,6 +541,10 @@ async def author_request_action(callback: CallbackQuery):
             text=t("profile.author.apply.join_group", _get_lang(await get_user_by_tg_id(target_tg_id))),
             url=AUTHOR_GROUP_INVITE_LINK,
         )
+        join_kb.button(
+            text="✅ Готово",
+            callback_data="author:join:done",
+        )
         try:
             await callback.message.bot.send_message(
                 chat_id=target_tg_id,
@@ -556,6 +585,15 @@ async def author_request_action(callback: CallbackQuery):
             pass
 
     await callback.answer("Обновлено")
+
+
+@router.callback_query(F.data == "author:join:done")
+async def author_join_done(callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
 
 
 @router.chat_join_request()
