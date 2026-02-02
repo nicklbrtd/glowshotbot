@@ -112,6 +112,7 @@ async def premium_expiry_reminder_loop(bot: Bot) -> None:
 from handlers.legal_center import router as help_center_router
 from handlers.admin import router as admin_router
 from handlers import (
+    author,
     start,
     upload,
     rate,
@@ -477,6 +478,7 @@ async def main() -> None:
 
     # Роутеры
     dp.include_router(linklike.router)
+    dp.include_router(author.router)
     dp.include_router(start.router)
     dp.include_router(registration.router)
     dp.include_router(profile.router)

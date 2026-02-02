@@ -1377,6 +1377,8 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_points INTEGER NOT NULL DEFAULT 0;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_code TEXT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS rank_updated_at TEXT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_author INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS author_verified_at TEXT;")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'feed';")
         await conn.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS source_code TEXT;")
         await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id TEXT;")
@@ -1717,6 +1719,32 @@ async def get_user_by_tg_id(tg_id: int) -> dict | None:
             int(tg_id),
         )
     return dict(row) if row else None
+
+
+async def set_user_author_status_by_tg_id(tg_id: int, is_author: bool) -> None:
+    """
+    Marks user as verified author (or removes flag).
+    """
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_author=$1, author_verified_at=$2, updated_at=$3 WHERE tg_id=$4",
+            int(is_author),
+            now if is_author else None,
+            now,
+            int(tg_id),
+        )
+
+
+async def is_user_author_by_tg_id(tg_id: int) -> bool:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT is_author FROM users WHERE tg_id=$1",
+            int(tg_id),
+        )
+    return bool(v)
 
 
 async def get_user_by_tg_id_any(tg_id: int) -> dict | None:
