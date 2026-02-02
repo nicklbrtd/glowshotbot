@@ -328,7 +328,12 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
     is_rateable = bool(photo.get("ratings_enabled", True))
     if not is_rateable:
         caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
-        kb = build_view_only_keyboard(int(photo["id"]), lang=rater_lang)
+        kb = build_view_only_keyboard(
+            int(photo["id"]),
+            show_details=False,
+            is_premium=is_premium_rater,
+            lang=rater_lang,
+        )
     else:
         kb = build_rate_keyboard(
             int(photo["id"]),
@@ -523,15 +528,28 @@ def build_rate_keyboard(photo_id: int, *, is_premium: bool = False, show_details
     return kb.as_markup()
 
 
-def build_view_only_keyboard(photo_id: int, *, lang: str = "ru") -> InlineKeyboardMarkup:
+def build_view_only_keyboard(
+    photo_id: int,
+    *,
+    show_details: bool = False,
+    is_premium: bool = False,
+    lang: str = "ru",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
         InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}"),
     )
+    if show_details and is_premium:
+        kb.row(
+            InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}"),
+        )
     kb.row(
         InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
-        InlineKeyboardButton(text=t("rate.btn.more", lang), callback_data=f"rate:more:{photo_id}:1"),
+        InlineKeyboardButton(
+            text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
+            callback_data=f"rate:more:{photo_id}:{0 if show_details else 1}",
+        ),
     )
     return kb.as_markup()
 
@@ -1920,8 +1938,20 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         if author and author.get("tg_channel_link"):
             photo["user_tg_channel_link"] = author.get("tg_channel_link")
 
+    is_rateable = bool((photo or {}).get("ratings_enabled", True))
     caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=to_show)
-    kb = build_rate_keyboard(photo_id, is_premium=viewer_is_premium, show_details=to_show, lang=viewer_lang)
+    if not is_rateable and "не для оценивания" not in caption.lower():
+        caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
+
+    if is_rateable:
+        kb = build_rate_keyboard(photo_id, is_premium=viewer_is_premium, show_details=to_show, lang=viewer_lang)
+    else:
+        kb = build_view_only_keyboard(
+            photo_id,
+            show_details=to_show,
+            is_premium=viewer_is_premium,
+            lang=viewer_lang,
+        )
 
     try:
         await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
