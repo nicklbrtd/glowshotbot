@@ -40,7 +40,7 @@ EN = {
     "profile.author.apply.title": "🧑‍🎨 Author verification",
     "profile.author.apply.benefits": "🧑‍🎨 <b>Become an author</b>\n\nYou get:\n• author badge and separate menu\n• higher weight of your ratings\n• richer stats and special cards\n• applications reviewed in the author group\n\nReady to continue?",
     "profile.author.apply.continue": "Continue",
-    "profile.author.apply.ask_channel": "Send your Telegram channel link (@username or t.me/username).\nIf you don’t have one — tap “No channel”.",
+    "profile.author.apply.ask_channel": "Send your photography Telegram channel link with your works (@username or t.me/username).\nIf you don’t have one — tap “No channel”.",
     "profile.author.apply.no_channel_btn": "No channel",
     "profile.author.apply.ask_works": "Send 5–10 of your works as <b>files</b> (RAW/PNG/JPEG etc.).\nCurrent: {count}.\nAfter 5 files tap “Next”.",
     "profile.author.apply.works_next": "Next",

@@ -45,6 +45,50 @@ def _author_apply_kb(lang: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+async def _safe_delete(message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+def _get_screen_ids(data: dict) -> tuple[int | None, int | None]:
+    return data.get("author_msg_id"), data.get("author_chat_id")
+
+
+async def _edit_screen(bot, state: FSMContext, text: str, kb: InlineKeyboardMarkup, parse_mode: str = "HTML"):
+    data = await state.get_data()
+    msg_id, chat_id = _get_screen_ids(data)
+    if msg_id and chat_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=text,
+                reply_markup=kb,
+                parse_mode=parse_mode,
+            )
+            return True
+        except Exception:
+            return False
+    return False
+
+
+async def _should_warn_media_group(state: FSMContext, key: str, media_group_id: str | None) -> bool:
+    """
+    Returns True if we should show a warning for this media_group_id (or no group id).
+    Prevents spamming same warning for albums.
+    """
+    if not media_group_id:
+        return True
+    data = await state.get_data()
+    warned = data.get(key)
+    if warned == media_group_id:
+        return False
+    await state.update_data(**{key: media_group_id})
+    return True
+
+
 async def _is_author_admin(bot, user_id: int) -> bool:
     """
     Checks if user is admin of the author applications chat.
@@ -113,7 +157,13 @@ async def profile_be_author(callback: CallbackQuery, state: FSMContext):
 
     lang = _get_lang(user)
     await state.clear()
-    await state.update_data(author_apply_photos=[], author_channel=None, author_reason=None)
+    await state.update_data(
+        author_apply_photos=[],
+        author_channel=None,
+        author_reason=None,
+        author_msg_id=callback.message.message_id,
+        author_chat_id=callback.message.chat.id,
+    )
 
     text = t("profile.author.apply.benefits", lang)
     kb = InlineKeyboardBuilder()
@@ -150,11 +200,7 @@ async def author_step_channel(callback: CallbackQuery, state: FSMContext):
     kb.button(text=t("profile.author.apply.no_channel_btn", lang), callback_data="author:channel:none")
     kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="author:cancel")
     kb.adjust(1, 1)
-    await callback.message.edit_text(
-        t("profile.author.apply.ask_channel", lang),
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
-    )
+    await _edit_screen(callback.message.bot, state, t("profile.author.apply.ask_channel", lang), kb.as_markup())
     await callback.answer()
 
 
@@ -170,11 +216,7 @@ async def author_channel_none(callback: CallbackQuery, state: FSMContext):
     kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="author:cancel")
     kb.adjust(1, 1)
 
-    await callback.message.edit_text(
-        t("profile.author.apply.ask_works", lang, count=0),
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
-    )
+    await _edit_screen(callback.message.bot, state, t("profile.author.apply.ask_works", lang, count=0), kb.as_markup())
     await callback.answer()
 
 
@@ -184,10 +226,13 @@ async def author_channel_text(message: Message, state: FSMContext):
     lang = _get_lang(user)
     chan = _normalize_author_channel(message.text or "")
     if not chan:
-        await message.reply(
-            t("profile.author.apply.channel_invalid", lang),
-            parse_mode="HTML",
+        await _edit_screen(
+            message.bot,
+            state,
+            t("profile.author.apply.channel_invalid", lang) + "\n\n" + t("profile.author.apply.ask_channel", lang),
+            _author_apply_kb(lang),
         )
+        await _safe_delete(message)
         return
 
     await state.update_data(author_channel=chan)
@@ -198,21 +243,18 @@ async def author_channel_text(message: Message, state: FSMContext):
     kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="author:cancel")
     kb.adjust(1, 1)
 
-    await message.reply(
-        t("profile.author.apply.channel_saved", lang, channel=chan),
-        parse_mode="HTML",
+    await _edit_screen(
+        message.bot,
+        state,
+        t("profile.author.apply.channel_saved", lang, channel=chan) + "\n\n" + t("profile.author.apply.ask_works", lang, count=0),
+        kb.as_markup(),
     )
-    await message.answer(
-        t("profile.author.apply.ask_works", lang, count=0),
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
-    )
+    await _safe_delete(message)
 
 
 @router.message(AuthorApplyStates.waiting_channel)
 async def author_channel_other(message: Message):
-    # Ignore non-text in channel step
-    pass
+    await _safe_delete(message)
 
 
 @router.message(AuthorApplyStates.waiting_works, F.document)
@@ -222,14 +264,28 @@ async def author_collect_work(message: Message, state: FSMContext):
     doc = message.document
     mime = (doc.mime_type or "").lower()
     if not mime.startswith("image/"):
-        await message.reply("Нужен файл-изображение (RAW/PNG/JPEG и т.п.). Отправь как файл, без сжатия.")
+        if await _should_warn_media_group(state, "warn_non_image_works", message.media_group_id):
+            await _edit_screen(
+                message.bot,
+                state,
+                "Нужен файл-изображение (RAW/PNG/JPEG и т.п.). Отправь как файл, без сжатия.\n\n"
+                + t("profile.author.apply.ask_works", lang, count=len(works)),
+                _author_apply_kb(lang),
+            )
+        await _safe_delete(message)
         return
 
     data = await state.get_data()
     works: list[str] = list(data.get("author_apply_photos") or [])
 
     if len(works) >= 10:
-        await message.reply(t("profile.author.apply.too_many", lang), parse_mode="HTML")
+        await _edit_screen(
+            message.bot,
+            state,
+            t("profile.author.apply.too_many", lang),
+            _author_apply_kb(lang),
+        )
+        await _safe_delete(message)
         return
 
     fid = doc.file_id
@@ -242,27 +298,34 @@ async def author_collect_work(message: Message, state: FSMContext):
     kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="author:cancel")
     kb.adjust(1, 1)
 
-    await message.reply(
+    await _edit_screen(
+        message.bot,
+        state,
         t("profile.author.apply.count", lang, count=len(works)),
-        parse_mode="HTML",
-        reply_markup=kb.as_markup(),
+        kb.as_markup(),
     )
+    await _safe_delete(message)
 
 
 @router.message(AuthorApplyStates.waiting_works, F.photo)
 async def author_reject_photo(message: Message, state: FSMContext):
     user = await get_user_by_tg_id(message.from_user.id)
     lang = _get_lang(user)
-    await message.reply(
-        "Отправь работы как <b>файлы</b>, без сжатия. Используй скрепку → Файл.",
-        parse_mode="HTML",
-    )
+    if await _should_warn_media_group(state, "warn_photo_as_file_works", message.media_group_id):
+        await _edit_screen(
+            message.bot,
+            state,
+            "Отправь работы как <b>файлы</b>, без сжатия. Используй скрепку → Файл.\n\n"
+            + t("profile.author.apply.ask_works", lang, count=len((await state.get_data()).get("author_apply_photos") or [])),
+            _author_apply_kb(lang),
+        )
+    await _safe_delete(message)
 
 
 @router.message(AuthorApplyStates.waiting_works)
 async def author_waiting_other(message: Message, state: FSMContext):
     # ignore other types
-    pass
+    await _safe_delete(message)
 
 
 @router.callback_query(F.data == "author:works:next")
@@ -277,10 +340,11 @@ async def author_works_next(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AuthorApplyStates.waiting_bio)
-    await callback.message.edit_text(
+    await _edit_screen(
+        callback.message.bot,
+        state,
         t("profile.author.apply.ask_bio", lang),
-        reply_markup=build_back_kb(callback_data="author:cancel", text=t("profile.author.apply.cancel_btn", lang)),
-        parse_mode="HTML",
+        build_back_kb(callback_data="author:cancel", text=t("profile.author.apply.cancel_btn", lang)),
     )
     await callback.answer()
 
@@ -292,7 +356,13 @@ async def author_bio(message: Message, state: FSMContext):
     text = (message.text or "").strip()
     words = text.split()
     if len(words) > 30:
-        await message.reply(t("profile.author.apply.bio_too_long", lang), parse_mode="HTML")
+        await _edit_screen(
+            message.bot,
+            state,
+            t("profile.author.apply.bio_too_long", lang) + "\n\n" + t("profile.author.apply.ask_bio", lang),
+            build_back_kb(callback_data="author:cancel", text=t("profile.author.apply.cancel_btn", lang)),
+        )
+        await _safe_delete(message)
         return
 
     data = await state.get_data()
@@ -300,8 +370,17 @@ async def author_bio(message: Message, state: FSMContext):
     channel = data.get("author_channel")
 
     await state.update_data(author_reason=text)
-    await submit_author_application(message=message, works=works, channel=channel, reason=text)
+    ok = await submit_author_application(message=message, state=state, works=works, channel=channel, reason=text)
+    # Clear screen text after submission
+    if ok:
+        await _edit_screen(
+            message.bot,
+            state,
+            t("profile.author.apply.sent", lang),
+            build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+        )
     await state.clear()
+    await _safe_delete(message)
 
 
 @router.message(AuthorApplyStates.waiting_bio)
@@ -310,19 +389,20 @@ async def author_bio_other(message: Message):
     pass
 
 
-async def submit_author_application(*, message: Message, works: list[str], channel: str | None, reason: str):
+async def submit_author_application(*, message: Message, state: FSMContext, works: list[str], channel: str | None, reason: str) -> bool:
     user = await get_user_by_tg_id(message.from_user.id)
     lang = _get_lang(user)
-
     total = len(works)
-    if total < 5 or total > 10:
-        await message.answer(t("profile.author.apply.need_more", lang, count=total), parse_mode="HTML")
-        return
 
     target_chat_id = _author_target_chat_id()
     if target_chat_id is None:
-        await message.answer(t("profile.author.apply.no_chat", lang), parse_mode="HTML")
-        return
+        await _edit_screen(
+            message.bot,
+            state,
+            t("profile.author.apply.no_chat", lang),
+            build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+        )
+        return False
 
     name = (user.get("name") or user.get("display_name") or "—") if user else "—"
     username = user.get("username") if user else None
@@ -368,17 +448,15 @@ async def submit_author_application(*, message: Message, works: list[str], chann
                 media.append(InputMediaDocument(media=fid))
         await message.bot.send_media_group(chat_id=target_chat_id, media=media)
     except Exception:
-        await message.answer(
+        await _edit_screen(
+            message.bot,
+            state,
             "Не удалось отправить заявку, попробуй позже или напиши в поддержку.",
-            reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
+            build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
         )
-        return
+        return False
 
-    await message.answer(
-        t("profile.author.apply.sent", lang),
-        reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
-        parse_mode="HTML",
-    )
+    return True
 
 
 @router.callback_query(F.data == "profile:author:submit")
@@ -545,17 +623,18 @@ async def author_more_add(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
     await state.set_state(AuthorApplyStates.waiting_more_files)
-    await state.update_data(author_more_files=[])
+    await state.update_data(author_more_files=[], author_msg_id=callback.message.message_id, author_chat_id=callback.message.chat.id)
 
     kb = InlineKeyboardBuilder()
     kb.button(text=t("profile.author.apply.more_done_btn", lang), callback_data="author:more:done")
     kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="author:cancel")
     kb.adjust(1, 1)
 
-    await callback.message.edit_text(
+    await _edit_screen(
+        callback.message.bot,
+        state,
         t("profile.author.apply.more_send_files", lang),
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
+        kb.as_markup(),
     )
     await callback.answer()
 
@@ -565,10 +644,11 @@ async def author_more_done(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
     await state.clear()
-    await callback.message.edit_text(
+    await _edit_screen(
+        callback.message.bot,
+        state,
         t("profile.author.apply.more_sent", lang),
-        reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
-        parse_mode="HTML",
+        build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
     )
     await callback.answer()
 
@@ -580,7 +660,14 @@ async def author_more_collect(message: Message, state: FSMContext):
     doc = message.document
     mime = (doc.mime_type or "").lower()
     if not mime.startswith("image/"):
-        await message.reply(t("profile.author.apply.more_invalid", lang), parse_mode="HTML")
+        if await _should_warn_media_group(state, "warn_non_image_more", message.media_group_id):
+            await _edit_screen(
+                message.bot,
+                state,
+                t("profile.author.apply.more_invalid", lang),
+                _author_apply_kb(lang),
+            )
+        await _safe_delete(message)
         return
 
     data = await state.get_data()
@@ -612,14 +699,30 @@ async def author_more_collect(message: Message, state: FSMContext):
     kb.button(text=t("profile.author.apply.cancel_btn", lang), callback_data="author:cancel")
     kb.adjust(1, 1)
 
-    await message.reply(
+    await _edit_screen(
+        message.bot,
+        state,
         t("profile.author.apply.more_count", lang, count=len(more_files)),
-        reply_markup=kb.as_markup(),
-        parse_mode="HTML",
+        kb.as_markup(),
     )
+    await _safe_delete(message)
+
+
+@router.message(AuthorApplyStates.waiting_more_files, F.photo)
+async def author_more_photo_warn(message: Message, state: FSMContext):
+    user = await get_user_by_tg_id(message.from_user.id)
+    lang = _get_lang(user)
+    if await _should_warn_media_group(state, "warn_photo_as_file_more", message.media_group_id):
+        await _edit_screen(
+            message.bot,
+            state,
+            "Отправь дополнительные работы как <b>файлы</b>, без сжатия. Используй скрепку → Файл.",
+            _author_apply_kb(lang),
+        )
+    await _safe_delete(message)
 
 
 @router.message(AuthorApplyStates.waiting_more_files)
 async def author_more_other(message: Message):
-    # ignore non-documents
-    pass
+    # ignore other types
+    await _safe_delete(message)
