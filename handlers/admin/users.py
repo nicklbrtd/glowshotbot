@@ -20,6 +20,7 @@ from database import (
     get_user_by_tg_id,
     get_user_by_id,
     get_user_by_username,
+    update_user_name,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
     get_user_rating_summary,
@@ -35,6 +36,7 @@ from .common import (
     _ensure_admin,
     ensure_primary_bot,
 )
+from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.time import get_moscow_now
 
 router = Router()
@@ -154,6 +156,7 @@ class UserAdminStates(StatesGroup):
     waiting_identifier_for_profile = State()
     waiting_ban_reason = State()
     waiting_ban_days = State()
+    waiting_new_name = State()
 
 
 
@@ -383,6 +386,7 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
     kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
     kb.button(text="📸 Фотография", callback_data="admin:users:photo")
     kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="✏️ Изменить имя", callback_data="admin:users:rename")
 
     # награды вынесем в awards.py, но кнопки уже оставляем
     kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
@@ -397,7 +401,7 @@ async def admin_users_find_profile(message: Message, state: FSMContext):
     kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
 
-    kb.adjust(2, 3, 1, 2)
+    kb.adjust(2, 2, 2, 1, 2)
 
     await _edit_user_prompt_or_answer(
         message,
@@ -596,6 +600,7 @@ async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext
     kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
     kb.button(text="📸 Фотография", callback_data="admin:users:photo")
     kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="✏️ Изменить имя", callback_data="admin:users:rename")
 
     kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
     kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
@@ -605,7 +610,7 @@ async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext
     kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
 
-    kb.adjust(2, 3, 1, 2)
+    kb.adjust(2, 2, 2, 1, 2)
 
     await _edit_user_prompt_or_answer(
         callback.message,
@@ -614,6 +619,177 @@ async def admin_users_back_to_profile(callback: CallbackQuery, state: FSMContext
         reply_markup=kb.as_markup(),
     )
     await callback.answer()
+
+
+# =============================================================
+# ==== ПОЛЬЗОВАТЕЛИ: ИЗМЕНИТЬ ИМЯ ==============================
+# =============================================================
+
+
+@router.callback_query(F.data == "admin:users:rename")
+async def admin_users_rename_start(callback: CallbackQuery, state: FSMContext):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    data = await state.get_data()
+    target_user_id = data.get("selected_user_id")
+    if not target_user_id:
+        await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
+        return
+
+    await state.set_state(UserAdminStates.waiting_new_name)
+
+    user = data.get("selected_user_profile") or {}
+    current_name = (user.get("name") or "—").strip()
+    text = (
+        "<b>Изменить имя пользователя</b>\n\n"
+        f"Текущее имя: <b>{html.escape(current_name)}</b>\n\n"
+        "Отправь новое имя одним сообщением.\n"
+        "Без ссылок, @username и упоминаний каналов."
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к профилю", callback_data="admin:users:profile")
+    kb.adjust(1)
+
+    await _edit_user_prompt_or_answer(
+        callback.message,
+        state,
+        text=text,
+        reply_markup=kb.as_markup(),
+    )
+    await callback.answer()
+
+
+@router.message(UserAdminStates.waiting_new_name, F.text)
+async def admin_users_rename_input(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    target_user_id = data.get("selected_user_id")
+    target_tg_id = data.get("selected_user_tg_id")
+    if not target_user_id:
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Сначала найди пользователя по @username или ID.",
+        )
+        await state.set_state(UserAdminStates.waiting_identifier_for_profile)
+        return
+
+    new_name = (message.text or "").strip()
+    if not new_name:
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Имя не может быть пустым. Отправь новое имя одним сообщением.",
+        )
+        return
+
+    if has_links_or_usernames(new_name) or has_promo_channel_invite(new_name):
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "В имени нельзя оставлять @username, ссылки или рекламу. Отправь другое имя.",
+        )
+        return
+
+    try:
+        await update_user_name(int(target_user_id), new_name)
+    except Exception:
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Не удалось обновить имя. Попробуй ещё раз.",
+        )
+        return
+
+    # Обновим профиль для админки
+    user = await get_user_by_id(int(target_user_id)) or (
+        await get_user_by_tg_id(int(target_tg_id)) if target_tg_id else None
+    )
+    if not user:
+        await _edit_user_prompt_or_answer(
+            message,
+            state,
+            "Пользователь не найден. Попробуй ещё раз через поиск.",
+        )
+        await state.set_state(UserAdminStates.waiting_identifier_for_profile)
+        return
+
+    await state.update_data(
+        selected_user_profile=user,
+        selected_user_tg_id=user.get("tg_id"),
+    )
+    target_tg_id = user.get("tg_id") or target_tg_id
+
+    block_status = await get_user_block_status_by_tg_id(target_tg_id) if target_tg_id else {}
+    rating_summary = await get_user_rating_summary(int(target_user_id))
+    admin_stats = await get_user_admin_stats(int(target_user_id))
+    awards = await get_awards_for_user(int(target_user_id))
+
+    text = await _render_admin_user_profile(
+        user=user,
+        block_status=block_status,
+        rating_summary=rating_summary,
+        admin_stats=admin_stats,
+        awards=awards,
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
+    kb.button(text="📸 Фотография", callback_data="admin:users:photo")
+    kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="✏️ Изменить имя", callback_data="admin:users:rename")
+    kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
+    kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
+    kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
+    if bool(block_status.get("is_blocked")):
+        kb.button(text="🔓 Разбан", callback_data="admin:users:unban")
+    else:
+        kb.button(text="🚫 Бан", callback_data="admin:users:ban")
+    kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(2, 2, 2, 1, 2)
+
+    await _edit_user_prompt_or_answer(
+        message,
+        state,
+        text=text,
+        reply_markup=kb.as_markup(),
+    )
+    await state.set_state(UserAdminStates.waiting_identifier_for_profile)
+
+    # Уведомляем пользователя
+    if target_tg_id:
+        try:
+            kb_user = InlineKeyboardBuilder()
+            kb_user.button(text="Понятно", callback_data="user:notify_seen")
+            kb_user.adjust(1)
+            main_bot = ensure_primary_bot(message.bot)
+            await main_bot.send_message(
+                chat_id=int(target_tg_id),
+                text=(
+                    "Не уследили за запретами в нике...\n\n"
+                    f"Ваш ник был изменен админом на <b>{html.escape(new_name)}</b>."
+                ),
+                reply_markup=kb_user.as_markup(),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+
+
+@router.message(UserAdminStates.waiting_new_name)
+async def admin_users_rename_input_non_text(message: Message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 # =============================================================
@@ -758,13 +934,14 @@ async def admin_users_unban(callback: CallbackQuery, state: FSMContext):
     kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
     kb.button(text="📸 Фотография", callback_data="admin:users:photo")
     kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="✏️ Изменить имя", callback_data="admin:users:rename")
     kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
     kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
     kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
     kb.button(text="🚫 Бан", callback_data="admin:users:ban")
     kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 3, 1, 2)
+    kb.adjust(2, 2, 2, 1, 2)
 
     await _edit_user_prompt_or_answer(
         callback.message,
@@ -883,13 +1060,14 @@ async def admin_users_ban_reason(message: Message, state: FSMContext):
     kb.button(text="👁 Посмотреть профиль", callback_data="admin:users:profile")
     kb.button(text="📸 Фотография", callback_data="admin:users:photo")
     kb.button(text="📊 Статистика", callback_data="admin:users:stats")
+    kb.button(text="✏️ Изменить имя", callback_data="admin:users:rename")
     kb.button(text="🏆 Награды / ачивки", callback_data="admin:users:awards")
     kb.button(text="🎁 Выдать награду/ачивку", callback_data="admin:users:award:create")
     kb.button(text="🏅 Выдать «Бета‑тестер»", callback_data="admin:users:award:beta")
     kb.button(text="🔓 Разбан", callback_data="admin:users:unban")
     kb.button(text="🔁 Другой пользователь", callback_data="admin:users")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 3, 1, 2)
+    kb.adjust(2, 2, 2, 1, 2)
 
     await _edit_user_prompt_or_answer(message, state, text, reply_markup=kb.as_markup())
     await state.set_state(UserAdminStates.waiting_identifier_for_profile)

@@ -28,6 +28,7 @@ _COMMON_TLDS: Final[tuple[str, ...]] = (
 )
 
 _DOMAIN_RE: Final[re.Pattern[str]] = re.compile(r"\b[\w-]{2,}\.[a-z]{2,}\b", re.IGNORECASE)
+_AT_SIGNS: Final[tuple[str, ...]] = ("@", "＠", "﹫")
 
 
 def has_links_or_usernames(text: str | None) -> bool:
@@ -57,7 +58,7 @@ def has_links_or_usernames(text: str | None) -> bool:
     if _DOMAIN_RE.search(lowered):
         return True
 
-    if "@" in text:
+    if any(sign in text for sign in _AT_SIGNS):
         return True
 
     return False
