@@ -213,9 +213,9 @@ async def _render_home(*, state: FSMContext, bot, tg_id: int) -> None:
     await _edit_screen(bot, state, text, _kb_main())
 
 
-@router.message(Command("feesback"))
-async def cmd_feesback(message: Message, state: FSMContext):
-    if should_throttle(message.from_user.id, "feesback:cmd", 1.2):
+@router.message(Command("feedback"))
+async def cmd_feedback(message: Message, state: FSMContext):
+    if should_throttle(message.from_user.id, "feedback:cmd", 1.2):
         return
 
     user = await get_user_by_tg_id(message.from_user.id)

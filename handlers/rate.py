@@ -852,6 +852,7 @@ async def _edit_rate_message(
     *,
     caption: str,
     reply_markup: InlineKeyboardMarkup,
+    show_caption_above_media: bool = True,
 ) -> None:
     """Редактирование карточки оценивания с сохранением подписи над фото."""
     if message.photo:
@@ -859,7 +860,7 @@ async def _edit_rate_message(
             media=message.photo[-1].file_id,
             caption=caption,
             parse_mode="HTML",
-            show_caption_above_media=True,
+            show_caption_above_media=show_caption_above_media,
         )
         try:
             await message.edit_media(media=media, reply_markup=reply_markup)
@@ -2534,7 +2535,12 @@ async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
         return
     caption, kb, is_rateable = view
 
-    await _edit_rate_message(callback.message, caption=caption, reply_markup=kb)
+    await _edit_rate_message(
+        callback.message,
+        caption=caption,
+        reply_markup=kb,
+        show_caption_above_media=not to_show,
+    )
 
     try:
         data = await state.get_data()
@@ -2664,7 +2670,12 @@ async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
         return
     caption, kb, is_rateable = view
 
-    await _edit_rate_message(callback.message, caption=caption, reply_markup=kb)
+    await _edit_rate_message(
+        callback.message,
+        caption=caption,
+        reply_markup=kb,
+        show_caption_above_media=True,
+    )
 
     if is_rateable:
         try:
