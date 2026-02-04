@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from utils.time import get_moscow_now
 from utils.charts import render_activity_chart
 from database import get_activity_counts_by_hour, get_activity_counts_by_day, log_bot_error
-from .common import _ensure_admin, edit_or_answer
+from .common import _ensure_admin, edit_or_answer, ensure_primary_bot
 
 
 router = Router(name="admin_activity")
@@ -65,21 +65,27 @@ async def _send_activity_chart(
     labels: list[str],
 ) -> None:
     try:
+        primary_bot = ensure_primary_bot(callback.message.bot)
+        send_bot = primary_bot or callback.message.bot
         chart = render_activity_chart(counts, labels)
         chart_file = BufferedInputFile(chart.getvalue(), filename="activity.png")
         caption = f"📈 <b>Активность</b>\n{title}"
 
         data = await state.get_data()
         prev_id = data.get("activity_chart_msg_id")
+        prev_bot = data.get("activity_chart_bot") or "current"
         if prev_id:
             try:
-                await callback.message.bot.delete_message(chat_id=callback.message.chat.id, message_id=int(prev_id))
+                if prev_bot == "primary":
+                    await primary_bot.delete_message(chat_id=callback.message.chat.id, message_id=int(prev_id))
+                else:
+                    await callback.message.bot.delete_message(chat_id=callback.message.chat.id, message_id=int(prev_id))
             except Exception:
                 pass
 
         sent = None
         try:
-            sent = await callback.message.bot.send_photo(
+            sent = await send_bot.send_photo(
                 chat_id=callback.message.chat.id,
                 photo=chart_file,
                 caption=caption,
@@ -89,7 +95,7 @@ async def _send_activity_chart(
             )
         except Exception:
             try:
-                sent = await callback.message.bot.send_document(
+                sent = await send_bot.send_document(
                     chat_id=callback.message.chat.id,
                     document=chart_file,
                     caption=caption,
@@ -100,8 +106,29 @@ async def _send_activity_chart(
             except Exception:
                 sent = None
 
+        # Если основному боту нельзя написать — пробуем отправить через текущего
+        if sent is None and send_bot is not callback.message.bot:
+            try:
+                sent = await callback.message.bot.send_photo(
+                    chat_id=callback.message.chat.id,
+                    photo=chart_file,
+                    caption=caption,
+                    reply_markup=_kb_activity_menu(),
+                    parse_mode="HTML",
+                    disable_notification=True,
+                )
+            except Exception:
+                sent = None
+
         if sent is not None:
-            await state.update_data(activity_chart_msg_id=sent.message_id)
+            bot_flag = "primary" if send_bot is primary_bot else "current"
+            await state.update_data(activity_chart_msg_id=sent.message_id, activity_chart_bot=bot_flag)
+            # если открыт support-бот, но график ушёл основному — сообщим коротко
+            if send_bot is primary_bot and send_bot is not callback.message.bot:
+                try:
+                    await callback.answer("График отправлен в основной бот.", show_alert=False)
+                except Exception:
+                    pass
         else:
             raise RuntimeError("send_photo/send_document failed for activity chart")
     except Exception as e:
