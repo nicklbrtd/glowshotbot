@@ -6,7 +6,7 @@ from utils.i18n import t
 from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, LinkPreviewOptions, ReplyKeyboardMarkup
+from aiogram.types import Message, CallbackQuery, LinkPreviewOptions, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -142,6 +142,7 @@ async def _send_fresh_menu(
     prev_menu_id = data.get("menu_msg_id")
     prev_rate_kb_id = data.get("rate_kb_msg_id")
     prev_screen_id = None
+    prev_banner_id = None
     try:
         ui_state = await db.get_user_ui_state(user_id)
         if prev_menu_id is None:
@@ -149,6 +150,7 @@ async def _send_fresh_menu(
         if prev_rate_kb_id is None:
             prev_rate_kb_id = ui_state.get("rate_kb_msg_id")
         prev_screen_id = ui_state.get("screen_msg_id")
+        prev_banner_id = ui_state.get("banner_msg_id")
     except Exception:
         pass
     user = await db.get_user_by_tg_id(user_id)
@@ -186,7 +188,18 @@ async def _send_fresh_menu(
     if prev_menu_id and prev_menu_id != sent.message_id:
         await _delete_message_safely(bot, chat_id, prev_menu_id)
     if prev_rate_kb_id and prev_rate_kb_id != sent.message_id:
-        await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
+        if prev_banner_id and int(prev_rate_kb_id) == int(prev_banner_id):
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(prev_banner_id),
+                    text="🦒",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+            except Exception:
+                pass
+        else:
+            await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
         try:
             await db.set_user_rate_kb_msg_id(user_id, None)
         except Exception:

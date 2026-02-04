@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from utils.time import get_moscow_today, get_moscow_now
 
-from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
 from aiogram.fsm.state import StatesGroup, State
@@ -62,6 +62,7 @@ from database import (
 from handlers.upload import EDIT_TAGS
 from html import escape
 from config import MODERATION_CHAT_ID, RATE_TUTORIAL_PHOTO_FILE_ID
+from utils.banner import ensure_giraffe_banner
 
 router = Router()
 
@@ -672,39 +673,47 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
         except Exception:
             pass
 
-    if old_msg_id:
+    banner_id = None
+    try:
+        ui_state = await get_user_ui_state(chat_id)
+        banner_id = ui_state.get("banner_msg_id")
+    except Exception:
+        banner_id = None
+
+    if banner_id is None:
+        try:
+            banner_id = await ensure_giraffe_banner(bot, chat_id, chat_id)
+        except Exception:
+            banner_id = None
+
+    if banner_id:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=old_msg_id,
+                message_id=int(banner_id),
                 text="🦒",
                 reply_markup=_build_rate_reply_keyboard(lang),
             )
-            data["rate_kb_msg_id"] = old_msg_id
+            data["rate_kb_msg_id"] = int(banner_id)
             await state.set_data(data)
             try:
-                await set_user_rate_kb_msg_id(chat_id, old_msg_id)
+                await set_user_rate_kb_msg_id(chat_id, int(banner_id))
             except Exception:
                 pass
+            if old_msg_id and int(old_msg_id) != int(banner_id):
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+                except Exception:
+                    pass
             return
         except Exception:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-            except Exception:
-                pass
+            pass
 
-    sent = await bot.send_message(
-        chat_id=chat_id,
-        text="🦒",
-        reply_markup=_build_rate_reply_keyboard(lang),
-        disable_notification=True,
-    )
-    data["rate_kb_msg_id"] = sent.message_id
-    await state.set_data(data)
-    try:
-        await set_user_rate_kb_msg_id(chat_id, sent.message_id)
-    except Exception:
-        pass
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception:
+            pass
 
 
 async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
@@ -718,39 +727,47 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
         except Exception:
             pass
 
-    if old_msg_id:
+    banner_id = None
+    try:
+        ui_state = await get_user_ui_state(chat_id)
+        banner_id = ui_state.get("banner_msg_id")
+    except Exception:
+        banner_id = None
+
+    if banner_id is None:
+        try:
+            banner_id = await ensure_giraffe_banner(bot, chat_id, chat_id)
+        except Exception:
+            banner_id = None
+
+    if banner_id:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=old_msg_id,
+                message_id=int(banner_id),
                 text="🦒",
                 reply_markup=_build_next_only_reply_keyboard(lang),
             )
-            data["rate_kb_msg_id"] = old_msg_id
+            data["rate_kb_msg_id"] = int(banner_id)
             await state.set_data(data)
             try:
-                await set_user_rate_kb_msg_id(chat_id, old_msg_id)
+                await set_user_rate_kb_msg_id(chat_id, int(banner_id))
             except Exception:
                 pass
+            if old_msg_id and int(old_msg_id) != int(banner_id):
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+                except Exception:
+                    pass
             return
         except Exception:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-            except Exception:
-                pass
+            pass
 
-    sent = await bot.send_message(
-        chat_id=chat_id,
-        text="🦒",
-        reply_markup=_build_next_only_reply_keyboard(lang),
-        disable_notification=True,
-    )
-    data["rate_kb_msg_id"] = sent.message_id
-    await state.set_data(data)
-    try:
-        await set_user_rate_kb_msg_id(chat_id, sent.message_id)
-    except Exception:
-        pass
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception:
+            pass
 
 
 async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
@@ -764,39 +781,47 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext) ->
         except Exception:
             pass
 
-    if old_msg_id:
+    banner_id = None
+    try:
+        ui_state = await get_user_ui_state(chat_id)
+        banner_id = ui_state.get("banner_msg_id")
+    except Exception:
+        banner_id = None
+
+    if banner_id is None:
+        try:
+            banner_id = await ensure_giraffe_banner(bot, chat_id, chat_id)
+        except Exception:
+            banner_id = None
+
+    if banner_id:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=old_msg_id,
-                text="Нажми «Все понятно!»",
+                message_id=int(banner_id),
+                text="🦒",
                 reply_markup=_build_rate_tutorial_reply_keyboard(),
             )
-            data["rate_kb_msg_id"] = old_msg_id
+            data["rate_kb_msg_id"] = int(banner_id)
             await state.set_data(data)
             try:
-                await set_user_rate_kb_msg_id(chat_id, old_msg_id)
+                await set_user_rate_kb_msg_id(chat_id, int(banner_id))
             except Exception:
                 pass
+            if old_msg_id and int(old_msg_id) != int(banner_id):
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+                except Exception:
+                    pass
             return
         except Exception:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-            except Exception:
-                pass
+            pass
 
-    sent = await bot.send_message(
-        chat_id=chat_id,
-        text="Нажми «Все понятно!»",
-        reply_markup=_build_rate_tutorial_reply_keyboard(),
-        disable_notification=True,
-    )
-    data["rate_kb_msg_id"] = sent.message_id
-    await state.set_data(data)
-    try:
-        await set_user_rate_kb_msg_id(chat_id, sent.message_id)
-    except Exception:
-        pass
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception:
+            pass
 
 
 async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
@@ -808,17 +833,33 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
             msg_id = ui_state.get("rate_kb_msg_id")
         except Exception:
             msg_id = None
-    if msg_id:
+    banner_id = None
+    try:
+        ui_state = await get_user_ui_state(chat_id)
+        banner_id = ui_state.get("banner_msg_id")
+    except Exception:
+        banner_id = None
+    if msg_id and banner_id and int(msg_id) != int(banner_id):
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)
         except Exception:
             pass
-        data["rate_kb_msg_id"] = None
-        await state.set_data(data)
+    if banner_id:
         try:
-            await set_user_rate_kb_msg_id(chat_id, None)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=int(banner_id),
+                text="🦒",
+                reply_markup=ReplyKeyboardRemove(),
+            )
         except Exception:
             pass
+    data["rate_kb_msg_id"] = None
+    await state.set_data(data)
+    try:
+        await set_user_rate_kb_msg_id(chat_id, None)
+    except Exception:
+        pass
 
 
 
