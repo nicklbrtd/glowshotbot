@@ -84,6 +84,7 @@ async def _send_activity_chart(
                 pass
 
         sent = None
+        primary_err: Exception | None = None
         try:
             sent = await send_bot.send_photo(
                 chat_id=callback.message.chat.id,
@@ -93,7 +94,8 @@ async def _send_activity_chart(
                 parse_mode="HTML",
                 disable_notification=True,
             )
-        except Exception:
+        except Exception as e:
+            primary_err = e
             try:
                 sent = await send_bot.send_document(
                     chat_id=callback.message.chat.id,
@@ -103,7 +105,8 @@ async def _send_activity_chart(
                     parse_mode="HTML",
                     disable_notification=True,
                 )
-            except Exception:
+            except Exception as e2:
+                primary_err = primary_err or e2
                 sent = None
 
         # Если основному боту нельзя написать — пробуем отправить через текущего
@@ -127,6 +130,16 @@ async def _send_activity_chart(
             if send_bot is primary_bot and send_bot is not callback.message.bot:
                 try:
                     await callback.answer("График отправлен в основной бот.", show_alert=False)
+                except Exception:
+                    pass
+        elif primary_err and send_bot is primary_bot and send_bot is not callback.message.bot:
+            err_txt = str(primary_err).lower()
+            if "forbidden" in err_txt or "blocked" in err_txt or "chat not found" in err_txt:
+                try:
+                    await callback.message.answer(
+                        "Основной бот не может написать вам.\n"
+                        "Откройте основной бот и нажмите /start, затем попробуйте снова.",
+                    )
                 except Exception:
                     pass
         else:

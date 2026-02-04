@@ -279,6 +279,8 @@ async def admin_logs_test(callback: CallbackQuery):
     if admin_user is None:
         return
 
+    ok = False
+    err: Exception | None = None
     try:
         await log_bot_error(
             chat_id=callback.message.chat.id if callback.message else None,
@@ -289,8 +291,26 @@ async def admin_logs_test(callback: CallbackQuery):
             error_text="Тестовая запись логов",
             traceback_text="admin_logs_test",
         )
-    except Exception:
-        pass
+        ok = True
+    except Exception as e:
+        err = e
+
+    if not ok:
+        text = (
+            "❌ Не удалось записать тестовый лог в БД.\n\n"
+            f"<code>{html.escape(type(err).__name__ if err else 'Error')}: "
+            f"{html.escape(str(err) if err else 'unknown')}</code>"
+        )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📟 Systemd логи", callback_data="admin:logs:systemd")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        await callback.answer()
+        return
 
     text, markup = await _render_logs_page(1)
     text = "✅ Тестовая запись создана.\n\n" + text
