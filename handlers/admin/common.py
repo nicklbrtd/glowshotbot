@@ -127,6 +127,8 @@ class RoleStates(StatesGroup):
 class BroadcastStates(StatesGroup):
     """Рассылка: ждём текст, затем подтверждение."""
     waiting_text = State()
+    waiting_schedule_datetime = State()
+    waiting_schedule_confirm = State()
 
 
 class UserAdminStates(StatesGroup):

@@ -26,6 +26,14 @@ from database import (
     restore_photos_from_status,
     get_user_by_tg_id,
     get_tech_mode_state,
+    get_due_scheduled_broadcasts,
+    mark_scheduled_broadcast_sent,
+    mark_scheduled_broadcast_failed,
+    get_all_users_tg_ids,
+    get_premium_users,
+    get_moderators,
+    get_support_users,
+    get_helpers,
 )
 def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -50,6 +58,7 @@ _ADMIN_ERR_COOLDOWN_SEC = 30.0
 
 TECH_MODE_PHOTO_FILE_ID = "AgACAgIAAyEFAATVO5BPAAMmaYOxPhK6qvJxaQEXZ6qS4EpKVbMAArYOaxs3vSBI4HK0YtIU5asBAAMCAAN3AAM4BA"
 TECH_MODE_CAPTION = "🛠 Технические работы. Попробуй позже."
+_BROADCAST_SEND_DELAY_SEC = 0.05
 
 
 async def _delete_message_after(bot: Bot, chat_id: int, message_id: int, delay_sec: int = 15) -> None:
@@ -58,6 +67,96 @@ async def _delete_message_after(bot: Bot, chat_id: int, message_id: int, delay_s
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
+
+
+async def scheduled_broadcast_loop(bot: Bot) -> None:
+    """Периодически отправляет запланированные рассылки."""
+    while True:
+        try:
+            due = await get_due_scheduled_broadcasts(limit=5)
+        except Exception:
+            due = []
+
+        if not due:
+            await asyncio.sleep(20)
+            continue
+
+        for item in due:
+            try:
+                target = str(item.get("target") or "")
+                text_body = str(item.get("text") or "")
+                created_by = item.get("created_by_tg_id")
+
+                tg_ids: list[int] = []
+
+                def _is_valid_user(u: dict) -> bool:
+                    if not u:
+                        return False
+                    if u.get("is_deleted"):
+                        return False
+                    if u.get("is_blocked"):
+                        return False
+                    name = (u.get("name") or "").strip()
+                    if not name:
+                        return False
+                    return True
+
+                if target == "all":
+                    tg_ids = await get_all_users_tg_ids()
+                elif target == "premium":
+                    users = await get_premium_users()
+                    tg_ids = [int(u["tg_id"]) for u in users if u.get("tg_id") and _is_valid_user(u)]
+                elif target == "moderators":
+                    users = await get_moderators()
+                    tg_ids = [int(u["tg_id"]) for u in users if u.get("tg_id")]
+                elif target == "support":
+                    users = await get_support_users()
+                    tg_ids = [int(u["tg_id"]) for u in users if u.get("tg_id")]
+                elif target == "helpers":
+                    users = await get_helpers()
+                    tg_ids = [int(u["tg_id"]) for u in users if u.get("tg_id")]
+                elif target == "test" and created_by:
+                    tg_ids = [int(created_by)]
+
+                tg_ids = list({uid for uid in tg_ids if uid})
+
+                if target == "all":
+                    header = ""
+                elif target == "premium":
+                    header = "💎 <b>Сообщение для GlowShot Premium</b>"
+                elif target == "test":
+                    header = "🧪 <b>Тестовая рассылка</b>"
+                else:
+                    header = "👥 <b>Сообщение для команды GlowShot</b>"
+
+                send_text = text_body if not header else f"{header}\n\n{text_body}"
+
+                total = len(tg_ids)
+                sent = 0
+
+                for uid in tg_ids:
+                    try:
+                        await bot.send_message(
+                            chat_id=uid,
+                            text=send_text,
+                        )
+                        sent += 1
+                    except Exception:
+                        continue
+                    await asyncio.sleep(_BROADCAST_SEND_DELAY_SEC)
+
+                await mark_scheduled_broadcast_sent(
+                    int(item["id"]),
+                    total_count=total,
+                    sent_count=sent,
+                )
+            except Exception as e:
+                try:
+                    await mark_scheduled_broadcast_failed(int(item.get("id") or 0), str(e))
+                except Exception:
+                    pass
+
+        await asyncio.sleep(1)
 
 
 def _err_key(handler_name: str | None, error_type: str, error_text: str) -> str:
@@ -563,6 +662,8 @@ async def main() -> None:
 
     # фоновая проверка: напоминания о скором окончании премиума
     asyncio.create_task(premium_expiry_reminder_loop(bot))
+    # фоновая отправка запланированных рассылок
+    asyncio.create_task(scheduled_broadcast_loop(bot))
 
     dp = Dispatcher()
 

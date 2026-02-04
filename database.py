@@ -272,6 +272,27 @@ async def _ensure_app_settings_table(conn: asyncpg.Connection) -> None:
     )
 
 
+async def _ensure_scheduled_broadcasts_table(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_broadcasts (
+            id BIGSERIAL PRIMARY KEY,
+            target TEXT NOT NULL,
+            text TEXT NOT NULL,
+            scheduled_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_by_tg_id BIGINT,
+            created_at TEXT NOT NULL,
+            sent_at TEXT,
+            total_count INTEGER,
+            sent_count INTEGER,
+            error_text TEXT,
+            updated_at TEXT
+        );
+        """
+    )
+
+
 async def get_user_ui_state(tg_id: int) -> dict:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -404,6 +425,153 @@ async def set_tech_mode_state(*, enabled: bool, start_at: str | None) -> None:
             """,
             1 if enabled else 0,
             start_at,
+            get_moscow_now_iso(),
+        )
+
+# -------------------- Scheduled broadcasts --------------------
+
+async def create_scheduled_broadcast(
+    *,
+    target: str,
+    text: str,
+    scheduled_at_iso: str,
+    created_by_tg_id: int | None = None,
+) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_scheduled_broadcasts_table(conn)
+        now = get_moscow_now_iso()
+        row = await conn.fetchrow(
+            """
+            INSERT INTO scheduled_broadcasts (target, text, scheduled_at, status, created_by_tg_id, created_at, updated_at)
+            VALUES ($1,$2,$3,'pending',$4,$5,$5)
+            RETURNING *
+            """,
+            str(target),
+            str(text),
+            str(scheduled_at_iso),
+            int(created_by_tg_id) if created_by_tg_id is not None else None,
+            now,
+        )
+    return dict(row) if row else {}
+
+
+async def get_due_scheduled_broadcasts(limit: int = 10) -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_scheduled_broadcasts_table(conn)
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM scheduled_broadcasts
+            WHERE status='pending'
+              AND scheduled_at::timestamp <= $1::timestamp
+            ORDER BY scheduled_at ASC, id ASC
+            LIMIT $2
+            """,
+            get_moscow_now_iso(),
+            int(limit),
+        )
+    return [dict(r) for r in rows]
+
+
+async def mark_scheduled_broadcast_sent(
+    broadcast_id: int,
+    *,
+    total_count: int,
+    sent_count: int,
+) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_scheduled_broadcasts_table(conn)
+        await conn.execute(
+            """
+            UPDATE scheduled_broadcasts
+            SET status='sent',
+                sent_at=$2,
+                total_count=$3,
+                sent_count=$4,
+                updated_at=$2
+            WHERE id=$1
+            """,
+            int(broadcast_id),
+            get_moscow_now_iso(),
+            int(total_count),
+            int(sent_count),
+        )
+
+
+async def mark_scheduled_broadcast_failed(broadcast_id: int, error_text: str | None = None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_scheduled_broadcasts_table(conn)
+        await conn.execute(
+            """
+            UPDATE scheduled_broadcasts
+            SET status='failed',
+                error_text=$2,
+                updated_at=$3
+            WHERE id=$1
+            """,
+            int(broadcast_id),
+            (error_text or "")[:1000] if error_text else None,
+            get_moscow_now_iso(),
+        )
+
+
+async def list_scheduled_broadcasts(
+    *,
+    status: str | None = "pending",
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[int, list[dict]]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_scheduled_broadcasts_table(conn)
+        if status:
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM scheduled_broadcasts WHERE status=$1",
+                str(status),
+            )
+            rows = await conn.fetch(
+                """
+                SELECT *
+                FROM scheduled_broadcasts
+                WHERE status=$1
+                ORDER BY scheduled_at ASC, id ASC
+                OFFSET $2 LIMIT $3
+                """,
+                str(status),
+                int(offset),
+                int(limit),
+            )
+        else:
+            total = await conn.fetchval("SELECT COUNT(*) FROM scheduled_broadcasts")
+            rows = await conn.fetch(
+                """
+                SELECT *
+                FROM scheduled_broadcasts
+                ORDER BY scheduled_at ASC, id ASC
+                OFFSET $1 LIMIT $2
+                """,
+                int(offset),
+                int(limit),
+            )
+    return int(total or 0), [dict(r) for r in rows]
+
+
+async def cancel_scheduled_broadcast(broadcast_id: int) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_scheduled_broadcasts_table(conn)
+        await conn.execute(
+            """
+            UPDATE scheduled_broadcasts
+            SET status='canceled',
+                updated_at=$2
+            WHERE id=$1 AND status='pending'
+            """,
+            int(broadcast_id),
             get_moscow_now_iso(),
         )
 
@@ -5187,6 +5355,44 @@ async def get_total_activity_events_last_days(days: int = 7) -> int:
             since_iso,
         )
     return int(v or 0)
+
+
+async def get_activity_counts_by_hour(start_iso: str, end_iso: str) -> list[dict]:
+    """Counts of activity_events grouped by hour for [start, end)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT date_trunc('hour', created_at::timestamp) AS bucket, COUNT(*) AS cnt
+            FROM activity_events
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """,
+            str(start_iso),
+            str(end_iso),
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_activity_counts_by_day(start_iso: str, end_iso: str) -> list[dict]:
+    """Counts of activity_events grouped by day for [start, end)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT date_trunc('day', created_at::timestamp) AS bucket, COUNT(*) AS cnt
+            FROM activity_events
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """,
+            str(start_iso),
+            str(end_iso),
+        )
+    return [dict(r) for r in rows]
 
 # --- premium / new / blocked ---
 

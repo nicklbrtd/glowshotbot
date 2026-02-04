@@ -15,6 +15,7 @@ from .users import router as users_router
 from .roles import router as roles_router
 from .logs import router as logs_router
 from .broadcast import router as broadcast_router
+from .activity import router as activity_router
 from .awards import router as awards_router
 from .premium import router as premium_router
 from .ads import router as ads_router
@@ -33,6 +34,7 @@ router.include_router(users_router)
 router.include_router(roles_router)
 router.include_router(logs_router)
 router.include_router(broadcast_router)
+router.include_router(activity_router)
 router.include_router(awards_router)
 router.include_router(premium_router)
 router.include_router(ads_router)
