@@ -685,8 +685,9 @@ async def moderator_chat_id(message: Message) -> None:
     """Helper: prints current chat_id so admin/mods can put it into .env as MODERATION_CHAT_ID."""
     tg_id = message.from_user.id
 
-    # Allow only moderators (and master admin by tg id if it exists in DB as moderator)
-    if not await is_moderator_by_tg_id(tg_id):
+    user = await get_user_by_tg_id(tg_id)
+    is_allowed = bool(user and (user.get("is_admin") or user.get("is_moderator") or user.get("is_support")))
+    if not is_allowed:
         return
 
     chat_id = message.chat.id

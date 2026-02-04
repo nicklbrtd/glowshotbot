@@ -21,6 +21,7 @@ from handlers.rate import rate_root
 from handlers.profile import profile_menu
 from handlers.results import results_menu
 from handlers.premium import maybe_send_premium_expiry_warning
+from config import MASTER_ADMIN_ID
 from utils.time import get_moscow_now, get_moscow_today
 
 router = Router()
@@ -432,6 +433,18 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
 
 @router.message(Command("chatid"))
 async def cmd_chatid(message: Message):
+    user = await db.get_user_by_tg_id(message.from_user.id)
+    is_allowed = bool(
+        message.from_user.id == MASTER_ADMIN_ID
+        or (user and (user.get("is_admin") or user.get("is_moderator") or user.get("is_support")))
+    )
+    if not is_allowed:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     chat_type = getattr(message.chat, "type", "unknown")
     await message.answer(
         f"chat_id: <code>{message.chat.id}</code>\nтип: <code>{chat_type}</code>",

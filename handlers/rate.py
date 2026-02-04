@@ -1,4 +1,5 @@
 from aiogram import Router, F
+from aiogram.dispatcher.event.bases import SkipHandler
 import traceback
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -2330,11 +2331,13 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     if await _deny_if_full_banned(message=message):
         return
     text = (message.text or "").strip()
+    if text.startswith("/"):
+        raise SkipHandler
     if text == t("rate.btn.next", "ru") or text == t("rate.btn.next", "en"):
         data = await state.get_data()
         photo_id = data.get("rate_current_photo_id")
         if not photo_id:
-            return
+            raise SkipHandler
         if should_throttle(message.from_user.id, "rate:skip", 0.6):
             try:
                 await message.delete()
@@ -2359,15 +2362,15 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
         return
 
     if not text.isdigit():
-        return
+        raise SkipHandler
     value = int(text)
     if not (1 <= value <= 10):
-        return
+        raise SkipHandler
 
     data = await state.get_data()
     photo_id = data.get("rate_current_photo_id")
     if not photo_id:
-        return
+        raise SkipHandler
 
     if should_throttle(message.from_user.id, "rate:score", 0.4):
         try:
