@@ -431,7 +431,7 @@ async def cmd_chatid(message: Message):
     )
 
 
-@router.message(F.text)
+@router.message(F.text & ~F.text.startswith("/"))
 async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     """
     Переводим нажатия reply‑кнопок в действия:
@@ -660,7 +660,7 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             await maybe_send_premium_expiry_warning(
                 message.bot,
                 tg_id=message.from_user.id,
-                chat_id=chat_id,
+                chat_id=message.chat.id,
                 lang=lang,
             )
         except Exception:
