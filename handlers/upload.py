@@ -44,6 +44,7 @@ from database import (
     ensure_user_author_code,
     get_weekly_idea_requests,
     increment_weekly_idea_requests,
+    set_user_screen_msg_id,
 )
 
 from database_results import (
@@ -1185,6 +1186,10 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                 disable_notification=True,
             )
             try:
+                await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
+            except Exception:
+                pass
+            try:
                 await callback.message.delete()
             except Exception:
                 pass
@@ -1196,18 +1201,26 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                     await callback.message.edit_caption(caption=text, reply_markup=kb)
                 else:
                     await callback.message.edit_text(text, reply_markup=kb)
+                try:
+                    await set_user_screen_msg_id(callback.from_user.id, callback.message.message_id)
+                except Exception:
+                    pass
             except Exception:
                 try:
                     await callback.message.delete()
                 except Exception:
                     pass
 
-                await callback.message.bot.send_message(
+                sent = await callback.message.bot.send_message(
                     chat_id=callback.message.chat.id,
                     text=text,
                     reply_markup=kb,
                     disable_notification=True,
                 )
+                try:
+                    await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
+                except Exception:
+                    pass
 
         await callback.answer()
         return
