@@ -77,15 +77,33 @@ async def _send_activity_chart(
             except Exception:
                 pass
 
-        sent = await callback.message.bot.send_photo(
-            chat_id=callback.message.chat.id,
-            photo=chart_file,
-            caption=caption,
-            reply_markup=_kb_activity_menu(),
-            parse_mode="HTML",
-            disable_notification=True,
-        )
-        await state.update_data(activity_chart_msg_id=sent.message_id)
+        sent = None
+        try:
+            sent = await callback.message.bot.send_photo(
+                chat_id=callback.message.chat.id,
+                photo=chart_file,
+                caption=caption,
+                reply_markup=_kb_activity_menu(),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            try:
+                sent = await callback.message.bot.send_document(
+                    chat_id=callback.message.chat.id,
+                    document=chart_file,
+                    caption=caption,
+                    reply_markup=_kb_activity_menu(),
+                    parse_mode="HTML",
+                    disable_notification=True,
+                )
+            except Exception:
+                sent = None
+
+        if sent is not None:
+            await state.update_data(activity_chart_msg_id=sent.message_id)
+        else:
+            raise RuntimeError("send_photo/send_document failed for activity chart")
     except Exception as e:
         try:
             await callback.answer("Не удалось отправить график.", show_alert=True)
@@ -110,27 +128,44 @@ async def admin_activity_day(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_admin(callback)
     if user is None:
         return
+    try:
+        await callback.answer("Готовлю график…", show_alert=False)
+    except Exception:
+        pass
 
-    now = get_moscow_now()
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
+    try:
+        now = get_moscow_now()
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
 
-    rows = await get_activity_counts_by_hour(start.isoformat(), end.isoformat())
-    by_hour: dict[datetime, int] = {}
-    for r in rows:
-        dt = _normalize_bucket(r.get("bucket"), by="hour")
-        if dt is not None:
-            by_hour[dt] = int(r.get("cnt") or 0)
-    counts: list[int] = []
-    labels: list[str] = []
-    for h in range(24):
-        dt = start + timedelta(hours=h)
-        counts.append(by_hour.get(dt, 0))
-        labels.append(f"{h:02d}")
+        rows = await get_activity_counts_by_hour(start.isoformat(), end.isoformat())
+        by_hour: dict[datetime, int] = {}
+        for r in rows:
+            dt = _normalize_bucket(r.get("bucket"), by="hour")
+            if dt is not None:
+                by_hour[dt] = int(r.get("cnt") or 0)
+        counts: list[int] = []
+        labels: list[str] = []
+        for h in range(24):
+            dt = start + timedelta(hours=h)
+            counts.append(by_hour.get(dt, 0))
+            labels.append(f"{h:02d}")
 
-    title = f"День: {start.strftime('%d.%m.%Y')} (по часам)"
-    await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels)
-    await callback.answer()
+        title = f"День: {start.strftime('%d.%m.%Y')} (по часам)"
+        await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels)
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="admin_activity:day",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "admin:activity:week")
@@ -138,27 +173,44 @@ async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_admin(callback)
     if user is None:
         return
+    try:
+        await callback.answer("Готовлю график…", show_alert=False)
+    except Exception:
+        pass
 
-    now = get_moscow_now()
-    end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    start = end - timedelta(days=7)
+    try:
+        now = get_moscow_now()
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        start = end - timedelta(days=7)
 
-    rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
-    by_day: dict[datetime, int] = {}
-    for r in rows:
-        dt = _normalize_bucket(r.get("bucket"), by="day")
-        if dt is not None:
-            by_day[dt] = int(r.get("cnt") or 0)
-    counts: list[int] = []
-    labels: list[str] = []
-    for i in range(7):
-        dt = start + timedelta(days=i)
-        counts.append(by_day.get(dt, 0))
-        labels.append(dt.strftime("%d.%m"))
+        rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
+        by_day: dict[datetime, int] = {}
+        for r in rows:
+            dt = _normalize_bucket(r.get("bucket"), by="day")
+            if dt is not None:
+                by_day[dt] = int(r.get("cnt") or 0)
+        counts: list[int] = []
+        labels: list[str] = []
+        for i in range(7):
+            dt = start + timedelta(days=i)
+            counts.append(by_day.get(dt, 0))
+            labels.append(dt.strftime("%d.%m"))
 
-    title = f"Неделя: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
-    await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels)
-    await callback.answer()
+        title = f"Неделя: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
+        await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels)
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="admin_activity:week",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "admin:activity:month")
@@ -166,24 +218,41 @@ async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_admin(callback)
     if user is None:
         return
+    try:
+        await callback.answer("Готовлю график…", show_alert=False)
+    except Exception:
+        pass
 
-    now = get_moscow_now()
-    end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    start = end - timedelta(days=30)
+    try:
+        now = get_moscow_now()
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        start = end - timedelta(days=30)
 
-    rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
-    by_day: dict[datetime, int] = {}
-    for r in rows:
-        dt = _normalize_bucket(r.get("bucket"), by="day")
-        if dt is not None:
-            by_day[dt] = int(r.get("cnt") or 0)
-    counts: list[int] = []
-    labels: list[str] = []
-    for i in range(30):
-        dt = start + timedelta(days=i)
-        counts.append(by_day.get(dt, 0))
-        labels.append(dt.strftime("%d.%m"))
+        rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
+        by_day: dict[datetime, int] = {}
+        for r in rows:
+            dt = _normalize_bucket(r.get("bucket"), by="day")
+            if dt is not None:
+                by_day[dt] = int(r.get("cnt") or 0)
+        counts: list[int] = []
+        labels: list[str] = []
+        for i in range(30):
+            dt = start + timedelta(days=i)
+            counts.append(by_day.get(dt, 0))
+            labels.append(dt.strftime("%d.%m"))
 
-    title = f"Месяц: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
-    await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels)
-    await callback.answer()
+        title = f"Месяц: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
+        await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels)
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="admin_activity:month",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
