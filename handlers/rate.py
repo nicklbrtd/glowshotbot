@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from keyboards.common import build_viewed_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
+from utils.antispam import should_throttle
 from utils.moderation import (
     get_report_reasons,
     REPORT_REASON_LABELS,
@@ -523,12 +524,11 @@ async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> Rati
     return await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id)
 
 def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
-    """Reply‑клавиатура для оценок 1–10 + пропуск."""
+    """Reply‑клавиатура для оценок 1–10."""
     row1 = [KeyboardButton(text=str(i)) for i in range(1, 6)]
     row2 = [KeyboardButton(text=str(i)) for i in range(6, 11)]
-    row3 = [KeyboardButton(text="Пропустить" if lang.startswith("ru") else "Skip")]
     return ReplyKeyboardMarkup(
-        keyboard=[row1, row2, row3],
+        keyboard=[row1, row2],
         resize_keyboard=True,
         one_time_keyboard=True,
         selective=True,
@@ -603,6 +603,10 @@ async def _apply_rating_card(
                     reply_markup=card.keyboard,
                     parse_mode="HTML",
                 )
+                if state is not None:
+                    data = await state.get_data()
+                    data["rate_msg_id"] = message.message_id
+                    await state.set_data(data)
                 return
             except Exception:
                 message = None
@@ -616,18 +620,26 @@ async def _apply_rating_card(
                     reply_markup=card.keyboard,
                     parse_mode="HTML",
                 )
+                if state is not None:
+                    data = await state.get_data()
+                    data["rate_msg_id"] = message_id
+                    await state.set_data(data)
                 return
             except Exception:
                 message_id = None
 
         try:
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=chat_id,
                 text=card.caption,
                 reply_markup=card.keyboard,
                 parse_mode="HTML",
                 disable_notification=True,
             )
+            if state is not None:
+                data = await state.get_data()
+                data["rate_msg_id"] = sent.message_id
+                await state.set_data(data)
         except Exception:
             pass
         return
@@ -642,6 +654,10 @@ async def _apply_rating_card(
     if message is not None and message.photo:
         try:
             await message.edit_media(media=media, reply_markup=card.keyboard)
+            if state is not None:
+                data = await state.get_data()
+                data["rate_msg_id"] = message.message_id
+                await state.set_data(data)
             return
         except Exception:
             try:
@@ -657,6 +673,10 @@ async def _apply_rating_card(
                 media=media,
                 reply_markup=card.keyboard,
             )
+            if state is not None:
+                data = await state.get_data()
+                data["rate_msg_id"] = message_id
+                await state.set_data(data)
             return
         except Exception:
             try:
@@ -665,7 +685,7 @@ async def _apply_rating_card(
                 pass
 
     try:
-        await bot.send_photo(
+        sent = await bot.send_photo(
             chat_id=chat_id,
             photo=card.photo_file_id,
             caption=card.caption,
@@ -674,6 +694,10 @@ async def _apply_rating_card(
             disable_notification=True,
             show_caption_above_media=True,
         )
+        if state is not None:
+            data = await state.get_data()
+            data["rate_msg_id"] = sent.message_id
+            await state.set_data(data)
     except Exception:
         try:
             await bot.send_message(
@@ -699,19 +723,6 @@ def build_rate_keyboard(
     if link_button:
         link_text, link_url = link_button
         rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
-
-    rows.append(
-        [
-            InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}")
-            for i in range(1, 6)
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}")
-            for i in range(6, 11)
-        ]
-    )
 
     rows.append(
         [
@@ -1057,7 +1068,12 @@ async def show_next_photo_for_rating(
         data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
         await state.set_data(data)
         if card.photo:
-            await _send_rate_reply_keyboard(callback.bot if hasattr(callback, "bot") else callback.message.bot, callback.message.chat.id, state, lang)
+            await _send_rate_reply_keyboard(
+                callback.bot if hasattr(callback, "bot") else callback.message.bot,
+                callback.message.chat.id,
+                state,
+                lang,
+            )
         else:
             await _delete_rate_reply_keyboard(callback.bot if hasattr(callback, "bot") else callback.message.bot, callback.message.chat.id, state)
     await _apply_rating_card(
@@ -1959,6 +1975,12 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:score:"))
 async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
+    if should_throttle(callback.from_user.id, "rate:score", 0.4):
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
     """
     Обычная оценка фотографии от 1 до 10.
 
@@ -2116,8 +2138,170 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     # Чистим состояние (комментарий больше не нужен)
     await state.clear()
 
+
+@router.message(F.text)
+async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
+    if await _deny_if_full_banned(message=message):
+        return
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        return
+    value = int(text)
+    if not (1 <= value <= 10):
+        return
+
+    data = await state.get_data()
+    photo_id = data.get("rate_current_photo_id")
+    if not photo_id:
+        return
+
+    if should_throttle(message.from_user.id, "rate:score", 0.4):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    user = await get_user_by_tg_id(message.from_user.id)
+    if user is None:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    photo = await get_photo_by_id(int(photo_id))
+    if photo is None or photo.get("is_deleted"):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+        await state.clear()
+        return
+
+    if not bool(photo.get("ratings_enabled", True)):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+        await state.clear()
+        return
+
+    # comment flow from FSM if exists
+    comment_photo_id = data.get("photo_id")
+    comment_text = data.get("comment_text")
+    is_public = data.get("is_public", True)
+
+    if comment_photo_id == photo_id and comment_text and not data.get("comment_saved"):
+        await create_comment(
+            user_id=user["id"],
+            photo_id=int(photo_id),
+            text=comment_text,
+            is_public=bool(is_public),
+        )
+
+        author_user_id = photo.get("user_id")
+        if author_user_id and author_user_id != user["id"]:
+            try:
+                author = await get_user_by_id(author_user_id)
+            except Exception:
+                author = None
+
+            if author is not None:
+                author_tg_id = author.get("tg_id")
+                if author_tg_id:
+                    notify_text_lines = [
+                        "🔔 <b>Новый комментарий к вашей фотографии</b>",
+                        "",
+                        f"Текст: {comment_text}",
+                        f"Оценка: {value}",
+                    ]
+                    notify_text = "\n".join(notify_text_lines)
+                    try:
+                        await message.bot.send_message(
+                            chat_id=author_tg_id,
+                            text=notify_text,
+                            reply_markup=build_comment_notification_keyboard(),
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+
+    await add_rating(user["id"], int(photo_id), value)
+    try:
+        await streak_record_action_by_tg_id(int(message.from_user.id), "rate")
+    except Exception:
+        pass
+
+    try:
+        author_user_id = photo.get("user_id") if photo else None
+        if author_user_id and int(author_user_id) != int(user["id"]):
+            author = await get_user_by_id(int(author_user_id))
+            author_tg = (author or {}).get("tg_id")
+            if author_tg:
+                prefs = await get_notify_settings_by_tg_id(int(author_tg))
+                if bool(prefs.get("likes_enabled", True)):
+                    await increment_likes_daily_for_tg_id(int(author_tg), _moscow_day_key(), 1)
+    except Exception:
+        pass
+
+    try:
+        rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
+    except Exception:
+        rewarded = False
+        referrer_tg_id = None
+        referee_tg_id = None
+
+    if rewarded:
+        if referrer_tg_id:
+            try:
+                await message.bot.send_message(
+                    chat_id=referrer_tg_id,
+                    text=(
+                        "🤝 <b>Друг выполнил условия реферальной программы!</b>\n\n"
+                        "Тебе начислено <b>2 дня GlowShot Премиум</b> за приглашение.\n"
+                        "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
+                    ),
+                    reply_markup=build_referral_thanks_keyboard(),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        if referee_tg_id:
+            try:
+                await message.bot.send_message(
+                    chat_id=referee_tg_id,
+                    text=(
+                        "🎉 <b>Ты выполнил условия реферальной программы!</b>\n\n"
+                        "За регистрацию и участие в оценке фотографий тебе начислено "
+                        "<b>2 дня GlowShot Премиум</b>.\n"
+                        "Продолжай выкладывать свои кадры и оценивать работы других 💎"
+                    ),
+                    reply_markup=build_referral_thanks_keyboard(),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+    await state.clear()
+
 @router.callback_query(F.data.startswith("rate:more:"))
 async def rate_more_toggle(callback: CallbackQuery) -> None:
+    if should_throttle(callback.from_user.id, "rate:more", 0.5):
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
     parts = (callback.data or "").split(":")
     if len(parts) != 4:
         await callback.answer("Странные параметры.", show_alert=True)
@@ -2212,6 +2396,12 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("rate:skip:"))
 async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    if should_throttle(callback.from_user.id, "rate:skip", 0.6):
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
     parts = callback.data.split(":")
     # ['rate', 'skip', '<photo_id>']
     if len(parts) != 3:
@@ -2293,6 +2483,12 @@ async def rate_start(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:rate")
 async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, replace_message: bool = True) -> None:
+    if should_throttle(callback.from_user.id, "rate:root", 0.8):
+        try:
+            await callback.answer("Секунду…", show_alert=False)
+        except Exception:
+            pass
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)

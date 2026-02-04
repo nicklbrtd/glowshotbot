@@ -47,6 +47,7 @@ from database import (
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
+from utils.antispam import should_throttle
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT, rank_progress_bar
@@ -626,6 +627,12 @@ async def build_profile_view(user: dict):
 
 @router.callback_query(F.data == "profile:open")
 async def profile_menu(callback: CallbackQuery, state: FSMContext):
+    if should_throttle(callback.from_user.id, "profile:open", 1.0):
+        try:
+            await callback.answer("Секунду…", show_alert=False)
+        except Exception:
+            pass
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)

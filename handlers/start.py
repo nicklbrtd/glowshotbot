@@ -15,6 +15,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 import database as db
 from keyboards.common import build_main_menu
+from utils.antispam import should_throttle
 from handlers.upload import my_photo_menu
 from handlers.rate import rate_root
 from handlers.profile import profile_menu
@@ -127,11 +128,11 @@ async def _send_fresh_menu(
     state: FSMContext,
     lang_hint: str | None = None,
 ) -> None:
-    """Унифицированная выдача главного меню."""
+    """Унифицированная выдача главного меню.
+    Сначала отправляем новое меню, затем удаляем старое (если было), чтобы не было пустоты."""
 
     data = await state.get_data()
-    await _delete_message_safely(bot, chat_id, data.get("menu_msg_id"))
-
+    prev_menu_id = data.get("menu_msg_id")
     user = await db.get_user_by_tg_id(user_id)
     lang = _pick_lang(user, lang_hint)
     is_admin = _get_flag(user, "is_admin")
@@ -158,6 +159,9 @@ async def _send_fresh_menu(
 
     data["menu_msg_id"] = sent.message_id
     await state.set_data(data)
+
+    if prev_menu_id and prev_menu_id != sent.message_id:
+        await _delete_message_safely(bot, chat_id, prev_menu_id)
 
 
 def _main_menu_button_key(text: str | None) -> str | None:
@@ -444,16 +448,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     if getattr(message.chat, "type", None) not in ("private",):
         return
 
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    data = await state.get_data()
-    await _delete_message_safely(message.bot, message.chat.id, data.get("menu_msg_id"))
-    data["menu_msg_id"] = None
-    await state.set_data(data)
-
     pseudo_cb = _MessageAsCallback(message)
     if key == "menu":
         await _send_fresh_menu(
@@ -472,9 +466,26 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     elif key == "results":
         await results_menu(pseudo_cb, state)
 
+    # После успешного перехода удаляем сообщение пользователя и старое меню
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    prev_menu_id = data.get("menu_msg_id")
+    if prev_menu_id:
+        await _delete_message_safely(message.bot, message.chat.id, prev_menu_id)
+
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    if should_throttle(message.from_user.id, "cmd_start", 1.5):
+        try:
+            await message.answer("Секунду…", disable_notification=True)
+        except Exception:
+            pass
+        return
     # Запрещаем /start в группах, чтобы не спамить меню
     if getattr(message.chat, "type", None) in ("group", "supergroup"):
         try:
@@ -700,6 +711,12 @@ async def subscription_check(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "menu:back")
 async def menu_back(callback: CallbackQuery, state: FSMContext):
+    if should_throttle(callback.from_user.id, "menu:back", 1.2):
+        try:
+            await callback.answer("Секунду…", show_alert=False)
+        except Exception:
+            pass
+        return
     try:
         await callback.answer()
     except TelegramBadRequest:

@@ -11,6 +11,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
+from utils.antispam import should_throttle
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -1092,6 +1093,12 @@ async def _edit_or_replace_caption_with_photo(
 
 @router.callback_query(F.data == "myphoto:open")
 async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
+    if should_throttle(callback.from_user.id, "myphoto:open", 1.0):
+        try:
+            await callback.answer("Секунду…", show_alert=False)
+        except Exception:
+            pass
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
