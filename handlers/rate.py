@@ -10,7 +10,7 @@ from utils.i18n import t
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
-from keyboards.common import build_viewed_kb
+from keyboards.common import build_viewed_kb, ensure_section_reply_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.moderation import (
     get_report_reasons,
@@ -2217,15 +2217,23 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "rate:start")
-async def rate_start(callback: CallbackQuery) -> None:
-    await rate_root(callback, replace_message=True)
+async def rate_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await rate_root(callback, state=state, replace_message=True)
 
 @router.callback_query(F.data == "menu:rate")
-async def rate_root(callback: CallbackQuery, replace_message: bool = True) -> None:
+async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, replace_message: bool = True) -> None:
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
+
+    if state is not None:
+        await ensure_section_reply_kb(
+            bot=callback.message.bot,
+            chat_id=callback.message.chat.id,
+            state=state,
+            lang=_lang(user),
+        )
 
     await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message)
 @router.callback_query(F.data == "comment:seen")

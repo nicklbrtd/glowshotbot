@@ -93,16 +93,18 @@ async def registration_start(callback: CallbackQuery, state: FSMContext):
     if existing is not None and (existing.get("name") or "").strip():
         await callback.answer("Ты уже зарегистрирован.", show_alert=True)
         try:
-            await callback.message.edit_text(
-                "Ты уже в системе. Вот главное меню:",
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text="Ты уже в системе. Вот главное меню:",
                 reply_markup=build_main_menu(),
+                disable_notification=True,
             )
-        except TelegramBadRequest:
-            # If it's a photo message, edit caption instead
-            await callback.message.edit_caption(
-                caption="Ты уже в системе. Вот главное меню:",
-                reply_markup=build_main_menu(),
-            )
+        except Exception:
+            pass
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
         return
 
     await state.set_state(RegistrationStates.waiting_name)

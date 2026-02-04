@@ -14,7 +14,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import InlineKeyboardMarkup
 
 import database as db
-from keyboards.common import build_main_menu
+from keyboards.common import build_main_menu, clear_section_reply_kb
 from handlers.upload import my_photo_menu
 from handlers.rate import rate_root
 from handlers.profile import profile_menu
@@ -110,6 +110,57 @@ def _normalize_chat_id(value: str) -> str:
     return v
 
 
+async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def _send_fresh_menu(
+    *,
+    bot,
+    chat_id: int,
+    user_id: int,
+    state: FSMContext,
+    lang_hint: str | None = None,
+) -> None:
+    """Унифицированная выдача главного меню с очисткой старых сервисных сообщений."""
+    await clear_section_reply_kb(bot, chat_id, state)
+
+    data = await state.get_data()
+    await _delete_message_safely(bot, chat_id, data.get("menu_msg_id"))
+
+    user = await db.get_user_by_tg_id(user_id)
+    lang = _pick_lang(user, lang_hint)
+    is_admin = _get_flag(user, "is_admin")
+    is_moderator = _get_flag(user, "is_moderator")
+    is_premium = await db.is_user_premium_active(user_id)
+
+    menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
+    main_kb = await _build_dynamic_main_menu(
+        user=user,
+        lang=lang,
+        is_admin=is_admin,
+        is_moderator=is_moderator,
+        is_premium=is_premium,
+    )
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=menu_text,
+        reply_markup=main_kb,
+        disable_notification=True,
+        link_preview_options=NO_PREVIEW,
+        parse_mode="HTML",
+    )
+
+    data["menu_msg_id"] = sent.message_id
+    await state.set_data(data)
+
+
 def _main_menu_button_key(text: str | None) -> str | None:
     """Определяем, какая кнопка главного меню была отправлена как текст."""
     if not text:
@@ -132,6 +183,7 @@ def _main_menu_button_key(text: str | None) -> str | None:
         },
         "profile": {t("kb.main.profile", "ru"), t("kb.main.profile", "en")},
         "results": {t("kb.main.results", "ru"), t("kb.main.results", "en")},
+        "menu": {t("kb.back_to_menu", "ru"), t("kb.back_to_menu", "en")},
     }
     for key, variants in mapping.items():
         if s in variants:
@@ -382,9 +434,10 @@ async def cmd_chatid(message: Message):
 @router.message(F.text)
 async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     """
-    Переводим нажатия кнопок ReplyKeyboard из главного меню в существующие разделы.
-    • Удаляем сообщение пользователя, чтобы «кнопка» не висела в чате.
-    • Не издаём звуков: все разделы уже отправляют ответы с disable_notification=True.
+    Переводим нажатия reply‑кнопок в действия:
+    - удаляем сообщение пользователя;
+    - убираем старое меню;
+    - вызываем нужный раздел или возвращаем меню.
     """
     key = _main_menu_button_key(message.text)
     if key is None:
@@ -397,15 +450,28 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     except Exception:
         pass
 
+    data = await state.get_data()
+    await _delete_message_safely(message.bot, message.chat.id, data.get("menu_msg_id"))
+    data["menu_msg_id"] = None
+    await state.set_data(data)
+
     pseudo_cb = _MessageAsCallback(message)
-    if key == "myphoto":
+    if key == "menu":
+        await _send_fresh_menu(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            state=state,
+            lang_hint=getattr(message.from_user, "language_code", None),
+        )
+    elif key == "myphoto":
         await my_photo_menu(pseudo_cb, state)
     elif key == "rate":
-        await rate_root(pseudo_cb, replace_message=True)
+        await rate_root(pseudo_cb, state=state, replace_message=True)
     elif key == "profile":
-        await profile_menu(pseudo_cb)
+        await profile_menu(pseudo_cb, state)
     elif key == "results":
-        await results_menu(pseudo_cb)
+        await results_menu(pseudo_cb, state)
 
 
 @router.message(CommandStart())
@@ -466,15 +532,6 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             is_admin = False
             is_moderator = False
 
-        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium, lang=lang)
-        reply_kb = await _build_dynamic_main_menu(
-            user=user,
-            lang=lang,
-            is_admin=is_admin,
-            is_moderator=is_moderator,
-            is_premium=is_premium,
-        )
-
         # Отправляем статус оплаты отдельным сообщением (не мешаем меню)
         try:
             await message.answer(
@@ -486,32 +543,13 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
         except Exception:
             pass
 
-        edited = False
-        if menu_msg_id:
-            try:
-                await message.bot.edit_message_text(
-                    menu_text,
-                    chat_id=message.chat.id,
-                    message_id=menu_msg_id,
-                    reply_markup=reply_kb,
-                    link_preview_options=NO_PREVIEW,
-                    parse_mode="HTML",
-                )
-                edited = True
-            except Exception:
-                edited = False
-
-        if not edited:
-            # Если меню ещё не было (или его нельзя отредактировать) — создаём новое меню
-            sent = await message.answer(
-                menu_text,
-                reply_markup=reply_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
-            data["menu_msg_id"] = sent.message_id
-            await state.set_data(data)
+        await _send_fresh_menu(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            state=state,
+            lang_hint=getattr(message.from_user, "language_code", None),
+        )
 
         # Убираем сам /start, чтобы не плодить сообщения
         try:
@@ -609,59 +647,13 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             parse_mode="HTML",
         )
     else:
-        # флаги ролей
-        is_admin = _get_flag(user, "is_admin")
-        is_moderator = _get_flag(user, "is_moderator")
-        is_premium = await db.is_user_premium_active(message.from_user.id)
-        main_kb = await _build_dynamic_main_menu(
-            user=user,
-            lang=lang,
-            is_admin=is_admin,
-            is_moderator=is_moderator,
-            is_premium=is_premium,
+        await _send_fresh_menu(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            state=state,
+            lang_hint=getattr(message.from_user, "language_code", None),
         )
-
-        chat_id = message.chat.id
-        data = await state.get_data()
-        menu_msg_id = data.get("menu_msg_id")
-
-        sent_message = None
-        menu_text = await build_menu_text(tg_id=message.from_user.id, user=user, is_premium=is_premium, lang=lang)
-
-        if menu_msg_id:
-            # Пытаемся отредактировать уже существующее сообщение меню
-            try:
-                await message.bot.edit_message_text(
-                    menu_text,
-                    chat_id=chat_id,
-                    message_id=menu_msg_id,
-                    reply_markup=main_kb,
-                    link_preview_options=NO_PREVIEW,
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest:
-                # Если редактирование не удалось (сообщение удалено/устарело) — отправляем новое
-                sent_message = await message.answer(
-                    menu_text,
-                    reply_markup=main_kb,
-                    disable_notification=True,
-                    link_preview_options=NO_PREVIEW,
-                    parse_mode="HTML",
-                )
-        else:
-            # Меню ещё ни разу не показывалось — отправляем новое сообщение
-            sent_message = await message.answer(
-                menu_text,
-                reply_markup=main_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
-
-        # Если мы отправили новое меню — запоминаем его message_id в состоянии
-        if sent_message is not None:
-            data["menu_msg_id"] = sent_message.message_id
-            await state.set_data(data)
 
         # Напоминание о скором окончании премиума (за 2 дня)
         try:
@@ -679,7 +671,7 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
         pass
 
 @router.callback_query(F.data == "sub:check")
-async def subscription_check(callback: CallbackQuery):
+async def subscription_check(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user = await db.get_user_by_tg_id(user_id)
     lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
@@ -691,44 +683,13 @@ async def subscription_check(callback: CallbackQuery):
         )
         return
 
-    # достаём пользователя и флаги ролей
-    user = await db.get_user_by_tg_id(user_id)
-    is_admin = _get_flag(user, "is_admin")
-    is_moderator = _get_flag(user, "is_moderator")
-    is_premium = await db.is_user_premium_active(user_id)
-    menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
-    main_kb = await _build_dynamic_main_menu(
-        user=user,
-        lang=lang,
-        is_admin=is_admin,
-        is_moderator=is_moderator,
-        is_premium=is_premium,
+    await _send_fresh_menu(
+        bot=callback.message.bot,
+        chat_id=callback.message.chat.id,
+        user_id=user_id,
+        state=state,
+        lang_hint=getattr(callback.from_user, "language_code", None),
     )
-    try:
-        await callback.message.edit_text(
-            menu_text,
-            reply_markup=main_kb,
-            link_preview_options=NO_PREVIEW,
-            parse_mode="HTML",
-        )
-    except Exception:
-        try:
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=menu_text,
-                reply_markup=main_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
-        except Exception:
-            await callback.message.answer(
-                menu_text,
-                reply_markup=main_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
     try:
         if SUBSCRIPTION_GATE_ENABLED:
             await callback.answer(t("start.subscribe.thanks", lang), show_alert=False)
@@ -749,39 +710,15 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     photo_msg_id = data.get("myphoto_photo_msg_id")
 
-    user = await db.get_user_by_tg_id(callback.from_user.id)
-    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
-    is_admin = _get_flag(user, "is_admin")
-    is_moderator = _get_flag(user, "is_moderator")
-    is_premium = await db.is_user_premium_active(callback.from_user.id)
-    main_kb = await _build_dynamic_main_menu(
-        user=user,
-        lang=lang,
-        is_admin=is_admin,
-        is_moderator=is_moderator,
-        is_premium=is_premium,
+    await _send_fresh_menu(
+        bot=callback.message.bot,
+        chat_id=chat_id,
+        user_id=callback.from_user.id,
+        state=state,
+        lang_hint=getattr(callback.from_user, "language_code", None),
     )
-
-    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium, lang=lang)
-    # Сначала шлём новое меню...
-    try:
-        sent = await callback.message.bot.send_message(
-            chat_id=chat_id,
-            text=menu_text,
-            reply_markup=main_kb,
-            disable_notification=True,
-            link_preview_options=NO_PREVIEW,
-            parse_mode="HTML",
-        )
-    except Exception:
-        sent = await callback.message.answer(
-            menu_text,
-            reply_markup=main_kb,
-            disable_notification=True,
-            link_preview_options=NO_PREVIEW,
-            parse_mode="HTML",
-        )
-    menu_msg_id = sent.message_id
+    data = await state.get_data()
+    menu_msg_id = data.get("menu_msg_id")
 
     # ...затем удаляем старое сообщение раздела
     try:
