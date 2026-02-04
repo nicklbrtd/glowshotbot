@@ -5359,9 +5359,24 @@ async def get_total_activity_events_last_days(days: int = 7) -> int:
     return int(v or 0)
 
 
-async def get_activity_counts_by_hour(start_iso: str, end_iso: str) -> list[dict]:
+def _coerce_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        # fallback: try parsing date-only
+        try:
+            return datetime.fromisoformat(str(value) + "T00:00:00")
+        except Exception:
+            raise
+
+
+async def get_activity_counts_by_hour(start_iso: object, end_iso: object) -> list[dict]:
     """Counts of activity_events grouped by hour for [start, end)."""
     p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -5372,15 +5387,17 @@ async def get_activity_counts_by_hour(start_iso: str, end_iso: str) -> list[dict
             GROUP BY 1
             ORDER BY 1 ASC
             """,
-            str(start_iso),
-            str(end_iso),
+            start_dt,
+            end_dt,
         )
     return [dict(r) for r in rows]
 
 
-async def get_activity_counts_by_day(start_iso: str, end_iso: str) -> list[dict]:
+async def get_activity_counts_by_day(start_iso: object, end_iso: object) -> list[dict]:
     """Counts of activity_events grouped by day for [start, end)."""
     p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -5391,8 +5408,8 @@ async def get_activity_counts_by_day(start_iso: str, end_iso: str) -> list[dict]
             GROUP BY 1
             ORDER BY 1 ASC
             """,
-            str(start_iso),
-            str(end_iso),
+            start_dt,
+            end_dt,
         )
     return [dict(r) for r in rows]
 

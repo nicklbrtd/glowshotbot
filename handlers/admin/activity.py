@@ -178,7 +178,7 @@ async def admin_activity_day(callback: CallbackQuery, state: FSMContext):
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
 
-        rows = await get_activity_counts_by_hour(start.isoformat(), end.isoformat())
+        rows = await get_activity_counts_by_hour(start, end)
         by_hour: dict[datetime, int] = {}
         for r in rows:
             dt = _normalize_bucket(r.get("bucket"), by="hour")
@@ -223,7 +223,7 @@ async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
         end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         start = end - timedelta(days=7)
 
-        rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
+        rows = await get_activity_counts_by_day(start, end)
         by_day: dict[datetime, int] = {}
         for r in rows:
             dt = _normalize_bucket(r.get("bucket"), by="day")
@@ -268,7 +268,7 @@ async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
         end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         start = end - timedelta(days=30)
 
-        rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
+        rows = await get_activity_counts_by_day(start, end)
         by_day: dict[datetime, int] = {}
         for r in rows:
             dt = _normalize_bucket(r.get("bucket"), by="day")
