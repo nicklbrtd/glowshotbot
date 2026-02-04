@@ -1792,82 +1792,142 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 raise
         return
 
-    # await state.update_data(comment_text=text)  # removed per instructions
     await message.delete()
 
-    # --- Save comment immediately (so it is visible in upload/my photo) ---
-    user_for_rate = await get_user_by_tg_id(message.from_user.id)
-    saved = False
-    save_error: Exception | None = None
+    # выходим из ожидания текста комментария, но сохраняем data
+    try:
+        await state.set_state(None)
+    except Exception:
+        pass
 
-    if user_for_rate and user_for_rate.get("id"):
-        try:
-            if await has_user_commented(int(photo_id), int(user_for_rate["id"])):
-                prefix = "ℹ️ Ты уже оставил комментарий к этому фото."
-                card = await _build_rating_card_for_photo(
-                    int(photo_id),
-                    int(user_for_rate["id"]),
-                    int(message.from_user.id),
-                    prefix=prefix,
-                )
-                if card is not None:
-                    await _apply_rating_card(
-                        bot=message.bot,
-                        chat_id=rate_chat_id,
-                        message=None,
-                        message_id=rate_msg_id,
-                        card=card,
-                    )
-                else:
-                    try:
-                        await message.bot.edit_message_text(
-                            chat_id=rate_chat_id,
-                            message_id=rate_msg_id,
-                            text=prefix,
-                            reply_markup=InlineKeyboardMarkup(
-                                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
-                            ),
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        pass
-                try:
-                    rater_lang = _lang(user_for_rate)
-                    if card and card.photo and bool(card.photo.get("ratings_enabled", True)):
-                        await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
-                    else:
-                        await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
-                except Exception:
-                    pass
-                await state.clear()
-                return
-        except Exception:
-            pass
-        try:
-            await create_comment(
-                user_id=int(user_for_rate["id"]),
-                photo_id=int(photo_id),
-                text=text,
-                is_public=bool(is_public),
+    user_for_rate = await get_user_by_tg_id(message.from_user.id)
+    if user_for_rate is None or not user_for_rate.get("id"):
+        return
+
+    photo_for_caption = None
+    try:
+        photo_for_caption = await get_photo_by_id(int(photo_id))
+    except Exception:
+        photo_for_caption = None
+
+    is_rateable = bool(photo_for_caption and photo_for_caption.get("ratings_enabled", True))
+
+    # Если фото можно оценивать — комментарий сохраняем в FSM и отправим только после оценки
+    if is_rateable:
+        await state.update_data(comment_text=text, comment_saved=False)
+        prefix = "✅ Комментарий сохранён!\n\nПоставь оценку 1–10, чтобы отправить."
+
+        card = await _build_rating_card_for_photo(
+            int(photo_id),
+            int(user_for_rate["id"]),
+            int(message.from_user.id),
+            prefix=prefix,
+        )
+        if card is not None:
+            await _apply_rating_card(
+                bot=message.bot,
+                chat_id=rate_chat_id,
+                message=None,
+                message_id=rate_msg_id,
+                card=card,
             )
-            saved = True
-            # Mark saved so we don't duplicate-save on score click
-            await state.update_data(comment_saved=True)
-        except Exception as e:
-            save_error = e
-            # Log exact reason to DB error logs (so you can see permissions/FK issues)
+        else:
             try:
-                await log_bot_error(
-                    chat_id=message.chat.id,
-                    tg_user_id=message.from_user.id,
-                    handler="rate_comment_text:create_comment",
-                    update_type="comment",
-                    error_type=type(e).__name__,
-                    error_text=str(e),
-                    traceback_text=traceback.format_exc(),
+                await message.bot.edit_message_text(
+                    chat_id=rate_chat_id,
+                    message_id=rate_msg_id,
+                    text=prefix,
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                    ),
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
+
+        # клавиатура оценок уже должна быть, но если её нет — покажем
+        try:
+            data = await state.get_data()
+            kb_id = data.get("rate_kb_msg_id")
+            if kb_id is None:
+                try:
+                    ui_state = await get_user_ui_state(message.from_user.id)
+                    kb_id = ui_state.get("rate_kb_msg_id")
+                except Exception:
+                    kb_id = None
+            if kb_id is None:
+                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, _lang(user_for_rate))
+        except Exception:
+            pass
+        return
+
+    # Если фото не для оценивания — сохраняем комментарий сразу
+    saved = False
+    save_error: Exception | None = None
+    try:
+        if await has_user_commented(int(photo_id), int(user_for_rate["id"])):
+            prefix = "ℹ️ Ты уже оставил комментарий к этому фото."
+            card = await _build_rating_card_for_photo(
+                int(photo_id),
+                int(user_for_rate["id"]),
+                int(message.from_user.id),
+                prefix=prefix,
+            )
+            if card is not None:
+                await _apply_rating_card(
+                    bot=message.bot,
+                    chat_id=rate_chat_id,
+                    message=None,
+                    message_id=rate_msg_id,
+                    card=card,
+                )
+            else:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=rate_chat_id,
+                        message_id=rate_msg_id,
+                        text=prefix,
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            try:
+                data = await state.get_data()
+                kb_id = data.get("rate_kb_msg_id")
+                if kb_id is None:
+                    await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, _lang(user_for_rate))
+            except Exception:
+                pass
+            return
+    except Exception:
+        pass
+
+    try:
+        await create_comment(
+            user_id=int(user_for_rate["id"]),
+            photo_id=int(photo_id),
+            text=text,
+            is_public=bool(is_public),
+        )
+        saved = True
+        await state.update_data(comment_saved=True, comment_text=None)
+    except Exception as e:
+        save_error = e
+        try:
+            await log_bot_error(
+                chat_id=message.chat.id,
+                tg_user_id=message.from_user.id,
+                handler="rate_comment_text:create_comment",
+                update_type="comment",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
 
     if not saved:
         kb = InlineKeyboardMarkup(
@@ -1875,7 +1935,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
         )
         err_txt = "Не удалось сохранить комментарий. Попробуй ещё раз чуть позже."
         if save_error is not None:
-            # show short error for debugging (without traceback)
             err_txt += f"\n\nПричина: {type(save_error).__name__}: {save_error}"
         await message.bot.edit_message_caption(
             chat_id=rate_chat_id,
@@ -1884,18 +1943,19 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
             reply_markup=kb,
             parse_mode="HTML",
         )
-        await state.clear()
         return
 
-    # Notify photo author about the new comment ONLY if it was saved
+    # Notify author about comment (без оценки)
     try:
-        photo = await get_photo_by_id(int(photo_id))
+        photo = photo_for_caption
+        if photo is None:
+            photo = await get_photo_by_id(int(photo_id))
     except Exception:
         photo = None
 
     if photo is not None:
         author_user_id = photo.get("user_id")
-        if author_user_id and user_for_rate and author_user_id != user_for_rate.get("id"):
+        if author_user_id and author_user_id != user_for_rate.get("id"):
             try:
                 author = await get_user_by_id(int(author_user_id))
             except Exception:
@@ -1923,26 +1983,15 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     except Exception:
                         pass
 
-    # --- Success: return the user to the rating UI and exit the comment state ---
-    rater_user = await get_user_by_tg_id(int(message.from_user.id))
-    rater_lang = _lang(rater_user)
+    rater_lang = _lang(user_for_rate)
     try:
-        photo_for_caption = photo
-        if photo_for_caption is None:
-            photo_for_caption = await get_photo_by_id(int(photo_id))
-        is_rateable = bool(photo_for_caption and photo_for_caption.get("ratings_enabled", True))
         prefix = "✅ Комментарий отправлен!"
-        if is_rateable:
-            prefix = "✅ Комментарий отправлен!\n\nМожешь поставить оценку этому кадру 👇"
-
-        card = None
-        if user_for_rate and user_for_rate.get("id"):
-            card = await _build_rating_card_for_photo(
-                int(photo_id),
-                int(user_for_rate["id"]),
-                int(message.from_user.id),
-                prefix=prefix,
-            )
+        card = await _build_rating_card_for_photo(
+            int(photo_id),
+            int(user_for_rate["id"]),
+            int(message.from_user.id),
+            prefix=prefix,
+        )
         if card is not None:
             await _apply_rating_card(
                 bot=message.bot,
@@ -1966,16 +2015,15 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 pass
 
         try:
-            if is_rateable:
-                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
-            else:
+            data = await state.get_data()
+            kb_id = data.get("rate_kb_msg_id")
+            if kb_id is None:
                 await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
         except Exception:
             pass
     except TelegramBadRequest:
         pass
 
-    await state.clear()
     return
 
 @router.message(RateStates.waiting_report_text)

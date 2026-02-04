@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, datetime
+import traceback
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, BufferedInputFile
@@ -9,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 
 from utils.time import get_moscow_now
 from utils.charts import render_activity_chart
-from database import get_activity_counts_by_hour, get_activity_counts_by_day
+from database import get_activity_counts_by_hour, get_activity_counts_by_day, log_bot_error
 from .common import _ensure_admin, edit_or_answer
 
 
@@ -24,6 +25,18 @@ def _kb_activity_menu():
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(2, 1, 1)
     return kb.as_markup()
+
+def _normalize_bucket(value: object, *, by: str) -> datetime | None:
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value))
+        if by == "hour":
+            return dt.replace(minute=0, second=0, microsecond=0)
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    except Exception:
+        return None
 
 
 @router.callback_query(F.data == "admin:activity")
@@ -51,27 +64,45 @@ async def _send_activity_chart(
     counts: list[int],
     labels: list[str],
 ) -> None:
-    chart = render_activity_chart(counts, labels)
-    chart_file = BufferedInputFile(chart.getvalue(), filename="activity.png")
-    caption = f"📈 <b>Активность</b>\n{title}"
+    try:
+        chart = render_activity_chart(counts, labels)
+        chart_file = BufferedInputFile(chart.getvalue(), filename="activity.png")
+        caption = f"📈 <b>Активность</b>\n{title}"
 
-    data = await state.get_data()
-    prev_id = data.get("activity_chart_msg_id")
-    if prev_id:
+        data = await state.get_data()
+        prev_id = data.get("activity_chart_msg_id")
+        if prev_id:
+            try:
+                await callback.message.bot.delete_message(chat_id=callback.message.chat.id, message_id=int(prev_id))
+            except Exception:
+                pass
+
+        sent = await callback.message.bot.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=chart_file,
+            caption=caption,
+            reply_markup=_kb_activity_menu(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+        await state.update_data(activity_chart_msg_id=sent.message_id)
+    except Exception as e:
         try:
-            await callback.message.bot.delete_message(chat_id=callback.message.chat.id, message_id=int(prev_id))
+            await callback.answer("Не удалось отправить график.", show_alert=True)
         except Exception:
             pass
-
-    sent = await callback.message.bot.send_photo(
-        chat_id=callback.message.chat.id,
-        photo=chart_file,
-        caption=caption,
-        reply_markup=_kb_activity_menu(),
-        parse_mode="HTML",
-        disable_notification=True,
-    )
-    await state.update_data(activity_chart_msg_id=sent.message_id)
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="admin_activity:send_chart",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data == "admin:activity:day")
@@ -85,7 +116,11 @@ async def admin_activity_day(callback: CallbackQuery, state: FSMContext):
     end = start + timedelta(days=1)
 
     rows = await get_activity_counts_by_hour(start.isoformat(), end.isoformat())
-    by_hour = {r["bucket"].replace(minute=0, second=0, microsecond=0): int(r["cnt"]) for r in rows}
+    by_hour: dict[datetime, int] = {}
+    for r in rows:
+        dt = _normalize_bucket(r.get("bucket"), by="hour")
+        if dt is not None:
+            by_hour[dt] = int(r.get("cnt") or 0)
     counts: list[int] = []
     labels: list[str] = []
     for h in range(24):
@@ -109,7 +144,11 @@ async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
     start = end - timedelta(days=7)
 
     rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
-    by_day = {r["bucket"].replace(hour=0, minute=0, second=0, microsecond=0): int(r["cnt"]) for r in rows}
+    by_day: dict[datetime, int] = {}
+    for r in rows:
+        dt = _normalize_bucket(r.get("bucket"), by="day")
+        if dt is not None:
+            by_day[dt] = int(r.get("cnt") or 0)
     counts: list[int] = []
     labels: list[str] = []
     for i in range(7):
@@ -133,7 +172,11 @@ async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
     start = end - timedelta(days=30)
 
     rows = await get_activity_counts_by_day(start.isoformat(), end.isoformat())
-    by_day = {r["bucket"].replace(hour=0, minute=0, second=0, microsecond=0): int(r["cnt"]) for r in rows}
+    by_day: dict[datetime, int] = {}
+    for r in rows:
+        dt = _normalize_bucket(r.get("bucket"), by="day")
+        if dt is not None:
+            by_day[dt] = int(r.get("cnt") or 0)
     counts: list[int] = []
     labels: list[str] = []
     for i in range(30):
