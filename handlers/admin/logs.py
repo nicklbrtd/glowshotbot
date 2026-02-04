@@ -17,6 +17,7 @@ from database import (
     get_bot_error_logs_page,
     get_bot_error_logs_count,
     clear_bot_error_logs,
+    log_bot_error,
 )
 
 
@@ -142,13 +143,27 @@ def _fmt_dt_safe(dt_str: str | None) -> str:
 async def _render_logs_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
     page = max(1, int(page))
 
-    total = await get_bot_error_logs_count()
-    total_pages = max(1, (total + _LOGS_PAGE_LIMIT - 1) // _LOGS_PAGE_LIMIT)
-    if page > total_pages:
-        page = total_pages
+    try:
+        total = await get_bot_error_logs_count()
+        total_pages = max(1, (total + _LOGS_PAGE_LIMIT - 1) // _LOGS_PAGE_LIMIT)
+        if page > total_pages:
+            page = total_pages
 
-    offset = (page - 1) * _LOGS_PAGE_LIMIT
-    rows = await get_bot_error_logs_page(offset=offset, limit=_LOGS_PAGE_LIMIT)
+        offset = (page - 1) * _LOGS_PAGE_LIMIT
+        rows = await get_bot_error_logs_page(offset=offset, limit=_LOGS_PAGE_LIMIT)
+    except Exception as e:
+        # Если БД недоступна или таблица не создана — показываем понятную причину
+        text = (
+            "🧾 <b>Логи / ошибки</b>\n\n"
+            "Не удалось получить логи из базы.\n"
+            f"<code>{html.escape(type(e).__name__)}: {html.escape(str(e))}</code>\n\n"
+            "Проверь соединение с БД и наличие таблицы <code>bot_error_logs</code>."
+        )
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📟 Systemd логи", callback_data="admin:logs:systemd")
+        kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+        kb.adjust(1)
+        return text, kb.as_markup()
 
     lines: list[str] = [
         "🧾 <b>Логи / ошибки</b>",
@@ -198,12 +213,13 @@ async def _render_logs_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
             kb.button(text="➡️", callback_data=next_cb)
 
     # действия
+    kb.button(text="🧪 Тест логов", callback_data="admin:logs:test")
     kb.button(text="📟 Systemd логи", callback_data="admin:logs:systemd")
     kb.button(text="🧹 Очистить логи", callback_data=f"admin:logs:clear:confirm:{page}")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
 
     # раскладка: (подробности до 5) / (стрелки 2) / (systemd) / (очистить) / (в меню)
-    kb.adjust(5, 2, 1, 1, 1)
+    kb.adjust(5, 2, 1, 1, 1, 1)
 
     return text, kb.as_markup()
 
@@ -254,6 +270,34 @@ async def admin_logs_open(callback: CallbackQuery):
     except Exception:
         await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
 
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:logs:test")
+async def admin_logs_test(callback: CallbackQuery):
+    admin_user = await _ensure_admin(callback)
+    if admin_user is None:
+        return
+
+    try:
+        await log_bot_error(
+            chat_id=callback.message.chat.id if callback.message else None,
+            tg_user_id=callback.from_user.id if callback.from_user else None,
+            handler="admin_logs_test",
+            update_type="callback",
+            error_type="TestLog",
+            error_text="Тестовая запись логов",
+            traceback_text="admin_logs_test",
+        )
+    except Exception:
+        pass
+
+    text, markup = await _render_logs_page(1)
+    text = "✅ Тестовая запись создана.\n\n" + text
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
     await callback.answer()
 
 
