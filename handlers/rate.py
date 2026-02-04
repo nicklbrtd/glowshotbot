@@ -56,10 +56,11 @@ from database import (
     get_user_ui_state,
     set_user_rate_kb_msg_id,
     set_user_screen_msg_id,
+    set_user_rate_tutorial_seen,
 )
 from handlers.upload import EDIT_TAGS
 from html import escape
-from config import MODERATION_CHAT_ID
+from config import MODERATION_CHAT_ID, RATE_TUTORIAL_PHOTO_FILE_ID
 
 router = Router()
 
@@ -631,6 +632,34 @@ def _build_next_only_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     )
 
 
+RATE_TUTORIAL_OK_TEXT = "Все понятно!"
+RATE_TUTORIAL_CAPTION = (
+    "Название\n"
+    "[Тег] · Автор · Устройство · #0/0\n\n"
+    "📜 Описание автора из профиля"
+)
+
+
+def _build_rate_tutorial_inline_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Ссылка автора", callback_data="rate:tutor:noop")
+    kb.button(text="Коммент", callback_data="rate:tutor:noop")
+    kb.button(text="Жалоба", callback_data="rate:tutor:noop")
+    kb.button(text="В меню", callback_data="menu:back")
+    kb.button(text="Еще", callback_data="rate:tutor:noop")
+    kb.adjust(1, 2, 2)
+    return kb.as_markup()
+
+
+def _build_rate_tutorial_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=RATE_TUTORIAL_OK_TEXT)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
+    )
+
+
 async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
     """Держим одно сообщение с клавиатурой оценок (редактируем, не пересылаем)."""
     data = await state.get_data()
@@ -713,6 +742,52 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
         chat_id=chat_id,
         text="Нажми «Дальше»" if lang.startswith("ru") else "Tap Next",
         reply_markup=_build_next_only_reply_keyboard(lang),
+        disable_notification=True,
+    )
+    data["rate_kb_msg_id"] = sent.message_id
+    await state.set_data(data)
+    try:
+        await set_user_rate_kb_msg_id(chat_id, sent.message_id)
+    except Exception:
+        pass
+
+
+async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
+    """Сообщение с одной reply‑кнопкой «Все понятно!» (редактируем, не пересылаем)."""
+    data = await state.get_data()
+    old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            pass
+
+    if old_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_msg_id,
+                text="Нажми «Все понятно!»",
+                reply_markup=_build_rate_tutorial_reply_keyboard(),
+            )
+            data["rate_kb_msg_id"] = old_msg_id
+            await state.set_data(data)
+            try:
+                await set_user_rate_kb_msg_id(chat_id, old_msg_id)
+            except Exception:
+                pass
+            return
+        except Exception:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            except Exception:
+                pass
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text="Нажми «Все понятно!»",
+        reply_markup=_build_rate_tutorial_reply_keyboard(),
         disable_notification=True,
     )
     data["rate_kb_msg_id"] = sent.message_id
@@ -1373,6 +1448,69 @@ async def show_next_photo_for_rating(
             await callback.answer()
         except Exception:
             pass
+
+
+async def _show_rate_tutorial(callback: CallbackQuery | Message, state: FSMContext) -> None:
+    is_cb = isinstance(callback, CallbackQuery)
+    if is_cb:
+        bot = callback.message.bot
+        chat_id = callback.message.chat.id
+        old_msg = callback.message
+        user_id = int(callback.from_user.id)
+    else:
+        bot = callback.bot
+        chat_id = callback.chat.id
+        old_msg = None
+        user_id = int(callback.from_user.id)
+
+    try:
+        sent = await bot.send_photo(
+            chat_id=chat_id,
+            photo=RATE_TUTORIAL_PHOTO_FILE_ID,
+            caption=RATE_TUTORIAL_CAPTION,
+            reply_markup=_build_rate_tutorial_inline_kb(),
+            parse_mode="HTML",
+            disable_notification=True,
+            show_caption_above_media=True,
+        )
+    except Exception:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=RATE_TUTORIAL_CAPTION,
+            reply_markup=_build_rate_tutorial_inline_kb(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+
+    data = await state.get_data()
+    data["rate_tutorial_msg_id"] = sent.message_id
+    await state.set_data(data)
+    try:
+        await set_user_screen_msg_id(user_id, sent.message_id)
+    except Exception:
+        pass
+
+    await _send_tutorial_reply_keyboard(bot, chat_id, state)
+
+    if old_msg is not None:
+        try:
+            await old_msg.delete()
+        except Exception:
+            pass
+
+    if is_cb:
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data == "rate:tutor:noop")
+async def rate_tutorial_noop(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("rate:comment:"))
@@ -2422,6 +2560,48 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     if await _deny_if_full_banned(message=message):
         return
     text = (message.text or "").strip()
+    if text == RATE_TUTORIAL_OK_TEXT:
+        if should_throttle(message.from_user.id, "rate:tutorial:ok", 0.6):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        user = await get_user_by_tg_id(message.from_user.id)
+        if user is None:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        try:
+            await set_user_rate_tutorial_seen(message.from_user.id, True)
+        except Exception:
+            pass
+
+        data = await state.get_data()
+        tut_msg_id = data.get("rate_tutorial_msg_id")
+        if tut_msg_id is None:
+            try:
+                ui_state = await get_user_ui_state(message.from_user.id)
+                tut_msg_id = ui_state.get("screen_msg_id")
+            except Exception:
+                tut_msg_id = None
+        if tut_msg_id:
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=int(tut_msg_id))
+            except Exception:
+                pass
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+        return
     if text.startswith("/"):
         raise SkipHandler
     if text == t("rate.btn.next", "ru") or text == t("rate.btn.next", "en"):
@@ -2798,6 +2978,15 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
+
+    if state is not None:
+        try:
+            ui_state = await get_user_ui_state(callback.from_user.id)
+            if not bool(ui_state.get("rate_tutorial_seen")):
+                await _show_rate_tutorial(callback, state)
+                return
+        except Exception:
+            pass
 
     await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message, state=state)
 @router.callback_query(F.data == "comment:seen")

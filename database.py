@@ -232,12 +232,16 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
             menu_msg_id BIGINT,
             rate_kb_msg_id BIGINT,
             screen_msg_id BIGINT,
+            rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """
     )
     await conn.execute(
         "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS screen_msg_id BIGINT;"
+    )
+    await conn.execute(
+        "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE;"
     )
 
 
@@ -246,11 +250,16 @@ async def get_user_ui_state(tg_id: int) -> dict:
     async with p.acquire() as conn:
         await _ensure_ui_state_table(conn)
         row = await conn.fetchrow(
-            "SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id FROM user_ui_state WHERE tg_id=$1",
+            "SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, rate_tutorial_seen FROM user_ui_state WHERE tg_id=$1",
             int(tg_id),
         )
         if not row:
-            return {"menu_msg_id": None, "rate_kb_msg_id": None, "screen_msg_id": None}
+            return {
+                "menu_msg_id": None,
+                "rate_kb_msg_id": None,
+                "screen_msg_id": None,
+                "rate_tutorial_seen": False,
+            }
         return dict(row)
 
 
@@ -299,6 +308,22 @@ async def set_user_screen_msg_id(tg_id: int, screen_msg_id: int | None) -> None:
             """,
             int(tg_id),
             int(screen_msg_id) if screen_msg_id is not None else None,
+        )
+
+
+async def set_user_rate_tutorial_seen(tg_id: int, seen: bool = True) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, rate_tutorial_seen, updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (tg_id)
+            DO UPDATE SET rate_tutorial_seen=$2, updated_at=NOW()
+            """,
+            int(tg_id),
+            bool(seen),
         )
 
 # -------------------- Feedback ideas --------------------

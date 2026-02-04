@@ -52,6 +52,12 @@ if _FEEDBACK_CHAT_ID_RAW:
 else:
     FEEDBACK_CHAT_ID = -1003726130918
 
+# ===== Rating tutorial photo =====
+RATE_TUTORIAL_PHOTO_FILE_ID = os.getenv(
+    "RATE_TUTORIAL_PHOTO_FILE_ID",
+    "AgACAgIAAxkBAAIg2GmDn0m5yO122K7pVB2_9j_sGOegAAK2DWsbRt4hSBEpPEq_thR_AQADAgADdwADOAQ",
+)
+
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)
 MANUAL_RUB_ENABLED = os.getenv("MANUAL_RUB_ENABLED", "1").strip().lower() in ("1", "true", "yes")
