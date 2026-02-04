@@ -574,6 +574,7 @@ async def _build_rate_view(
             int(photo_id),
             is_premium=viewer_is_premium,
             show_details=show_details,
+            more_only=show_details,
             link_button=link_button,
             lang=viewer_lang,
         )
@@ -582,6 +583,7 @@ async def _build_rate_view(
             int(photo_id),
             show_details=show_details,
             is_premium=viewer_is_premium,
+            more_only=show_details,
             link_button=link_button,
             lang=viewer_lang,
         )
@@ -738,34 +740,33 @@ async def _apply_rating_card(
                 return
             except Exception:
                 message_id = None
-
-    prev_id = None
-    if state is not None:
-        try:
-            prev_id = (await state.get_data()).get("rate_msg_id")
-        except Exception:
-            prev_id = None
-
-    try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
-            text=card.caption,
-            reply_markup=card.keyboard,
-            parse_mode="HTML",
-            disable_notification=True,
-        )
+        prev_id = None
         if state is not None:
-            data = await state.get_data()
-            data["rate_msg_id"] = sent.message_id
-            await state.set_data(data)
-        if prev_id and prev_id != sent.message_id:
             try:
-                await bot.delete_message(chat_id=chat_id, message_id=prev_id)
+                prev_id = (await state.get_data()).get("rate_msg_id")
             except Exception:
-                pass
-    except Exception:
-        pass
-    return
+                prev_id = None
+
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=card.caption,
+                reply_markup=card.keyboard,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+            if state is not None:
+                data = await state.get_data()
+                data["rate_msg_id"] = sent.message_id
+                await state.set_data(data)
+            if prev_id and prev_id != sent.message_id:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=prev_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return
 
     media = InputMediaPhoto(
         media=card.photo_file_id,
@@ -845,28 +846,62 @@ async def _apply_rating_card(
         except Exception:
             pass
 
+
+async def _edit_rate_message(
+    message: Message,
+    *,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> None:
+    """Редактирование карточки оценивания с сохранением подписи над фото."""
+    if message.photo:
+        media = InputMediaPhoto(
+            media=message.photo[-1].file_id,
+            caption=caption,
+            parse_mode="HTML",
+            show_caption_above_media=True,
+        )
+        try:
+            await message.edit_media(media=media, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+        try:
+            await message.edit_caption(caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+
+    try:
+        await message.edit_text(caption, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        pass
+
+
 def build_rate_keyboard(
     photo_id: int,
     *,
     is_premium: bool = False,
     show_details: bool = False,
+    more_only: bool = False,
     link_button: tuple[str, str] | None = None,
     lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
-    if link_button:
+    if link_button and not more_only:
         link_text, link_url = link_button
         rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
 
-    rows.append(
-        [
-            InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
-            InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
-        ]
-    )
+    if not more_only:
+        rows.append(
+            [
+                InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
+                InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
+            ]
+        )
 
-    if show_details and is_premium:
+    if show_details and is_premium and not more_only:
         rows.append(
             [
                 InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
@@ -892,23 +927,25 @@ def build_view_only_keyboard(
     *,
     show_details: bool = False,
     is_premium: bool = False,
+    more_only: bool = False,
     link_button: tuple[str, str] | None = None,
     lang: str = "ru",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
-    if link_button:
+    if link_button and not more_only:
         link_text, link_url = link_button
         rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
 
-    rows.append(
-        [
-            InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
-            InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
-        ]
-    )
+    if not more_only:
+        rows.append(
+            [
+                InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
+                InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
+            ]
+        )
 
-    if show_details and is_premium:
+    if show_details and is_premium and not more_only:
         rows.append([InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}")])
 
     rows.append(
@@ -1045,66 +1082,8 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     except Exception:
         verified_badge = ""
 
-    lines.append(f"{premium_badge}{title_mono}{verified_badge}")
-
-    tag_badge = _tag_badge(str(photo.get("tag") or ""))
-    device_icon = _device_emoji(photo.get("device_type") or photo.get("device_info") or "")
-
-    second_parts = [f"[{escape(tag_badge)}]", escape(display_name)]
-    if device_icon:
-        second_parts.append(device_icon)
-    if photo_index_text:
-        second_parts.append(photo_index_text)
-    lines.append(" · ".join(second_parts))
-
-    # описание из био автора (а не из фото)
-    description = ""
-    if author:
-        description = (author.get("bio") or "").strip()
-    description = description.strip()
-    if description and description.lower() == "нет":
-        description = ""
-    if description:
-        desc_text = description if show_details else _shorten_text(description)
-        lines.append("")
-        lines.append(f"📜 {escape(desc_text)}")
-
-    # --- Реклама под описанием ---
-    # Реклама: по умолчанию включена, но премиум может выключить в настройках
-    viewer_is_premium = False
-    try:
-        viewer_is_premium = await is_user_premium_active(int(viewer_tg_id))
-    except Exception:
-        viewer_is_premium = False
-
-    ads_enabled = None
-    try:
-        ads_enabled = await get_ads_enabled_by_tg_id(int(viewer_tg_id))
-    except Exception:
-        ads_enabled = None
-
-    # если пользователь не задавал — по умолчанию: у премиум выкл, у остальных вкл
-    if ads_enabled is None:
-        ads_enabled = not viewer_is_premium
-
-    ad_lines: list[str] = []
-    if ads_enabled and not show_details:
-        try:
-            ad = await get_random_active_ad()
-        except Exception:
-            ad = None
-        if ad:
-            ad_title = (ad.get("title") or "").strip()
-            ad_body = (ad.get("body") or "").strip()
-            if ad_title or ad_body:
-                ad_lines.append("••• реклама •••")
-                if ad_title:
-                    ad_lines.append(f"<b>{escape(ad_title)}</b>")
-                if ad_body:
-                    ad_lines.append(quote(ad_body))
-
-    # details on demand (доступны всем; супер-кнопки ограничены клавой)
     if show_details:
+        # Показ "Еще": скрываем название/параметры, оставляем только детали.
         if bool(photo.get("has_beta_award")):
             lines.append("··· Бета-тестер бота ···")
 
@@ -1140,11 +1119,9 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             pass
 
         admin_extras: list[str] = []
-        viewer_is_privileged = False
         try:
             viewer = await get_user_by_tg_id(int(viewer_tg_id))
             if viewer and (viewer.get("is_admin") or viewer.get("is_moderator")):
-                viewer_is_privileged = True
                 if username:
                     admin_extras.append(f"Аккаунт автора: @{username}")
                 created_at = photo.get("created_at") or ""
@@ -1165,11 +1142,70 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
         ] + admin_extras
 
         lines.append(quote("\n".join(details_lines)))
-    else:
-        # короткий режим: только ссылка и реклама
-        if ad_lines:
-            lines.append("")
-            lines.extend(ad_lines)
+        return "\n".join(lines)
+
+    # Обычный режим: название и параметры
+    lines.append(f"{premium_badge}{title_mono}{verified_badge}")
+
+    tag_badge = _tag_badge(str(photo.get("tag") or ""))
+    device_icon = _device_emoji(photo.get("device_type") or photo.get("device_info") or "")
+
+    second_parts = [f"[{escape(tag_badge)}]", escape(display_name)]
+    if device_icon:
+        second_parts.append(device_icon)
+    if photo_index_text:
+        second_parts.append(photo_index_text)
+    lines.append(" · ".join(second_parts))
+
+    # описание из био автора (а не из фото)
+    description = ""
+    if author:
+        description = (author.get("bio") or "").strip()
+    description = description.strip()
+    if description and description.lower() == "нет":
+        description = ""
+    if description:
+        desc_text = _shorten_text(description)
+        lines.append("")
+        lines.append(f"📜 {escape(desc_text)}")
+
+    # --- Реклама под описанием ---
+    # Реклама: по умолчанию включена, но премиум может выключить в настройках
+    viewer_is_premium = False
+    try:
+        viewer_is_premium = await is_user_premium_active(int(viewer_tg_id))
+    except Exception:
+        viewer_is_premium = False
+
+    ads_enabled = None
+    try:
+        ads_enabled = await get_ads_enabled_by_tg_id(int(viewer_tg_id))
+    except Exception:
+        ads_enabled = None
+
+    # если пользователь не задавал — по умолчанию: у премиум выкл, у остальных вкл
+    if ads_enabled is None:
+        ads_enabled = not viewer_is_premium
+
+    ad_lines: list[str] = []
+    if ads_enabled:
+        try:
+            ad = await get_random_active_ad()
+        except Exception:
+            ad = None
+        if ad:
+            ad_title = (ad.get("title") or "").strip()
+            ad_body = (ad.get("body") or "").strip()
+            if ad_title or ad_body:
+                ad_lines.append("••• реклама •••")
+                if ad_title:
+                    ad_lines.append(f"<b>{escape(ad_title)}</b>")
+                if ad_body:
+                    ad_lines.append(quote(ad_body))
+
+    if ad_lines:
+        lines.append("")
+        lines.extend(ad_lines)
 
     return "\n".join(lines)
 
@@ -2498,10 +2534,7 @@ async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
         return
     caption, kb, is_rateable = view
 
-    try:
-        await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        pass
+    await _edit_rate_message(callback.message, caption=caption, reply_markup=kb)
 
     try:
         data = await state.get_data()
@@ -2631,13 +2664,7 @@ async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
         return
     caption, kb, is_rateable = view
 
-    try:
-        await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        try:
-            await callback.message.edit_text(caption, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            pass
+    await _edit_rate_message(callback.message, caption=caption, reply_markup=kb)
 
     if is_rateable:
         try:

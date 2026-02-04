@@ -125,6 +125,7 @@ from handlers import (
     referrals,
     linklike,
     streak,
+    feedback,
 )
 
 
@@ -490,6 +491,7 @@ async def main() -> None:
     dp.include_router(premium.router)
     dp.include_router(payments.router)
     dp.include_router(referrals.router)
+    dp.include_router(feedback.router)
     dp.include_router(help_center_router)
     dp.include_router(streak.router)
 

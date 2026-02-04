@@ -221,6 +221,123 @@ async def increment_likes_daily_for_tg_id(tg_id: int, day_key: str, delta: int =
             int(delta),
         )
 
+# -------------------- Feedback ideas --------------------
+
+async def _ensure_feedback_tables(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback_ideas (
+            id BIGSERIAL PRIMARY KEY,
+            idea_code BIGINT UNIQUE NOT NULL,
+            tg_id BIGINT NOT NULL,
+            username TEXT,
+            text TEXT,
+            attachments JSONB,
+            status TEXT NOT NULL DEFAULT 'new',
+            cancel_reason TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_ideas_tg_id ON feedback_ideas (tg_id);"
+    )
+
+
+async def create_feedback_idea(
+    *,
+    tg_id: int,
+    username: str | None,
+    text: str | None,
+    attachments: list[dict] | None,
+) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_feedback_tables(conn)
+
+        for _ in range(6):
+            idea_code = random.randint(100000, 999999)
+            try:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO feedback_ideas (idea_code, tg_id, username, text, attachments)
+                    VALUES ($1,$2,$3,$4,$5)
+                    RETURNING id, idea_code, created_at
+                    """,
+                    int(idea_code),
+                    int(tg_id),
+                    username,
+                    text,
+                    attachments or [],
+                )
+                return dict(row)
+            except UniqueViolationError:
+                continue
+
+        # Fallback: larger random space
+        idea_code = random.randint(100000000, 999999999)
+        row = await conn.fetchrow(
+            """
+            INSERT INTO feedback_ideas (idea_code, tg_id, username, text, attachments)
+            VALUES ($1,$2,$3,$4,$5)
+            RETURNING id, idea_code, created_at
+            """,
+            int(idea_code),
+            int(tg_id),
+            username,
+            text,
+            attachments or [],
+        )
+        return dict(row)
+
+
+async def list_feedback_ideas_by_tg_id(tg_id: int, limit: int = 20) -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_feedback_tables(conn)
+        rows = await conn.fetch(
+            """
+            SELECT id, idea_code, status, cancel_reason, created_at, text
+            FROM feedback_ideas
+            WHERE tg_id=$1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            int(tg_id),
+            int(limit),
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_feedback_idea_by_id(idea_id: int) -> dict | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_feedback_tables(conn)
+        row = await conn.fetchrow(
+            "SELECT * FROM feedback_ideas WHERE id=$1",
+            int(idea_id),
+        )
+        return dict(row) if row else None
+
+
+async def set_feedback_status(idea_id: int, status: str, reason: str | None = None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_feedback_tables(conn)
+        await conn.execute(
+            """
+            UPDATE feedback_ideas
+            SET status=$2,
+                cancel_reason=$3,
+                updated_at=NOW()
+            WHERE id=$1
+            """,
+            int(idea_id),
+            str(status),
+            reason,
+        )
+
 
 # -------------------- ads --------------------
 

@@ -41,6 +41,17 @@ else:
     # Default group for author verification requests (fallback if .env is not set)
     AUTHOR_APPLICATIONS_CHAT_ID = -1003728717861
 
+# ===== Feedback / Ideas =====
+_FEEDBACK_CHAT_ID_RAW = (os.getenv("FEEDBACK_CHAT_ID") or "").strip()
+FEEDBACK_CHAT_ID = None
+if _FEEDBACK_CHAT_ID_RAW:
+    try:
+        FEEDBACK_CHAT_ID = int(_FEEDBACK_CHAT_ID_RAW)
+    except ValueError:
+        FEEDBACK_CHAT_ID = None
+else:
+    FEEDBACK_CHAT_ID = -1003726130918
+
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)
 MANUAL_RUB_ENABLED = os.getenv("MANUAL_RUB_ENABLED", "1").strip().lower() in ("1", "true", "yes")
