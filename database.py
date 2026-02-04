@@ -3389,7 +3389,9 @@ async def log_bot_error(
 ) -> None:
     """Сохраняет ошибку бота в таблицу bot_error_logs для админки."""
     p = _assert_pool()
-    now = get_moscow_now_iso()
+    # В разных БД колонка created_at может быть TEXT или TIMESTAMP.
+    # Передаём datetime, чтобы подошло под TIMESTAMP, а в TEXT каст прошло автоматически.
+    now = get_moscow_now()
 
     # Ограничим размеры, чтобы не убить базу огромным traceback
     def _cut(s: str | None, n: int) -> str | None:
