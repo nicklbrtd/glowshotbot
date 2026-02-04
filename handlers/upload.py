@@ -11,6 +11,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
+from utils.banner import ensure_giraffe_banner
 from utils.antispam import should_throttle
 
 from aiogram.exceptions import TelegramBadRequest
@@ -1103,6 +1104,10 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
+    try:
+        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
+    except Exception:
+        pass
     data = await state.get_data()
     menu_msg_id = data.get("menu_msg_id")
     opened_from_menu = menu_msg_id and callback.message and callback.message.message_id == menu_msg_id

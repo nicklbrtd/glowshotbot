@@ -10,17 +10,20 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from html import escape
 
 from database import (
     get_total_users,
+    get_new_registered_today_count,
     get_users_sample,
-    get_active_users_last_24h,
+    get_active_users_today,
     get_online_users_recent,
     get_new_users_last_days,
     get_referrals_total,
+    get_referral_invited_users_page,
     get_unregistered_users_count,
-    get_premium_users,
-    get_top_users_by_activity_events,
+    get_unregistered_users_page,
+    get_exited_users_page,
 )
 
 from .common import _ensure_admin, _safe_int
@@ -40,30 +43,38 @@ async def admin_stats(callback: CallbackQuery, state: FSMContext):
     if user is None:
         return
 
-    total_users = active_24h = online_recent = total_events = new_7d = premium_total = 0
+    total_users = new_today = active_today = online_now = new_7d = exited_total = 0
     referrals_total = unregistered_total = 0
 
     try:
         total_users = _safe_int(await get_total_users())
     except Exception:
         pass
-
-    # эти функции возвращают (total, rows)
     try:
-        active_total, _ = await get_active_users_last_24h(limit=1, offset=0)
-        active_24h = _safe_int(active_total)
+        new_today = _safe_int(await get_new_registered_today_count())
     except Exception:
         pass
 
     try:
-        online_total, _ = await get_online_users_recent(window_minutes=5, limit=1, offset=0)
-        online_recent = _safe_int(online_total)
+        active_total, _ = await get_active_users_today(limit=1, offset=0)
+        active_today = _safe_int(active_total)
+    except Exception:
+        pass
+
+    try:
+        online_total, _ = await get_online_users_recent(window_minutes=1, limit=1, offset=0)
+        online_now = _safe_int(online_total)
     except Exception:
         pass
 
     try:
         new_total, _ = await get_new_users_last_days(7, limit=1, offset=0)
         new_7d = _safe_int(new_total)
+    except Exception:
+        pass
+    try:
+        exited_total, _ = await get_exited_users_page(limit=1, offset=0)
+        exited_total = _safe_int(exited_total)
     except Exception:
         pass
 
@@ -78,22 +89,24 @@ async def admin_stats(callback: CallbackQuery, state: FSMContext):
         pass
 
     text = (
-        "📊 <b>Статистика</b>\n\n"
-        f"👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"⚡ Активных за 24ч: <b>{active_24h}</b>\n"
-        f"🟢 Онлайн (recent): <b>{online_recent}</b>\n"
-        f"🆕 Новых за 7 дней: <b>{new_7d}</b>\n"
-        f"🔗 Перешли по рефералке: <b>{referrals_total}</b>\n"
-        f"🙈 Не зарегистрированы: <b>{unregistered_total}</b>\n"
+        "📊 <b>Статистика сегодня</b>\n\n"
+        f"Пользователи: <b>{total_users}</b> (+{new_today})\n"
+        f"Активные за день: <b>{active_today}</b>\n"
+        f"Онлайн сейчас: <b>{online_now}</b>\n"
+        f"Вышедшие: <b>{exited_total}</b>\n"
+        f"Рефералка: <b>{referrals_total}</b>\n"
+        f"Не зарег пользователи: <b>{unregistered_total}</b>\n"
+        f"Новых за 7 дней: <b>{new_7d}</b>\n"
     )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="👥 Всего пользователей — список", callback_data="admin:stats:list:total:1")
-    kb.button(text="⚡ Активные 24ч — список", callback_data="admin:stats:list:active24:1")
-    kb.button(text="🟢 Онлайн (recent) — список", callback_data="admin:stats:list:online:1")
-    kb.button(text="🆕 Новые за 7 дней — список", callback_data="admin:stats:list:new7:1")
-    kb.button(text="🔗 Перешли по рефералке — список", callback_data="admin:stats:list:referrals:1")
-    kb.button(text="🙈 Не зарегистрированные — список", callback_data="admin:stats:list:unregistered:1")
+    kb.button(text="Пользователи — список", callback_data="admin:stats:list:total:1")
+    kb.button(text="Активные за день — список", callback_data="admin:stats:list:active_day:1")
+    kb.button(text="Онлайн сейчас — список", callback_data="admin:stats:list:online_now:1")
+    kb.button(text="Вышедшие — список", callback_data="admin:stats:list:exited:1")
+    kb.button(text="Рефералка — список", callback_data="admin:stats:list:referrals:1")
+    kb.button(text="Не зарег пользователи — список", callback_data="admin:stats:list:unregistered:1")
+    kb.button(text="Новые за 7 дней — список", callback_data="admin:stats:list:new7:1")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
 
@@ -116,19 +129,26 @@ def _fmt_user_short(u: dict) -> str:
     tg_id = u.get("tg_id")
     username = (u.get("username") or "").strip()
     name = (u.get("name") or "").strip()
-    uname = f"@{username}" if username else "—"
-    nm = name if name else "Без имени"
-    return f"{uname} · {nm} · <code>{tg_id if tg_id is not None else '—'}</code>"
+    if not name:
+        name = (username or "").strip() or "Без имени"
+    name_safe = escape(name, quote=False)
+    tg_id_str = str(tg_id) if tg_id is not None else "—"
+    if username:
+        ident = f"@{username}/{tg_id_str}"
+    else:
+        ident = tg_id_str
+    return f"{ident} - {name_safe}"
 
 
 def _stats_list_title(kind: str) -> str:
     return {
-        "total": "👥 Все пользователи",
-        "active24": "⚡ Активные за 24ч",
-        "online": "🟢 Онлайн (recent)",
-        "new7": "🆕 Новые за 7 дней",
-        "referrals": "🔗 Перешли по рефералке",
-        "unregistered": "🙈 Не зарегистрированные",
+        "total": "Пользователи",
+        "active_day": "Активные за день",
+        "online_now": "Онлайн сейчас",
+        "exited": "Вышедшие",
+        "new7": "Новые за 7 дней",
+        "referrals": "Рефералка",
+        "unregistered": "Не зарег пользователи",
     }.get(kind, "📋 Список")
 
 
@@ -161,26 +181,23 @@ async def admin_stats_list(callback: CallbackQuery, state: FSMContext):
             total = _safe_int(await get_total_users())
             rows = await get_users_sample(limit=_STATS_PAGE_LIMIT, offset=offset, only_active=True)
 
-        elif kind == "active24":
-            total, rows = await get_active_users_last_24h(limit=_STATS_PAGE_LIMIT, offset=offset)
+        elif kind == "active_day":
+            total, rows = await get_active_users_today(limit=_STATS_PAGE_LIMIT, offset=offset)
 
-        elif kind == "online":
-            total, rows = await get_online_users_recent(window_minutes=5, limit=_STATS_PAGE_LIMIT, offset=offset)
+        elif kind == "online_now":
+            total, rows = await get_online_users_recent(window_minutes=1, limit=_STATS_PAGE_LIMIT, offset=offset)
 
         elif kind == "new7":
             total, rows = await get_new_users_last_days(7, limit=_STATS_PAGE_LIMIT, offset=offset)
 
+        elif kind == "exited":
+            total, rows = await get_exited_users_page(limit=_STATS_PAGE_LIMIT, offset=offset)
+
         elif kind == "referrals":
-            total = _safe_int(await get_referrals_total())
-            # Показать пользователей, у кого стоит referral_code (как приглашавших), а также invited — берём из referrals.
-            # Упрощённо: выводим список приглашённых (invited_user_id) с их tg_id.
-            rows = await get_users_sample(limit=_STATS_PAGE_LIMIT, offset=offset, only_active=True)
+            total, rows = await get_referral_invited_users_page(limit=_STATS_PAGE_LIMIT, offset=offset)
 
         elif kind == "unregistered":
-            total = _safe_int(await get_unregistered_users_count())
-            rows = await get_users_sample(limit=_STATS_PAGE_LIMIT, offset=offset, only_active=False)
-            # отфильтруем по пустому имени и активному статусу
-            rows = [u for u in rows if not (u.get("name") or "").strip() and not u.get("is_deleted") and not u.get("is_blocked")]
+            total, rows = await get_unregistered_users_page(limit=_STATS_PAGE_LIMIT, offset=offset)
 
         else:
             await callback.answer("Неизвестный список.", show_alert=True)

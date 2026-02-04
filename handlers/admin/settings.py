@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from aiogram import Router, F
+from aiogram.types import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+
+from utils.time import get_moscow_now
+from database import get_tech_mode_state, set_tech_mode_state
+
+from .common import _ensure_admin, edit_or_answer
+
+
+router = Router(name="admin_settings")
+
+
+def _tech_countdown_minutes(state: dict) -> int | None:
+    if not bool(state.get("tech_enabled")):
+        return None
+    start_at_raw = state.get("tech_start_at")
+    if not start_at_raw:
+        return None
+    try:
+        start_dt = datetime.fromisoformat(str(start_at_raw))
+    except Exception:
+        return None
+    now = get_moscow_now()
+    if now >= start_dt:
+        return 0
+    return max(1, int((start_dt - now).total_seconds() // 60))
+
+
+def _fmt_tech_state(state: dict) -> str:
+    enabled = bool(state.get("tech_enabled"))
+    start_at_raw = state.get("tech_start_at")
+    if not enabled:
+        return "выключен"
+    if start_at_raw:
+        try:
+            start_dt = datetime.fromisoformat(str(start_at_raw))
+        except Exception:
+            start_dt = None
+        if start_dt:
+            now = get_moscow_now()
+            if now < start_dt:
+                mins = max(1, int((start_dt - now).total_seconds() // 60))
+                return f"запланирован через {mins} мин (с {start_dt.strftime('%H:%M')})"
+            return f"включен (с {start_dt.strftime('%H:%M')})"
+    return "включен"
+
+
+def _kb_settings(state: dict):
+    kb = InlineKeyboardBuilder()
+    enabled = bool(state.get("tech_enabled"))
+    if enabled:
+        kb.button(text="🔴 Выключить тех.режим", callback_data="admin:settings:tech:off")
+    else:
+        kb.button(text="🟢 Включить тех.режим", callback_data="admin:settings:tech:on")
+    kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+@router.callback_query(F.data == "admin:settings")
+async def admin_settings_open(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    tech_state = await get_tech_mode_state()
+    countdown = _tech_countdown_minutes(tech_state)
+    extra = ""
+    if countdown is not None and countdown > 0:
+        extra = f"До старта: <b>{countdown} мин</b>\n"
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
+        f"{extra}"
+    )
+    await edit_or_answer(callback.message, state, prefix="admin_settings", text=text, reply_markup=_kb_settings(tech_state))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:settings:tech:on")
+async def admin_settings_tech_on(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    start_at = (get_moscow_now() + timedelta(minutes=5)).isoformat()
+    await set_tech_mode_state(enabled=True, start_at=start_at)
+
+    tech_state = await get_tech_mode_state()
+    countdown = _tech_countdown_minutes(tech_state)
+    extra = ""
+    if countdown is not None and countdown > 0:
+        extra = f"До старта: <b>{countdown} мин</b>\n"
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
+        f"{extra}"
+    )
+    await edit_or_answer(callback.message, state, prefix="admin_settings", text=text, reply_markup=_kb_settings(tech_state))
+    await callback.answer("Через 5 минут начнутся тех работы!", show_alert=True)
+
+
+@router.callback_query(F.data == "admin:settings:tech:off")
+async def admin_settings_tech_off(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await set_tech_mode_state(enabled=False, start_at=None)
+    tech_state = await get_tech_mode_state()
+    countdown = _tech_countdown_minutes(tech_state)
+    extra = ""
+    if countdown is not None and countdown > 0:
+        extra = f"До старта: <b>{countdown} мин</b>\n"
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
+        f"{extra}"
+    )
+    await edit_or_answer(callback.message, state, prefix="admin_settings", text=text, reply_markup=_kb_settings(tech_state))
+    await callback.answer("Тех.режим выключен")

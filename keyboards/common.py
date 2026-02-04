@@ -124,7 +124,7 @@ def build_admin_menu(lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
     # 1 ряд
-    kb.button(text=t("kb.admin.stats", lang), callback_data="admin:stats")
+    kb.button(text="📊 Статистика сегодня", callback_data="admin:stats")
     kb.button(text=t("kb.admin.roles", lang), callback_data="admin:roles")
 
     # 2 ряд

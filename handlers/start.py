@@ -23,6 +23,7 @@ from handlers.results import results_menu
 from handlers.premium import maybe_send_premium_expiry_warning
 from config import MASTER_ADMIN_ID
 from utils.time import get_moscow_now, get_moscow_today
+from utils.banner import ensure_giraffe_banner
 
 router = Router()
 
@@ -131,6 +132,11 @@ async def _send_fresh_menu(
 ) -> None:
     """Унифицированная выдача главного меню.
     Сначала отправляем новое меню, затем удаляем старое (если было), чтобы не было пустоты."""
+
+    try:
+        await ensure_giraffe_banner(bot, chat_id, user_id)
+    except Exception:
+        pass
 
     data = await state.get_data()
     prev_menu_id = data.get("menu_msg_id")

@@ -11,6 +11,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from keyboards.common import build_back_to_menu_kb
 from utils.i18n import t
+from utils.banner import ensure_giraffe_banner
 from utils.time import get_moscow_now, get_moscow_today
 
 from database_results import (
@@ -404,6 +405,10 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
 
 @router.callback_query(F.data == "results:menu")
 async def results_menu(callback: CallbackQuery, state: FSMContext | None = None):
+    try:
+        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
+    except Exception:
+        pass
     user = await get_user_by_tg_id(int(callback.from_user.id))
     lang = _lang(user)
     kb = build_results_menu_kb(lang)

@@ -232,6 +232,7 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
             menu_msg_id BIGINT,
             rate_kb_msg_id BIGINT,
             screen_msg_id BIGINT,
+            banner_msg_id BIGINT,
             rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -241,7 +242,33 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
         "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS screen_msg_id BIGINT;"
     )
     await conn.execute(
+        "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS banner_msg_id BIGINT;"
+    )
+    await conn.execute(
         "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE;"
+    )
+
+
+# -------------------- App settings (tech mode) --------------------
+
+async def _ensure_app_settings_table(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            id INTEGER PRIMARY KEY,
+            tech_enabled INTEGER NOT NULL DEFAULT 0,
+            tech_start_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO app_settings (id, tech_enabled, tech_start_at, updated_at)
+        VALUES (1, 0, NULL, $1)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        get_moscow_now_iso(),
     )
 
 
@@ -250,7 +277,11 @@ async def get_user_ui_state(tg_id: int) -> dict:
     async with p.acquire() as conn:
         await _ensure_ui_state_table(conn)
         row = await conn.fetchrow(
-            "SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, rate_tutorial_seen FROM user_ui_state WHERE tg_id=$1",
+            """
+            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_tutorial_seen
+            FROM user_ui_state
+            WHERE tg_id=$1
+            """,
             int(tg_id),
         )
         if not row:
@@ -258,6 +289,7 @@ async def get_user_ui_state(tg_id: int) -> dict:
                 "menu_msg_id": None,
                 "rate_kb_msg_id": None,
                 "screen_msg_id": None,
+                "banner_msg_id": None,
                 "rate_tutorial_seen": False,
             }
         return dict(row)
@@ -311,6 +343,22 @@ async def set_user_screen_msg_id(tg_id: int, screen_msg_id: int | None) -> None:
         )
 
 
+async def set_user_banner_msg_id(tg_id: int, banner_msg_id: int | None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, banner_msg_id, updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (tg_id)
+            DO UPDATE SET banner_msg_id=$2, updated_at=NOW()
+            """,
+            int(tg_id),
+            int(banner_msg_id) if banner_msg_id is not None else None,
+        )
+
+
 async def set_user_rate_tutorial_seen(tg_id: int, seen: bool = True) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -324,6 +372,39 @@ async def set_user_rate_tutorial_seen(tg_id: int, seen: bool = True) -> None:
             """,
             int(tg_id),
             bool(seen),
+        )
+
+# -------------------- Tech mode settings --------------------
+
+async def get_tech_mode_state() -> dict:
+    """Return tech mode state: {tech_enabled: bool, tech_start_at: str | None}."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_app_settings_table(conn)
+        row = await conn.fetchrow(
+            "SELECT tech_enabled, tech_start_at FROM app_settings WHERE id=1"
+        )
+        if not row:
+            return {"tech_enabled": False, "tech_start_at": None}
+        return {
+            "tech_enabled": bool(row.get("tech_enabled")),
+            "tech_start_at": row.get("tech_start_at"),
+        }
+
+
+async def set_tech_mode_state(*, enabled: bool, start_at: str | None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_app_settings_table(conn)
+        await conn.execute(
+            """
+            UPDATE app_settings
+            SET tech_enabled=$1, tech_start_at=$2, updated_at=$3
+            WHERE id=1
+            """,
+            1 if enabled else 0,
+            start_at,
+            get_moscow_now_iso(),
         )
 
 # -------------------- Feedback ideas --------------------
@@ -4714,6 +4795,24 @@ async def get_total_users() -> int:
         )
     return int(v or 0)
 
+async def get_new_registered_today_count() -> int:
+    """Количество зарегистрированных пользователей, добавившихся сегодня (по Москве)."""
+    p = _assert_pool()
+    today_start = get_moscow_now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(is_blocked,0)=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NOT NULL
+              AND created_at >= $1
+            """,
+            today_start,
+        )
+    return int(v or 0)
+
 async def get_unregistered_users_count() -> int:
     """Количество аккаунтов без имени (не завершили регистрацию), не удалённых и не заблокированных."""
     p = _assert_pool()
@@ -4729,12 +4828,58 @@ async def get_unregistered_users_count() -> int:
         )
     return int(v or 0)
 
+async def get_unregistered_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, users_page) for unregistered users (no name)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(is_blocked,0)=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NULL
+            """
+        )
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM users
+            WHERE is_deleted=0
+              AND COALESCE(is_blocked,0)=0
+              AND COALESCE(NULLIF(trim(name), ''), NULL) IS NULL
+            ORDER BY created_at DESC, id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
+            int(limit),
+        )
+    return int(total or 0), [dict(r) for r in rows]
+
 async def get_referrals_total() -> int:
     """Всего переходов/регистраций по реферальным ссылкам (referrals записей)."""
     p = _assert_pool()
     async with p.acquire() as conn:
         v = await conn.fetchval("SELECT COUNT(*) FROM referrals")
     return int(v or 0)
+
+async def get_referral_invited_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, users_page) for users who came via referral links."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM referrals")
+        rows = await conn.fetch(
+            """
+            SELECT u.*
+            FROM referrals r
+            JOIN users u ON u.id = r.invited_user_id
+            ORDER BY r.created_at DESC, r.id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
+            int(limit),
+        )
+    return int(total or 0), [dict(r) for r in rows]
 
 
 async def get_all_users_tg_ids() -> list[int]:
@@ -4867,6 +5012,57 @@ async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[i
     """(total, sample) of users with any activity in last 24h."""
     p = _assert_pool()
     since_iso = (get_moscow_now() - timedelta(hours=24)).isoformat()
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM (
+              SELECT u.id
+              FROM users u
+              LEFT JOIN LATERAL (
+                SELECT 1 FROM activity_events ae
+                WHERE ae.user_id = u.id AND ae.created_at >= $1
+                LIMIT 1
+              ) ae ON TRUE
+              WHERE u.is_deleted=0
+                AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+                AND COALESCE(u.is_blocked,0)=0
+                AND (
+                  ae IS NOT NULL
+                  OR COALESCE(u.updated_at, u.created_at) >= $1
+                )
+            ) t
+            """,
+            since_iso,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT u.*
+            FROM users u
+            LEFT JOIN LATERAL (
+              SELECT 1 FROM activity_events ae
+              WHERE ae.user_id = u.id AND ae.created_at >= $1
+              LIMIT 1
+            ) ae ON TRUE
+            WHERE u.is_deleted=0
+              AND COALESCE(NULLIF(trim(u.name), ''), NULL) IS NOT NULL
+              AND COALESCE(u.is_blocked,0)=0
+              AND (
+                ae IS NOT NULL
+                OR COALESCE(u.updated_at, u.created_at) >= $1
+              )
+            ORDER BY COALESCE(u.updated_at, u.created_at) DESC, u.id DESC
+            OFFSET $2 LIMIT $3
+            """,
+            since_iso,
+            int(offset or 0),
+            int(limit),
+        )
+    return int(total or 0), [dict(r) for r in rows]
+
+async def get_active_users_today(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, sample) of users with any activity since start of Moscow day."""
+    p = _assert_pool()
+    since_iso = get_moscow_now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     async with p.acquire() as conn:
         total = await conn.fetchval(
             """
@@ -5104,6 +5300,30 @@ async def get_blocked_users_page(limit: int = 20, offset: int = 0) -> tuple[int,
             OFFSET $1 LIMIT $2
             """,
             int(offset),
+            int(limit),
+        )
+    return int(total or 0), [dict(r) for r in rows]
+
+async def get_exited_users_page(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
+    """(total, users_page) for users who left (deleted or blocked)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE COALESCE(is_deleted,0)=1 OR COALESCE(is_blocked,0)=1
+            """
+        )
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM users
+            WHERE COALESCE(is_deleted,0)=1 OR COALESCE(is_blocked,0)=1
+            ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset or 0),
             int(limit),
         )
     return int(total or 0), [dict(r) for r in rows]

@@ -53,6 +53,7 @@ from database import (
     get_active_photos_for_user,
     get_random_active_ad,
     get_ads_enabled_by_tg_id,
+    has_user_commented,
     get_user_ui_state,
     set_user_rate_kb_msg_id,
     set_user_screen_msg_id,
@@ -1533,6 +1534,12 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
+    try:
+        if user.get("id") and await has_user_commented(int(photo_id), int(user["id"])):
+            await callback.answer("Ты уже оставил комментарий к этому фото.", show_alert=True)
+            return
+    except Exception:
+        pass
 
     # Проверяем, есть ли у пользователя активный премиум
     is_premium = False
@@ -1802,6 +1809,48 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
     if user_for_rate and user_for_rate.get("id"):
         try:
+            if await has_user_commented(int(photo_id), int(user_for_rate["id"])):
+                prefix = "ℹ️ Ты уже оставил комментарий к этому фото."
+                card = await _build_rating_card_for_photo(
+                    int(photo_id),
+                    int(user_for_rate["id"]),
+                    int(message.from_user.id),
+                    prefix=prefix,
+                )
+                if card is not None:
+                    await _apply_rating_card(
+                        bot=message.bot,
+                        chat_id=rate_chat_id,
+                        message=None,
+                        message_id=rate_msg_id,
+                        card=card,
+                    )
+                else:
+                    try:
+                        await message.bot.edit_message_text(
+                            chat_id=rate_chat_id,
+                            message_id=rate_msg_id,
+                            text=prefix,
+                            reply_markup=InlineKeyboardMarkup(
+                                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                            ),
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                try:
+                    rater_lang = _lang(user_for_rate)
+                    if card and card.photo and bool(card.photo.get("ratings_enabled", True)):
+                        await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+                    else:
+                        await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+                except Exception:
+                    pass
+                await state.clear()
+                return
+        except Exception:
+            pass
+        try:
             await create_comment(
                 user_id=int(user_for_rate["id"]),
                 photo_id=int(photo_id),
@@ -1882,41 +1931,54 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                         pass
 
     # --- Success: return the user to the rating UI and exit the comment state ---
-    is_premium_rater = False
-    try:
-        is_premium_rater = await is_user_premium_active(int(message.from_user.id))
-    except Exception:
-        is_premium_rater = False
     rater_user = await get_user_by_tg_id(int(message.from_user.id))
     rater_lang = _lang(rater_user)
-
     try:
         photo_for_caption = photo
         if photo_for_caption is None:
             photo_for_caption = await get_photo_by_id(int(photo_id))
+        is_rateable = bool(photo_for_caption and photo_for_caption.get("ratings_enabled", True))
+        prefix = "✅ Комментарий отправлен!"
+        if is_rateable:
+            prefix = "✅ Комментарий отправлен!\n\nМожешь поставить оценку этому кадру 👇"
 
-        link_button = None
-        if photo_for_caption is not None:
-            await _ensure_author_premium_active(photo_for_caption, None)
-            base_caption = await build_rate_caption(photo_for_caption, viewer_tg_id=int(message.from_user.id), show_details=False)
-            link_button = _get_link_button_from_photo(photo_for_caption, require_premium=True)
-            success_caption = "✅ Комментарий отправлен!\n\n" + base_caption
-        else:
-            success_caption = "✅ Комментарий отправлен!\n\nМожешь поставить оценку этому кадру 👇"
-
-        await message.bot.edit_message_caption(
-            chat_id=rate_chat_id,
-            message_id=rate_msg_id,
-            caption=success_caption,
-            reply_markup=build_rate_keyboard(
+        card = None
+        if user_for_rate and user_for_rate.get("id"):
+            card = await _build_rating_card_for_photo(
                 int(photo_id),
-                is_premium=is_premium_rater,
-                show_details=False,
-                link_button=link_button,
-                lang=rater_lang,
-            ),
-            parse_mode="HTML",
-        )
+                int(user_for_rate["id"]),
+                int(message.from_user.id),
+                prefix=prefix,
+            )
+        if card is not None:
+            await _apply_rating_card(
+                bot=message.bot,
+                chat_id=rate_chat_id,
+                message=None,
+                message_id=rate_msg_id,
+                card=card,
+            )
+        else:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=rate_chat_id,
+                    message_id=rate_msg_id,
+                    text=prefix,
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        try:
+            if is_rateable:
+                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+            else:
+                await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+        except Exception:
+            pass
     except TelegramBadRequest:
         pass
 
@@ -2206,7 +2268,6 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                     pass
     
     card = await _build_next_rating_card(int(user["id"]), viewer_tg_id=int(message.from_user.id))
-    card.caption = f"✅ Жалоба отправлена!\n\n{card.caption}"
     await _apply_rating_card(
         bot=message.bot,
         chat_id=report_chat_id,

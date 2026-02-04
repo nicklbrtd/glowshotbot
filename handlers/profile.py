@@ -1,6 +1,7 @@
 from aiogram import Router, F
 import html
 from utils.i18n import t
+from utils.banner import ensure_giraffe_banner
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -638,6 +639,10 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
         return
+    try:
+        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
+    except Exception:
+        pass
 
     text, markup = await build_profile_view(user)
 

@@ -25,6 +25,7 @@ from database import (
     hide_active_photos_for_user,
     restore_photos_from_status,
     get_user_by_tg_id,
+    get_tech_mode_state,
 )
 def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -46,6 +47,17 @@ def _admin_error_kb() -> InlineKeyboardMarkup:
 # простая анти-спам защита: одинаковая ошибка в том же хендлере не чаще раза в 30 секунд
 _LAST_ADMIN_ERR: dict[str, float] = {}
 _ADMIN_ERR_COOLDOWN_SEC = 30.0
+
+TECH_MODE_PHOTO_FILE_ID = "AgACAgIAAyEFAATVO5BPAAMmaYOxPhK6qvJxaQEXZ6qS4EpKVbMAArYOaxs3vSBI4HK0YtIU5asBAAMCAAN3AAM4BA"
+TECH_MODE_CAPTION = "🛠 Технические работы. Попробуй позже."
+
+
+async def _delete_message_after(bot: Bot, chat_id: int, message_id: int, delay_sec: int = 15) -> None:
+    try:
+        await asyncio.sleep(delay_sec)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
 
 def _err_key(handler_name: str | None, error_type: str, error_text: str) -> str:
@@ -347,6 +359,89 @@ class BlockGuardMiddleware(BaseMiddleware):
 
 
 
+class TechModeMiddleware(BaseMiddleware):
+    """
+    Глобальный тех.режим: блокирует доступ всем, кроме админов/модераторов/поддержки.
+    Показывает фото-уведомление и удаляет его через 15 секунд.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        try:
+            state = await get_tech_mode_state()
+        except Exception:
+            return await handler(event, data)
+
+        if not bool(state.get("tech_enabled")):
+            return await handler(event, data)
+
+        start_at_raw = state.get("tech_start_at")
+        if start_at_raw:
+            try:
+                start_dt = datetime.fromisoformat(str(start_at_raw))
+                if get_moscow_now() < start_dt:
+                    return await handler(event, data)
+            except Exception:
+                pass
+
+        chat_id, tg_user_id = None, None
+        try:
+            if isinstance(event, Update):
+                chat_id, tg_user_id = _extract_chat_and_user_from_update(event)
+            elif hasattr(event, "from_user") and getattr(event, "from_user"):
+                tg_user_id = event.from_user.id  # type: ignore[attr-defined]
+                if hasattr(event, "chat") and getattr(event, "chat"):
+                    chat_id = event.chat.id  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        if tg_user_id is None:
+            return await handler(event, data)
+
+        if MASTER_ADMIN_ID and tg_user_id == MASTER_ADMIN_ID:
+            return await handler(event, data)
+
+        try:
+            u = await get_user_by_tg_id(int(tg_user_id))
+        except Exception:
+            u = None
+
+        if u and (u.get("is_admin") or u.get("is_moderator") or u.get("is_support")):
+            return await handler(event, data)
+
+        if chat_id is not None:
+            try:
+                sent = await data["bot"].send_photo(
+                    chat_id=chat_id,
+                    photo=TECH_MODE_PHOTO_FILE_ID,
+                    caption=TECH_MODE_CAPTION,
+                    disable_notification=True,
+                )
+                asyncio.create_task(_delete_message_after(data["bot"], chat_id, sent.message_id, 15))
+            except Exception:
+                try:
+                    sent = await data["bot"].send_message(
+                        chat_id=chat_id,
+                        text=TECH_MODE_CAPTION,
+                        disable_notification=True,
+                    )
+                    asyncio.create_task(_delete_message_after(data["bot"], chat_id, sent.message_id, 15))
+                except Exception:
+                    pass
+
+        if isinstance(event, Update) and event.callback_query:
+            try:
+                await event.callback_query.answer()
+            except Exception:
+                pass
+
+        raise SkipHandler
+
+
 class ErrorsToDbMiddleware(BaseMiddleware):
     """
     Ловит любые исключения в хендлерах и пишет в bot_error_logs.
@@ -470,6 +565,9 @@ async def main() -> None:
     asyncio.create_task(premium_expiry_reminder_loop(bot))
 
     dp = Dispatcher()
+
+    # Глобальный тех.режим: доступ только админам/модераторам/поддержке
+    dp.update.middleware(TechModeMiddleware())
 
     # Глобальный блок: заблокированным доступны только /help и удаление аккаунта через профиль
     dp.update.middleware(BlockGuardMiddleware())
