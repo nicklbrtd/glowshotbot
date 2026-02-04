@@ -723,7 +723,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=old_msg_id,
-                text="Нажми «Дальше»" if lang.startswith("ru") else "Tap Next",
+                text="🦒",
                 reply_markup=_build_next_only_reply_keyboard(lang),
             )
             data["rate_kb_msg_id"] = old_msg_id
@@ -741,7 +741,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
 
     sent = await bot.send_message(
         chat_id=chat_id,
-        text="Нажми «Дальше»" if lang.startswith("ru") else "Tap Next",
+        text="🦒",
         reply_markup=_build_next_only_reply_keyboard(lang),
         disable_notification=True,
     )
@@ -2684,6 +2684,16 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
             except Exception:
                 pass
             return
+
+        try:
+            photo = await get_photo_by_id(int(photo_id))
+        except Exception:
+            photo = None
+        if photo and not bool(photo.get("ratings_enabled", True)):
+            try:
+                await mark_viewonly_seen(int(user["id"]), int(photo_id))
+            except Exception:
+                pass
 
         try:
             await message.delete()
