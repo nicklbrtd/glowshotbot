@@ -133,6 +133,7 @@ async def _send_fresh_menu(
 
     data = await state.get_data()
     prev_menu_id = data.get("menu_msg_id")
+    prev_rate_kb_id = data.get("rate_kb_msg_id")
     user = await db.get_user_by_tg_id(user_id)
     lang = _pick_lang(user, lang_hint)
     is_admin = _get_flag(user, "is_admin")
@@ -162,6 +163,8 @@ async def _send_fresh_menu(
 
     if prev_menu_id and prev_menu_id != sent.message_id:
         await _delete_message_safely(bot, chat_id, prev_menu_id)
+    if prev_rate_kb_id and prev_rate_kb_id != sent.message_id:
+        await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
 
 
 def _main_menu_button_key(text: str | None) -> str | None:
@@ -444,7 +447,7 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     """
     key = _main_menu_button_key(message.text)
     if key is None:
-        return
+        raise SkipHandler
     if getattr(message.chat, "type", None) not in ("private",):
         return
 

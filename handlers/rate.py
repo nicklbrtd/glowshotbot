@@ -628,21 +628,33 @@ async def _apply_rating_card(
             except Exception:
                 message_id = None
 
+    prev_id = None
+    if state is not None:
         try:
-            sent = await bot.send_message(
-                chat_id=chat_id,
-                text=card.caption,
-                reply_markup=card.keyboard,
-                parse_mode="HTML",
-                disable_notification=True,
-            )
-            if state is not None:
-                data = await state.get_data()
-                data["rate_msg_id"] = sent.message_id
-                await state.set_data(data)
+            prev_id = (await state.get_data()).get("rate_msg_id")
         except Exception:
-            pass
-        return
+            prev_id = None
+
+    try:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=card.caption,
+            reply_markup=card.keyboard,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+        if state is not None:
+            data = await state.get_data()
+            data["rate_msg_id"] = sent.message_id
+            await state.set_data(data)
+        if prev_id and prev_id != sent.message_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=prev_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return
 
     media = InputMediaPhoto(
         media=card.photo_file_id,
@@ -684,6 +696,13 @@ async def _apply_rating_card(
             except Exception:
                 pass
 
+    prev_id = None
+    if state is not None:
+        try:
+            prev_id = (await state.get_data()).get("rate_msg_id")
+        except Exception:
+            prev_id = None
+
     try:
         sent = await bot.send_photo(
             chat_id=chat_id,
@@ -698,6 +717,11 @@ async def _apply_rating_card(
             data = await state.get_data()
             data["rate_msg_id"] = sent.message_id
             await state.set_data(data)
+        if prev_id and prev_id != sent.message_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=prev_id)
+            except Exception:
+                pass
     except Exception:
         try:
             await bot.send_message(
@@ -1053,32 +1077,41 @@ async def show_next_photo_for_rating(
       – если текущее сообщение уже с фото — меняем медиа;
       – если текущее сообщение текстовое — удаляем его и отправляем новое с фото.
     """
-    if await _deny_if_full_banned(callback=callback):
-        return
-    msg = None if replace_message else callback.message
-    msg_id = None if replace_message else callback.message.message_id
-    old_msg = callback.message if replace_message else None
+    is_cb = isinstance(callback, CallbackQuery)
+    if is_cb:
+        if await _deny_if_full_banned(callback=callback):
+            return
+        bot = callback.message.bot
+        chat_id = callback.message.chat.id
+        msg = None if replace_message else callback.message
+        msg_id = None if replace_message else callback.message.message_id
+        old_msg = callback.message if replace_message else None
+        viewer_tg_id = int(callback.from_user.id)
+    else:
+        if await _deny_if_full_banned(message=callback):
+            return
+        bot = callback.bot
+        chat_id = callback.chat.id
+        msg = None
+        msg_id = None
+        old_msg = None
+        viewer_tg_id = int(callback.from_user.id)
 
-    viewer = await get_user_by_tg_id(int(callback.from_user.id))
+    viewer = await get_user_by_tg_id(viewer_tg_id)
     lang = _lang(viewer)
-    card = await _build_next_rating_card(user_id, viewer_tg_id=int(callback.from_user.id))
+    card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id)
 
     if state is not None:
         data = await state.get_data()
         data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
         await state.set_data(data)
         if card.photo:
-            await _send_rate_reply_keyboard(
-                callback.bot if hasattr(callback, "bot") else callback.message.bot,
-                callback.message.chat.id,
-                state,
-                lang,
-            )
+            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
         else:
-            await _delete_rate_reply_keyboard(callback.bot if hasattr(callback, "bot") else callback.message.bot, callback.message.chat.id, state)
+            await _delete_rate_reply_keyboard(bot, chat_id, state)
     await _apply_rating_card(
-        bot=callback.message.bot,
-        chat_id=callback.message.chat.id,
+        bot=bot,
+        chat_id=chat_id,
         message=msg,
         message_id=msg_id,
         card=card,
@@ -1091,10 +1124,11 @@ async def show_next_photo_for_rating(
         except Exception:
             pass
 
-    try:
-        await callback.answer()
-    except Exception:
-        pass
+    if is_cb:
+        try:
+            await callback.answer()
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("rate:comment:"))
