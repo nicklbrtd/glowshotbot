@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.time import get_moscow_now
 from utils.i18n import t
@@ -13,9 +13,14 @@ def build_main_menu(
     lang: str = "ru",
     has_photo: bool | None = None,
     has_rate_targets: bool | None = None,
-) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    # Базовые пользовательские кнопки
+) -> ReplyKeyboardMarkup:
+    """Главное меню в виде reply-клавиатуры.
+
+    Кнопки должны появляться только в основном меню, поэтому используем
+    `one_time_keyboard=True`, чтобы Telegram скрывал клавиатуру сразу после
+    нажатия. Тексты кнопок подтягиваем из i18n с учётом динамических состояний.
+    """
+
     if has_photo is True:
         myphoto_text = t("kb.main.myphoto.filled", lang)
     elif has_photo is False:
@@ -23,19 +28,19 @@ def build_main_menu(
     else:
         myphoto_text = t("kb.main.myphoto", lang)
 
-    if has_rate_targets is False:
-        rate_text = t("kb.main.rate.empty", lang)
-    else:
-        rate_text = t("kb.main.rate", lang)
+    rate_text = t("kb.main.rate", lang) if has_rate_targets is not False else t("kb.main.rate.empty", lang)
 
-    kb.button(text=myphoto_text, callback_data="myphoto:open")
-    kb.button(text=rate_text, callback_data="rate:start")
-    kb.button(text=t("kb.main.results", lang), callback_data="results:menu")
-    kb.button(text=t("kb.main.profile", lang), callback_data="profile:open")
+    keyboard = [
+        [KeyboardButton(text=myphoto_text), KeyboardButton(text=rate_text)],
+        [KeyboardButton(text=t("kb.main.profile", lang)), KeyboardButton(text=t("kb.main.results", lang))],
+    ]
 
-    kb.adjust(2, 2, 1, 1)
-
-    return kb.as_markup()
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
+    )
 
 
 # --- Кнопки "назад / в меню" ---

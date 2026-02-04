@@ -6,7 +6,7 @@ from utils.i18n import t
 from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, LinkPreviewOptions
+from aiogram.types import Message, CallbackQuery, LinkPreviewOptions, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
@@ -15,6 +15,10 @@ from aiogram.types import InlineKeyboardMarkup
 
 import database as db
 from keyboards.common import build_main_menu
+from handlers.upload import my_photo_menu
+from handlers.rate import rate_root
+from handlers.profile import profile_menu
+from handlers.results import results_menu
 from handlers.premium import maybe_send_premium_expiry_warning
 from utils.time import get_moscow_now, get_moscow_today
 
@@ -106,6 +110,48 @@ def _normalize_chat_id(value: str) -> str:
     return v
 
 
+def _main_menu_button_key(text: str | None) -> str | None:
+    """Определяем, какая кнопка главного меню была отправлена как текст."""
+    if not text:
+        return None
+    s = text.strip()
+    mapping: dict[str, set[str]] = {
+        "myphoto": {
+            t("kb.main.myphoto", "ru"),
+            t("kb.main.myphoto", "en"),
+            t("kb.main.myphoto.empty", "ru"),
+            t("kb.main.myphoto.empty", "en"),
+            t("kb.main.myphoto.filled", "ru"),
+            t("kb.main.myphoto.filled", "en"),
+        },
+        "rate": {
+            t("kb.main.rate", "ru"),
+            t("kb.main.rate", "en"),
+            t("kb.main.rate.empty", "ru"),
+            t("kb.main.rate.empty", "en"),
+        },
+        "profile": {t("kb.main.profile", "ru"), t("kb.main.profile", "en")},
+        "results": {t("kb.main.results", "ru"), t("kb.main.results", "en")},
+    }
+    for key, variants in mapping.items():
+        if s in variants:
+            return key
+    return None
+
+
+class _MessageAsCallback:
+    """Простейший shim, чтобы переиспользовать callback-хендлеры для reply-кнопок."""
+
+    def __init__(self, message: Message):
+        self.message = message
+        self.from_user = message.from_user
+        self.bot = message.bot
+        self.data = ""
+
+    async def answer(self, *args, **kwargs):
+        return None
+
+
 async def is_user_subscribed(bot, user_id: int) -> bool:
     if not SUBSCRIPTION_GATE_ENABLED:
         return True
@@ -146,7 +192,7 @@ async def _build_dynamic_main_menu(
     is_admin: bool,
     is_moderator: bool,
     is_premium: bool,
-) -> InlineKeyboardMarkup:
+) -> ReplyKeyboardMarkup:
     has_photo = False
     has_rate_targets = True
 
@@ -331,6 +377,35 @@ async def cmd_chatid(message: Message):
         f"chat_id: <code>{message.chat.id}</code>\nтип: <code>{chat_type}</code>",
         parse_mode="HTML",
     )
+
+
+@router.message(F.text)
+async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
+    """
+    Переводим нажатия кнопок ReplyKeyboard из главного меню в существующие разделы.
+    • Удаляем сообщение пользователя, чтобы «кнопка» не висела в чате.
+    • Не издаём звуков: все разделы уже отправляют ответы с disable_notification=True.
+    """
+    key = _main_menu_button_key(message.text)
+    if key is None:
+        return
+    if getattr(message.chat, "type", None) not in ("private",):
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    pseudo_cb = _MessageAsCallback(message)
+    if key == "myphoto":
+        await my_photo_menu(pseudo_cb, state)
+    elif key == "rate":
+        await rate_root(pseudo_cb, replace_message=True)
+    elif key == "profile":
+        await profile_menu(pseudo_cb)
+    elif key == "results":
+        await results_menu(pseudo_cb)
 
 
 @router.message(CommandStart())
