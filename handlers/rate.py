@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from utils.time import get_moscow_today, get_moscow_now
 
-from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
 from aiogram.fsm.state import StatesGroup, State
@@ -522,6 +522,52 @@ async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> Rati
 
     return await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id)
 
+def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
+    """Reply‑клавиатура для оценок 1–10 + пропуск."""
+    row1 = [KeyboardButton(text=str(i)) for i in range(1, 6)]
+    row2 = [KeyboardButton(text=str(i)) for i in range(6, 11)]
+    row3 = [KeyboardButton(text="Пропустить" if lang.startswith("ru") else "Skip")]
+    return ReplyKeyboardMarkup(
+        keyboard=[row1, row2, row3],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
+    )
+
+
+async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
+    """Отправляем новую клавиатуру оценок и только потом удаляем старую, чтобы не мигало."""
+    data = await state.get_data()
+    old_msg_id = data.get("rate_kb_msg_id")
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text="Оцени от 1 до 10" if lang.startswith("ru") else "Rate 1–10",
+        reply_markup=_build_rate_reply_keyboard(lang),
+        disable_notification=True,
+    )
+    data["rate_kb_msg_id"] = sent.message_id
+    await state.set_data(data)
+
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception:
+            pass
+
+
+async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    msg_id = data.get("rate_kb_msg_id")
+    if msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+        data["rate_kb_msg_id"] = None
+        await state.set_data(data)
+
+
 
 async def _apply_rating_card(
     *,
@@ -530,6 +576,7 @@ async def _apply_rating_card(
     message: Message | None,
     message_id: int | None,
     card: RatingCard,
+    state: FSMContext | None = None,
 ) -> None:
     """Аккуратно применяет карточку оценивания к существующему сообщению или отправляет новое при ошибке."""
     if card.photo_file_id is None:
@@ -980,7 +1027,13 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     return "\n".join(lines)
 
-async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int, *, replace_message: bool = False) -> None:
+async def show_next_photo_for_rating(
+    callback: CallbackQuery | Message,
+    user_id: int,
+    *,
+    replace_message: bool = False,
+    state: FSMContext | None = None,
+) -> None:
     """
     Показать следующую фотографию для оценивания, стараясь переиспользовать текущее сообщение.
 
@@ -995,13 +1048,25 @@ async def show_next_photo_for_rating(callback: CallbackQuery, user_id: int, *, r
     msg_id = None if replace_message else callback.message.message_id
     old_msg = callback.message if replace_message else None
 
+    viewer = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(viewer)
     card = await _build_next_rating_card(user_id, viewer_tg_id=int(callback.from_user.id))
+
+    if state is not None:
+        data = await state.get_data()
+        data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
+        await state.set_data(data)
+        if card.photo:
+            await _send_rate_reply_keyboard(callback.bot if hasattr(callback, "bot") else callback.message.bot, callback.message.chat.id, state, lang)
+        else:
+            await _delete_rate_reply_keyboard(callback.bot if hasattr(callback, "bot") else callback.message.bot, callback.message.chat.id, state)
     await _apply_rating_card(
         bot=callback.message.bot,
         chat_id=callback.message.chat.id,
         message=msg,
         message_id=msg_id,
         card=card,
+        state=state,
     )
 
     if old_msg is not None:
@@ -1763,13 +1828,13 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     photo = await get_photo_by_id(photo_id)
     if photo is None or photo.get("is_deleted"):
         await callback.answer("Фото не найдено.", show_alert=True)
-        await show_next_photo_for_rating(callback, user["id"])
+        await show_next_photo_for_rating(callback, user["id"], state=state)
         await state.clear()
         return
 
     if not bool(photo.get("ratings_enabled", True)):
         await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
-        await show_next_photo_for_rating(callback, user["id"])
+        await show_next_photo_for_rating(callback, user["id"], state=state)
         await state.clear()
         return
 
@@ -1887,7 +1952,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
             except Exception:
                 pass
 
-    await show_next_photo_for_rating(callback, user["id"])
+    await show_next_photo_for_rating(callback, user["id"], state=state)
 
     await state.clear()
 
@@ -1927,13 +1992,13 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     photo = await get_photo_by_id(photo_id)
     if photo is None or photo.get("is_deleted"):
         await callback.answer("Фото не найдено.", show_alert=True)
-        await show_next_photo_for_rating(callback, user["id"])
+        await show_next_photo_for_rating(callback, user["id"], state=state)
         await state.clear()
         return
 
     if not bool(photo.get("ratings_enabled", True)):
         await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
-        await show_next_photo_for_rating(callback, user["id"])
+        await show_next_photo_for_rating(callback, user["id"], state=state)
         await state.clear()
         return
 
@@ -2046,7 +2111,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                 pass
 
     # Показываем следующую фотографию
-    await show_next_photo_for_rating(callback, user["id"])
+    await show_next_photo_for_rating(callback, user["id"], state=state)
 
     # Чистим состояние (комментарий больше не нужен)
     await state.clear()
@@ -2169,7 +2234,7 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
     is_rateable = bool((photo or {}).get("ratings_enabled", True))
     if not photo or photo.get("is_deleted"):
         await callback.answer("Фото не найдено.", show_alert=True)
-        await show_next_photo_for_rating(callback, user["id"])
+        await show_next_photo_for_rating(callback, user["id"], state=state)
         return
 
     tg_id = user.get("tg_id")
@@ -2190,7 +2255,7 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer()
         except Exception:
             pass
-        await show_next_photo_for_rating(callback, user["id"])
+        await show_next_photo_for_rating(callback, user["id"], state=state)
         return
 
     # Если пользователь без премиума — ограничиваем 3 пропуска в день
@@ -2218,7 +2283,7 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
 
     # Пропуск реализуем как оценку 0
     await add_rating(user["id"], photo_id, 0)
-    await show_next_photo_for_rating(callback, user["id"])
+    await show_next_photo_for_rating(callback, user["id"], state=state)
 
 
 
@@ -2233,7 +2298,7 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
-    await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message)
+    await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message, state=state)
 @router.callback_query(F.data == "comment:seen")
 async def comment_seen(callback: CallbackQuery) -> None:
     """
