@@ -14,7 +14,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import InlineKeyboardMarkup
 
 import database as db
-from keyboards.common import build_main_menu, clear_section_reply_kb
+from keyboards.common import build_main_menu
 from handlers.upload import my_photo_menu
 from handlers.rate import rate_root
 from handlers.profile import profile_menu
@@ -127,8 +127,7 @@ async def _send_fresh_menu(
     state: FSMContext,
     lang_hint: str | None = None,
 ) -> None:
-    """Унифицированная выдача главного меню с очисткой старых сервисных сообщений."""
-    await clear_section_reply_kb(bot, chat_id, state)
+    """Унифицированная выдача главного меню."""
 
     data = await state.get_data()
     await _delete_message_safely(bot, chat_id, data.get("menu_msg_id"))

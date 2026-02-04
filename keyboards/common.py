@@ -1,5 +1,4 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.time import get_moscow_now
 from utils.i18n import t
@@ -42,51 +41,6 @@ def build_main_menu(
         one_time_keyboard=True,
         selective=True,
     )
-
-
-def build_menu_reply_kb(lang: str = "ru") -> ReplyKeyboardMarkup:
-    """Универсальная клавиатура с одной кнопкой «В меню» для разделов."""
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=t("kb.back_to_menu", lang))]],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        selective=True,
-    )
-
-
-async def ensure_section_reply_kb(bot, chat_id: int, state: FSMContext, lang: str = "ru") -> None:
-    """Показывает клавиатуру с кнопкой «В меню» и чистит предыдущую навигацию."""
-    data = await state.get_data()
-    prev_msg_id = data.get("section_kb_msg_id")
-    if prev_msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
-        except Exception:
-            pass
-
-    text = "Tap \"Menu\" on the keyboard below." if str(lang).startswith("en") else "Кнопка \"В меню\" на клавиатуре ниже."
-
-    sent = await bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=build_menu_reply_kb(lang),
-        disable_notification=True,
-    )
-    data["section_kb_msg_id"] = sent.message_id
-    await state.set_data(data)
-
-
-async def clear_section_reply_kb(bot, chat_id: int, state: FSMContext) -> None:
-    """Удаляет сервисное сообщение с клавиатурой раздела, если оно было."""
-    data = await state.get_data()
-    msg_id = data.get("section_kb_msg_id")
-    if msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        data["section_kb_msg_id"] = None
-        await state.set_data(data)
 
 
 # --- Кнопки "назад / в меню" ---

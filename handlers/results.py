@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from keyboards.common import build_back_to_menu_kb, ensure_section_reply_kb
+from keyboards.common import build_back_to_menu_kb
 from utils.i18n import t
 from utils.time import get_moscow_now, get_moscow_today
 
@@ -403,15 +403,9 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
 # =========================
 
 @router.callback_query(F.data == "results:menu")
-async def results_menu(callback: CallbackQuery, state: FSMContext):
+async def results_menu(callback: CallbackQuery, state: FSMContext | None = None):
     user = await get_user_by_tg_id(int(callback.from_user.id))
     lang = _lang(user)
-    await ensure_section_reply_kb(
-        bot=callback.message.bot,
-        chat_id=callback.message.chat.id,
-        state=state,
-        lang=lang,
-    )
     kb = build_results_menu_kb(lang)
     text = (
         "🏁 <b>Итоги</b>\n\n"

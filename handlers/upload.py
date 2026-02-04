@@ -11,7 +11,6 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
-from keyboards.common import ensure_section_reply_kb
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -1099,13 +1098,6 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     menu_msg_id = data.get("menu_msg_id")
     opened_from_menu = menu_msg_id and callback.message and callback.message.message_id == menu_msg_id
-
-    await ensure_section_reply_kb(
-        bot=callback.message.bot,
-        chat_id=callback.message.chat.id,
-        state=state,
-        lang=(user.get("lang") or "ru").split("-")[0],
-    )
 
     is_admin = is_admin_user(user)
     user_id = user["id"]

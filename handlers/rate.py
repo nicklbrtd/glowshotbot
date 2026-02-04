@@ -10,7 +10,7 @@ from utils.i18n import t
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
-from keyboards.common import build_viewed_kb, ensure_section_reply_kb
+from keyboards.common import build_viewed_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.moderation import (
     get_report_reasons,
@@ -585,7 +585,12 @@ async def _apply_rating_card(
             pass
         return
 
-    media = InputMediaPhoto(media=card.photo_file_id, caption=card.caption, parse_mode="HTML")
+    media = InputMediaPhoto(
+        media=card.photo_file_id,
+        caption=card.caption,
+        parse_mode="HTML",
+        show_caption_above_media=True,
+    )
 
     if message is not None and message.photo:
         try:
@@ -620,6 +625,7 @@ async def _apply_rating_card(
             reply_markup=card.keyboard,
             parse_mode="HTML",
             disable_notification=True,
+            show_caption_above_media=True,
         )
     except Exception:
         try:
@@ -2226,14 +2232,6 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
-
-    if state is not None:
-        await ensure_section_reply_kb(
-            bot=callback.message.bot,
-            chat_id=callback.message.chat.id,
-            state=state,
-            lang=_lang(user),
-        )
 
     await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message)
 @router.callback_query(F.data == "comment:seen")

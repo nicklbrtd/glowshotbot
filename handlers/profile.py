@@ -45,7 +45,7 @@ from database import (
     set_all_user_photos_ratings_enabled,
     set_user_allow_ratings_by_tg_id,
 )
-from keyboards.common import build_back_kb, build_confirm_kb, ensure_section_reply_kb
+from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
@@ -630,13 +630,6 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
         return
-
-    await ensure_section_reply_kb(
-        bot=callback.message.bot,
-        chat_id=callback.message.chat.id,
-        state=state,
-        lang=_get_lang(user),
-    )
 
     text, markup = await build_profile_view(user)
 
