@@ -632,7 +632,7 @@ def _build_next_only_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
 
 
 async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
-    """Отправляем новую клавиатуру оценок и только потом удаляем старую, чтобы не мигало."""
+    """Держим одно сообщение с клавиатурой оценок (редактируем, не пересылаем)."""
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
     if old_msg_id is None:
@@ -642,9 +642,30 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
         except Exception:
             pass
 
+    if old_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_msg_id,
+                text="🦒",
+                reply_markup=_build_rate_reply_keyboard(lang),
+            )
+            data["rate_kb_msg_id"] = old_msg_id
+            await state.set_data(data)
+            try:
+                await set_user_rate_kb_msg_id(chat_id, old_msg_id)
+            except Exception:
+                pass
+            return
+        except Exception:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            except Exception:
+                pass
+
     sent = await bot.send_message(
         chat_id=chat_id,
-        text="Оцени от 1 до 10" if lang.startswith("ru") else "Rate 1–10",
+        text="🦒",
         reply_markup=_build_rate_reply_keyboard(lang),
         disable_notification=True,
     )
@@ -655,15 +676,9 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
     except Exception:
         pass
 
-    if old_msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except Exception:
-            pass
-
 
 async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
-    """Отправляем клавиатуру только с «Дальше»."""
+    """Держим одно сообщение с клавиатурой только «Дальше» (редактируем, не пересылаем)."""
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
     if old_msg_id is None:
@@ -672,6 +687,27 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
             old_msg_id = ui_state.get("rate_kb_msg_id")
         except Exception:
             pass
+
+    if old_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_msg_id,
+                text="Нажми «Дальше»" if lang.startswith("ru") else "Tap Next",
+                reply_markup=_build_next_only_reply_keyboard(lang),
+            )
+            data["rate_kb_msg_id"] = old_msg_id
+            await state.set_data(data)
+            try:
+                await set_user_rate_kb_msg_id(chat_id, old_msg_id)
+            except Exception:
+                pass
+            return
+        except Exception:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            except Exception:
+                pass
 
     sent = await bot.send_message(
         chat_id=chat_id,
@@ -686,16 +722,16 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
     except Exception:
         pass
 
-    if old_msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
-        except Exception:
-            pass
-
 
 async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
     data = await state.get_data()
     msg_id = data.get("rate_kb_msg_id")
+    if msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            msg_id = None
     if msg_id:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=msg_id)

@@ -473,6 +473,35 @@ async def cmd_chatid(message: Message):
     )
 
 
+@router.message(F.photo)
+async def cmd_fileid_photo(message: Message):
+    caption = (message.caption or "").strip()
+    if not caption.startswith("/fileid"):
+        return
+
+    user = await db.get_user_by_tg_id(message.from_user.id)
+    is_allowed = bool(
+        message.from_user.id == MASTER_ADMIN_ID
+        or (user and (user.get("is_admin") or user.get("is_moderator") or user.get("is_support")))
+    )
+    if not is_allowed:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    photo = message.photo[-1] if message.photo else None
+    if not photo:
+        return
+
+    await message.answer(
+        f"file_id: <code>{photo.file_id}</code>\nunique_id: <code>{photo.file_unique_id}</code>",
+        parse_mode="HTML",
+        disable_notification=True,
+    )
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     """
