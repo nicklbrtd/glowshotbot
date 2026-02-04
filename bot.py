@@ -1,4 +1,5 @@
 import asyncio
+import time
 import traceback
 from datetime import datetime
 from typing import Callable, Dict, Any, Awaitable
@@ -34,6 +35,7 @@ from database import (
     get_moderators,
     get_support_users,
     get_helpers,
+    log_activity_event,
 )
 def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -457,6 +459,49 @@ class BlockGuardMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+# Простое логирование активности для графиков (не чаще 1 раза в минуту на пользователя)
+_ACTIVITY_LAST: dict[int, float] = {}
+_ACTIVITY_COOLDOWN_SEC = 60.0
+
+
+class ActivityLogMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        tg_user_id: int | None = None
+        username: str | None = None
+        kind = "update"
+        try:
+            if isinstance(event, Update):
+                if event.message:
+                    if event.message.from_user:
+                        tg_user_id = event.message.from_user.id
+                        username = event.message.from_user.username
+                    kind = "message"
+                elif event.callback_query:
+                    if event.callback_query.from_user:
+                        tg_user_id = event.callback_query.from_user.id
+                        username = event.callback_query.from_user.username
+                    kind = "callback"
+        except Exception:
+            tg_user_id = None
+
+        if tg_user_id:
+            now_ts = time.time()
+            last_ts = _ACTIVITY_LAST.get(int(tg_user_id), 0.0)
+            if now_ts - last_ts >= _ACTIVITY_COOLDOWN_SEC:
+                _ACTIVITY_LAST[int(tg_user_id)] = now_ts
+                try:
+                    await log_activity_event(int(tg_user_id), kind=kind, username=username)
+                except Exception:
+                    pass
+
+        return await handler(event, data)
+
+
 
 class TechModeMiddleware(BaseMiddleware):
     """
@@ -672,6 +717,9 @@ async def main() -> None:
 
     # Глобальный блок: заблокированным доступны только /help и удаление аккаунта через профиль
     dp.update.middleware(BlockGuardMiddleware())
+
+    # Логирование активности для графиков
+    dp.update.middleware(ActivityLogMiddleware())
 
     # Логирование ошибок в БД
     dp.update.middleware(ErrorsToDbMiddleware())

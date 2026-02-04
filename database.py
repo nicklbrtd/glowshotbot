@@ -5177,6 +5177,32 @@ async def get_users_sample(
 
 # --- activity / online ---
 
+async def log_activity_event(
+    tg_id: int,
+    *,
+    kind: str = "any",
+    username: str | None = None,
+) -> None:
+    """Log a lightweight activity event for online/activity charts."""
+    try:
+        user = await ensure_user_minimal_row(int(tg_id), username=username)
+    except Exception:
+        user = None
+    if not user or not user.get("id"):
+        return
+    p = _assert_pool()
+    now_iso = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO activity_events (user_id, kind, created_at)
+            VALUES ($1, $2, $3)
+            """,
+            int(user["id"]),
+            str(kind or "any"),
+            now_iso,
+        )
+
 
 async def get_active_users_last_24h(limit: int = 20, offset: int = 0) -> tuple[int, list[dict]]:
     """(total, sample) of users with any activity in last 24h."""
