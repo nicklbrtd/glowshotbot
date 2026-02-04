@@ -204,6 +204,8 @@ class _MessageAsCallback:
         self.message = message
         self.from_user = message.from_user
         self.bot = message.bot
+        self.chat = message.chat
+        self.message_id = message.message_id
         self.data = ""
 
     async def answer(self, *args, **kwargs):

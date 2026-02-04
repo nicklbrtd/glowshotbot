@@ -509,6 +509,86 @@ async def _build_rating_card_for_photo(
     return card
 
 
+async def _build_rate_view(
+    photo_id: int,
+    viewer_tg_id: int,
+    *,
+    show_details: bool = False,
+) -> tuple[str, InlineKeyboardMarkup, bool] | None:
+    try:
+        photo = await get_photo_by_id(int(photo_id))
+    except Exception:
+        photo = None
+
+    if not photo or photo.get("is_deleted"):
+        return None
+
+    viewer_is_premium = False
+    try:
+        viewer_is_premium = await is_user_premium_active(int(viewer_tg_id))
+    except Exception:
+        viewer_is_premium = False
+
+    viewer_user = await get_user_by_tg_id(int(viewer_tg_id))
+    viewer_lang = _lang(viewer_user)
+
+    try:
+        author_user_id = int(photo.get("user_id") or 0)
+    except Exception:
+        author_user_id = 0
+
+    if "has_beta_award" not in photo or not photo.get("has_beta_award"):
+        try:
+            if author_user_id:
+                awards = await get_awards_for_user(author_user_id)
+                photo["has_beta_award"] = any(
+                    (award.get("code") or "").strip() == "beta_tester"
+                    or "бета-тестер бота" in (award.get("title") or "").strip().lower()
+                    or "бета тестер бота" in (award.get("title") or "").strip().lower()
+                    for award in awards
+                )
+        except Exception:
+            photo["has_beta_award"] = False
+
+    author = None
+    try:
+        author = await get_user_by_id(int(photo.get("user_id") or 0))
+    except Exception:
+        author = None
+
+    if author and author.get("tg_channel_link") and not photo.get("user_tg_channel_link"):
+        photo["user_tg_channel_link"] = author.get("tg_channel_link")
+
+    if "user_is_premium_active" not in photo:
+        await _ensure_author_premium_active(photo, author)
+
+    link_button = _get_link_button_from_photo(photo, author, require_premium=True)
+
+    is_rateable = bool(photo.get("ratings_enabled", True))
+    caption = await build_rate_caption(photo, viewer_tg_id=int(viewer_tg_id), show_details=show_details)
+    if not is_rateable and "не для оценивания" not in caption.lower():
+        caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
+
+    if is_rateable:
+        kb = build_rate_keyboard(
+            int(photo_id),
+            is_premium=viewer_is_premium,
+            show_details=show_details,
+            link_button=link_button,
+            lang=viewer_lang,
+        )
+    else:
+        kb = build_view_only_keyboard(
+            int(photo_id),
+            show_details=show_details,
+            is_premium=viewer_is_premium,
+            link_button=link_button,
+            lang=viewer_lang,
+        )
+
+    return caption, kb, is_rateable
+
+
 async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> RatingCard:
     photo = await get_random_photo_for_rating(rater_user_id)
     if photo is None:
@@ -535,6 +615,16 @@ def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     )
 
 
+def _build_next_only_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
+    """Reply‑клавиатура только с кнопкой «Дальше»."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=t("rate.btn.next", lang))]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
+    )
+
+
 async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
     """Отправляем новую клавиатуру оценок и только потом удаляем старую, чтобы не мигало."""
     data = await state.get_data()
@@ -544,6 +634,27 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
         chat_id=chat_id,
         text="Оцени от 1 до 10" if lang.startswith("ru") else "Rate 1–10",
         reply_markup=_build_rate_reply_keyboard(lang),
+        disable_notification=True,
+    )
+    data["rate_kb_msg_id"] = sent.message_id
+    await state.set_data(data)
+
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except Exception:
+            pass
+
+
+async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
+    """Отправляем клавиатуру только с «Дальше»."""
+    data = await state.get_data()
+    old_msg_id = data.get("rate_kb_msg_id")
+
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text="Нажми «Дальше»" if lang.startswith("ru") else "Tap Next",
+        reply_markup=_build_next_only_reply_keyboard(lang),
         disable_notification=True,
     )
     data["rate_kb_msg_id"] = sent.message_id
@@ -792,8 +903,8 @@ def build_view_only_keyboard(
 
     rows.append(
         [
+            InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
             InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
-            InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}"),
         ]
     )
 
@@ -1104,9 +1215,13 @@ async def show_next_photo_for_rating(
     if state is not None:
         data = await state.get_data()
         data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
+        data["rate_show_details"] = False
         await state.set_data(data)
         if card.photo:
-            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+            if bool(card.photo.get("ratings_enabled", True)):
+                await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+            else:
+                await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
         else:
             await _delete_rate_reply_keyboard(bot, chat_id, state)
     await _apply_rating_card(
@@ -1187,7 +1302,7 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             buttons_row,
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:rate")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")],
         ]
     )
 
@@ -1295,7 +1410,7 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
             callback_data=f"rate:report_reason:{reason}:{photo_id}",
         )
     builder.adjust(2)
-    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:rate"))
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back"))
     kb = builder.as_markup()
 
     await callback.message.edit_caption(
@@ -1447,7 +1562,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
     if not saved:
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:rate")]]
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
         )
         err_txt = "Не удалось сохранить комментарий. Попробуй ещё раз чуть позже."
         if save_error is not None:
@@ -1659,7 +1774,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             )
         else:
             kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:rate")]]
+                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
             )
             try:
                 await message.bot.edit_message_text(
@@ -1719,7 +1834,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             pass
 
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:rate")]]
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
         )
         try:
             await message.bot.edit_message_caption(
@@ -2178,6 +2293,34 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     if await _deny_if_full_banned(message=message):
         return
     text = (message.text or "").strip()
+    if text == t("rate.btn.next", "ru") or text == t("rate.btn.next", "en"):
+        data = await state.get_data()
+        photo_id = data.get("rate_current_photo_id")
+        if not photo_id:
+            return
+        if should_throttle(message.from_user.id, "rate:skip", 0.6):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        user = await get_user_by_tg_id(message.from_user.id)
+        if user is None:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+        return
+
     if not text.isdigit():
         return
     value = int(text)
@@ -2329,7 +2472,7 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     await state.clear()
 
 @router.callback_query(F.data.startswith("rate:more:"))
-async def rate_more_toggle(callback: CallbackQuery) -> None:
+async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
     if should_throttle(callback.from_user.id, "rate:more", 0.5):
         try:
             await callback.answer()
@@ -2349,82 +2492,33 @@ async def rate_more_toggle(callback: CallbackQuery) -> None:
         await callback.answer("Странные параметры.", show_alert=True)
         return
 
-    viewer_is_premium = False
-    try:
-        viewer_is_premium = await is_user_premium_active(int(callback.from_user.id))
-    except Exception:
-        viewer_is_premium = False
-    viewer_user = await get_user_by_tg_id(callback.from_user.id)
-    viewer_lang = _lang(viewer_user)
-
-    try:
-        photo = await get_photo_by_id(photo_id)
-    except Exception:
-        photo = None
-
-    if not photo or photo.get("is_deleted"):
+    view = await _build_rate_view(photo_id, int(callback.from_user.id), show_details=to_show)
+    if view is None:
         await callback.answer("Фото не найдено.", show_alert=True)
         return
-
-    # подтянем флаг ачивки и ссылку best-effort
-    try:
-        author_user_id = int(photo.get("user_id") or 0)
-    except Exception:
-        author_user_id = 0
-
-    if "has_beta_award" not in photo or not photo.get("has_beta_award"):
-        try:
-            if author_user_id:
-                awards = await get_awards_for_user(author_user_id)
-                photo["has_beta_award"] = any(
-                    (award.get("code") or "").strip() == "beta_tester"
-                    or "бета-тестер бота" in (award.get("title") or "").strip().lower()
-                    or "бета тестер бота" in (award.get("title") or "").strip().lower()
-                    for award in awards
-                )
-        except Exception:
-            photo["has_beta_award"] = False
-
-    author = None
-    try:
-        author = await get_user_by_id(int(photo.get("user_id") or 0))
-    except Exception:
-        author = None
-
-    if author and author.get("tg_channel_link") and not photo.get("user_tg_channel_link"):
-        photo["user_tg_channel_link"] = author.get("tg_channel_link")
-
-    if "user_is_premium_active" not in photo:
-        await _ensure_author_premium_active(photo, author)
-
-    link_button = _get_link_button_from_photo(photo, author, require_premium=True)
-
-    is_rateable = bool((photo or {}).get("ratings_enabled", True))
-    caption = await build_rate_caption(photo, viewer_tg_id=int(callback.from_user.id), show_details=to_show)
-    if not is_rateable and "не для оценивания" not in caption.lower():
-        caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
-
-    if is_rateable:
-        kb = build_rate_keyboard(
-            photo_id,
-            is_premium=viewer_is_premium,
-            show_details=to_show,
-            link_button=link_button,
-            lang=viewer_lang,
-        )
-    else:
-        kb = build_view_only_keyboard(
-            photo_id,
-            show_details=to_show,
-            is_premium=viewer_is_premium,
-            link_button=link_button,
-            lang=viewer_lang,
-        )
+    caption, kb, is_rateable = view
 
     try:
         await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
     except Exception:
         pass
+
+    try:
+        data = await state.get_data()
+        data["rate_show_details"] = to_show
+        await state.set_data(data)
+    except Exception:
+        pass
+
+    if is_rateable:
+        try:
+            data = await state.get_data()
+            if not data.get("rate_kb_msg_id"):
+                await _send_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state, _lang(await get_user_by_tg_id(callback.from_user.id)))
+        except Exception:
+            pass
+    else:
+        await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
 
     await callback.answer("Ок")
 
@@ -2514,6 +2608,51 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "rate:start")
 async def rate_start(callback: CallbackQuery, state: FSMContext) -> None:
     await rate_root(callback, state=state, replace_message=True)
+
+
+@router.callback_query(F.data == "rate:back")
+async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
+    if should_throttle(callback.from_user.id, "rate:back", 0.6):
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
+    data = await state.get_data()
+    photo_id = data.get("rate_current_photo_id")
+    show_details = bool(data.get("rate_show_details"))
+    if not photo_id:
+        await callback.answer()
+        return
+
+    view = await _build_rate_view(int(photo_id), int(callback.from_user.id), show_details=show_details)
+    if view is None:
+        await callback.answer("Фото не найдено.", show_alert=True)
+        return
+    caption, kb, is_rateable = view
+
+    try:
+        await callback.message.edit_caption(caption=caption, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        try:
+            await callback.message.edit_text(caption, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
+
+    if is_rateable:
+        try:
+            data = await state.get_data()
+            if not data.get("rate_kb_msg_id"):
+                await _send_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state, _lang(await get_user_by_tg_id(callback.from_user.id)))
+        except Exception:
+            pass
+    else:
+        await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
+
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 @router.callback_query(F.data == "menu:rate")
 async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, replace_message: bool = True) -> None:
