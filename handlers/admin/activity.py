@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 
@@ -52,6 +52,7 @@ async def _send_activity_chart(
     labels: list[str],
 ) -> None:
     chart = render_activity_chart(counts, labels)
+    chart_file = BufferedInputFile(chart.getvalue(), filename="activity.png")
     caption = f"📈 <b>Активность</b>\n{title}"
 
     data = await state.get_data()
@@ -64,7 +65,7 @@ async def _send_activity_chart(
 
     sent = await callback.message.bot.send_photo(
         chat_id=callback.message.chat.id,
-        photo=chart,
+        photo=chart_file,
         caption=caption,
         reply_markup=_kb_activity_menu(),
         parse_mode="HTML",
