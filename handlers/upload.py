@@ -2037,9 +2037,44 @@ async def myphoto_got_photo(message: Message, state: FSMContext):
 
 
 @router.message(MyPhotoStates.waiting_photo)
-async def myphoto_waiting_photo_wrong(message: Message):
+async def myphoto_waiting_photo_wrong(message: Message, state: FSMContext):
+    data = await state.get_data()
+    upload_msg_id = data.get("upload_msg_id")
+    upload_chat_id = data.get("upload_chat_id")
 
-    await message.delete()
+    # Если прислали как файл (document) — подскажем, что нужно фото
+    if message.document and (message.document.mime_type or "").startswith("image/"):
+        hint = "Отправь фотографию как <b>фото</b>, не как файл."
+    else:
+        hint = "Отправь фотографию, чтобы продолжить загрузку."
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if upload_msg_id and upload_chat_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=upload_chat_id,
+                message_id=upload_msg_id,
+                text=hint,
+                reply_markup=build_upload_wizard_kb(back_to="menu"),
+                parse_mode="HTML",
+            )
+            return
+        except Exception:
+            pass
+
+    try:
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            text=hint,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        pass
 
 
 @router.message(MyPhotoStates.waiting_title, F.text)

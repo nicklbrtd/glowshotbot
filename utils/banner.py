@@ -1,9 +1,18 @@
 from aiogram import Bot
+from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup
 
 from database import get_user_ui_state, set_user_banner_msg_id
 
 
-async def ensure_giraffe_banner(bot: Bot, chat_id: int, tg_id: int, *, text: str = "🦒") -> int | None:
+async def ensure_giraffe_banner(
+    bot: Bot,
+    chat_id: int,
+    tg_id: int,
+    *,
+    text: str = "🦒",
+    reply_markup: ReplyKeyboardMarkup | ReplyKeyboardRemove | InlineKeyboardMarkup | None = None,
+    force_new: bool = False,
+) -> int | None:
     """Ensure a single giraffe banner exists above section content."""
     banner_id = None
     try:
@@ -12,12 +21,13 @@ async def ensure_giraffe_banner(bot: Bot, chat_id: int, tg_id: int, *, text: str
     except Exception:
         banner_id = None
 
-    if banner_id:
+    if banner_id and not force_new:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=int(banner_id),
                 text=text,
+                reply_markup=reply_markup,
             )
             return int(banner_id)
         except Exception:
@@ -25,11 +35,17 @@ async def ensure_giraffe_banner(bot: Bot, chat_id: int, tg_id: int, *, text: str
                 await bot.delete_message(chat_id=chat_id, message_id=int(banner_id))
             except Exception:
                 pass
+    elif banner_id and force_new:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(banner_id))
+        except Exception:
+            pass
 
     try:
         sent = await bot.send_message(
             chat_id=chat_id,
             text=text,
+            reply_markup=reply_markup,
             disable_notification=True,
         )
     except Exception:

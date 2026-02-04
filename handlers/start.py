@@ -496,7 +496,7 @@ async def cmd_chatid(message: Message):
 async def cmd_fileid_photo(message: Message):
     caption = (message.caption or "").strip()
     if not caption.startswith("/fileid"):
-        return
+        raise SkipHandler
 
     user = await db.get_user_by_tg_id(message.from_user.id)
     is_allowed = bool(
