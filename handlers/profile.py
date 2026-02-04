@@ -44,6 +44,7 @@ from database import (
     ensure_user_author_code,
     set_all_user_photos_ratings_enabled,
     set_user_allow_ratings_by_tg_id,
+    set_user_screen_msg_id,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -647,6 +648,10 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         disable_notification=True,
     )
+    try:
+        await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
+    except Exception:
+        pass
     try:
         await callback.message.delete()
     except Exception:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import time
@@ -221,6 +222,85 @@ async def increment_likes_daily_for_tg_id(tg_id: int, day_key: str, delta: int =
             int(delta),
         )
 
+# -------------------- UI state (menu / rating keyboard) --------------------
+
+async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_ui_state (
+            tg_id BIGINT PRIMARY KEY,
+            menu_msg_id BIGINT,
+            rate_kb_msg_id BIGINT,
+            screen_msg_id BIGINT,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+    await conn.execute(
+        "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS screen_msg_id BIGINT;"
+    )
+
+
+async def get_user_ui_state(tg_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        row = await conn.fetchrow(
+            "SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id FROM user_ui_state WHERE tg_id=$1",
+            int(tg_id),
+        )
+        if not row:
+            return {"menu_msg_id": None, "rate_kb_msg_id": None, "screen_msg_id": None}
+        return dict(row)
+
+
+async def set_user_menu_msg_id(tg_id: int, menu_msg_id: int | None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, menu_msg_id, updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (tg_id)
+            DO UPDATE SET menu_msg_id=$2, updated_at=NOW()
+            """,
+            int(tg_id),
+            int(menu_msg_id) if menu_msg_id is not None else None,
+        )
+
+
+async def set_user_rate_kb_msg_id(tg_id: int, rate_kb_msg_id: int | None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, rate_kb_msg_id, updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (tg_id)
+            DO UPDATE SET rate_kb_msg_id=$2, updated_at=NOW()
+            """,
+            int(tg_id),
+            int(rate_kb_msg_id) if rate_kb_msg_id is not None else None,
+        )
+
+
+async def set_user_screen_msg_id(tg_id: int, screen_msg_id: int | None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, screen_msg_id, updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (tg_id)
+            DO UPDATE SET screen_msg_id=$2, updated_at=NOW()
+            """,
+            int(tg_id),
+            int(screen_msg_id) if screen_msg_id is not None else None,
+        )
+
 # -------------------- Feedback ideas --------------------
 
 async def _ensure_feedback_tables(conn: asyncpg.Connection) -> None:
@@ -256,6 +336,16 @@ async def create_feedback_idea(
     async with p.acquire() as conn:
         await _ensure_feedback_tables(conn)
 
+        if attachments is None:
+            attachments_json = "[]"
+        elif isinstance(attachments, str):
+            attachments_json = attachments
+        else:
+            try:
+                attachments_json = json.dumps(attachments, ensure_ascii=False)
+            except Exception:
+                attachments_json = "[]"
+
         for _ in range(6):
             idea_code = random.randint(100000, 999999)
             try:
@@ -269,7 +359,7 @@ async def create_feedback_idea(
                     int(tg_id),
                     username,
                     text,
-                    attachments or [],
+                    attachments_json,
                 )
                 return dict(row)
             except UniqueViolationError:
@@ -287,7 +377,7 @@ async def create_feedback_idea(
             int(tg_id),
             username,
             text,
-            attachments or [],
+            attachments_json,
         )
         return dict(row)
 

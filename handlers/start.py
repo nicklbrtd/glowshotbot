@@ -135,6 +135,16 @@ async def _send_fresh_menu(
     data = await state.get_data()
     prev_menu_id = data.get("menu_msg_id")
     prev_rate_kb_id = data.get("rate_kb_msg_id")
+    prev_screen_id = None
+    try:
+        ui_state = await db.get_user_ui_state(user_id)
+        if prev_menu_id is None:
+            prev_menu_id = ui_state.get("menu_msg_id")
+        if prev_rate_kb_id is None:
+            prev_rate_kb_id = ui_state.get("rate_kb_msg_id")
+        prev_screen_id = ui_state.get("screen_msg_id")
+    except Exception:
+        pass
     user = await db.get_user_by_tg_id(user_id)
     lang = _pick_lang(user, lang_hint)
     is_admin = _get_flag(user, "is_admin")
@@ -161,11 +171,22 @@ async def _send_fresh_menu(
 
     data["menu_msg_id"] = sent.message_id
     await state.set_data(data)
+    try:
+        await db.set_user_menu_msg_id(user_id, sent.message_id)
+        await db.set_user_screen_msg_id(user_id, sent.message_id)
+    except Exception:
+        pass
 
     if prev_menu_id and prev_menu_id != sent.message_id:
         await _delete_message_safely(bot, chat_id, prev_menu_id)
     if prev_rate_kb_id and prev_rate_kb_id != sent.message_id:
         await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
+        try:
+            await db.set_user_rate_kb_msg_id(user_id, None)
+        except Exception:
+            pass
+    if prev_screen_id and prev_screen_id not in (sent.message_id, prev_menu_id, prev_rate_kb_id):
+        await _delete_message_safely(bot, chat_id, prev_screen_id)
 
 
 def _main_menu_button_key(text: str | None) -> str | None:

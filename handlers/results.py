@@ -29,7 +29,7 @@ from database_results import (
 )
 
 from services.results_engine import recalc_day_global, get_day_eligibility
-from database import get_user_by_tg_id
+from database import get_user_by_tg_id, set_user_screen_msg_id
 
 
 try:
@@ -426,6 +426,10 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
         )
     except Exception:
         sent = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
+    except Exception:
+        pass
 
     try:
         await callback.message.delete()

@@ -53,6 +53,9 @@ from database import (
     get_active_photos_for_user,
     get_random_active_ad,
     get_ads_enabled_by_tg_id,
+    get_user_ui_state,
+    set_user_rate_kb_msg_id,
+    set_user_screen_msg_id,
 )
 from handlers.upload import EDIT_TAGS
 from html import escape
@@ -632,6 +635,12 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
     """Отправляем новую клавиатуру оценок и только потом удаляем старую, чтобы не мигало."""
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            pass
 
     sent = await bot.send_message(
         chat_id=chat_id,
@@ -641,6 +650,10 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
     )
     data["rate_kb_msg_id"] = sent.message_id
     await state.set_data(data)
+    try:
+        await set_user_rate_kb_msg_id(chat_id, sent.message_id)
+    except Exception:
+        pass
 
     if old_msg_id:
         try:
@@ -653,6 +666,12 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
     """Отправляем клавиатуру только с «Дальше»."""
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            pass
 
     sent = await bot.send_message(
         chat_id=chat_id,
@@ -662,6 +681,10 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
     )
     data["rate_kb_msg_id"] = sent.message_id
     await state.set_data(data)
+    try:
+        await set_user_rate_kb_msg_id(chat_id, sent.message_id)
+    except Exception:
+        pass
 
     if old_msg_id:
         try:
@@ -680,6 +703,10 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
             pass
         data["rate_kb_msg_id"] = None
         await state.set_data(data)
+        try:
+            await set_user_rate_kb_msg_id(chat_id, None)
+        except Exception:
+            pass
 
 
 
@@ -721,6 +748,10 @@ async def _apply_rating_card(
                     data = await state.get_data()
                     data["rate_msg_id"] = message.message_id
                     await state.set_data(data)
+                try:
+                    await set_user_screen_msg_id(chat_id, message.message_id)
+                except Exception:
+                    pass
                 return
             except Exception:
                 message = None
@@ -738,6 +769,10 @@ async def _apply_rating_card(
                     data = await state.get_data()
                     data["rate_msg_id"] = message_id
                     await state.set_data(data)
+                try:
+                    await set_user_screen_msg_id(chat_id, message_id)
+                except Exception:
+                    pass
                 return
             except Exception:
                 message_id = None
@@ -760,6 +795,10 @@ async def _apply_rating_card(
                 data = await state.get_data()
                 data["rate_msg_id"] = sent.message_id
                 await state.set_data(data)
+            try:
+                await set_user_screen_msg_id(chat_id, sent.message_id)
+            except Exception:
+                pass
             if prev_id and prev_id != sent.message_id:
                 try:
                     await bot.delete_message(chat_id=chat_id, message_id=prev_id)
@@ -783,6 +822,10 @@ async def _apply_rating_card(
                 data = await state.get_data()
                 data["rate_msg_id"] = message.message_id
                 await state.set_data(data)
+            try:
+                await set_user_screen_msg_id(chat_id, message.message_id)
+            except Exception:
+                pass
             return
         except Exception:
             try:
@@ -802,6 +845,10 @@ async def _apply_rating_card(
                 data = await state.get_data()
                 data["rate_msg_id"] = message_id
                 await state.set_data(data)
+            try:
+                await set_user_screen_msg_id(chat_id, message_id)
+            except Exception:
+                pass
             return
         except Exception:
             try:
@@ -830,6 +877,10 @@ async def _apply_rating_card(
             data = await state.get_data()
             data["rate_msg_id"] = sent.message_id
             await state.set_data(data)
+        try:
+            await set_user_screen_msg_id(chat_id, sent.message_id)
+        except Exception:
+            pass
         if prev_id and prev_id != sent.message_id:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=prev_id)
@@ -837,13 +888,17 @@ async def _apply_rating_card(
                 pass
     except Exception:
         try:
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=chat_id,
                 text=card.caption,
                 reply_markup=card.keyboard,
                 parse_mode="HTML",
                 disable_notification=True,
             )
+            try:
+                await set_user_screen_msg_id(chat_id, sent.message_id)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2326,7 +2381,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
 
 
-@router.message(F.text)
+@router.message(F.text & ~F.text.startswith("/"))
 async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     if await _deny_if_full_banned(message=message):
         return
