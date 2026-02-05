@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
 from utils.banner import ensure_giraffe_banner
+from utils.registration_guard import require_user_name
 from utils.antispam import should_throttle
 
 from aiogram.exceptions import TelegramBadRequest
@@ -724,6 +725,12 @@ async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
         else:
             await callback.answer(text)
         return None
+    if not (user.get("name") or "").strip():
+        try:
+            if not await require_user_name(callback):
+                return None
+        except Exception:
+            return None
 
     # Проверяем глобальную блокировку пользователя (используется модерацией).
     block = await get_user_block_status_by_tg_id(from_user.id)
@@ -1104,6 +1111,9 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
+    if not (user.get("name") or "").strip():
+        if not await require_user_name(callback):
+            return
     try:
         await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
     except Exception:

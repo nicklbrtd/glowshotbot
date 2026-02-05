@@ -26,6 +26,7 @@ from database import (
     get_ratings_count_for_photo,
     is_user_premium_active,
 )
+from utils.registration_guard import require_user_name
 from handlers.upload import _tag_label, _device_emoji
 
 router = Router()
@@ -685,11 +686,24 @@ async def lr_set(callback: CallbackQuery):
     if not ok:
         return
 
-    # После успешной оценки — удаляем фото и показываем итог с предложением зарегистрироваться/меню
+    # После успешной оценки:
+    # - если это пакетная ссылка (несколько фото), сразу показываем следующую неоценённую;
+    # - если это одиночная ссылка, показываем итог с предложением регистрации/меню.
     try:
         await callback.message.delete()
     except Exception:
         pass
+
+    if not single_mode:
+        # Переходим к следующей неоценённой (или к финальному экрану, если все оценены)
+        await _render_link_photo(
+            callback,
+            int(owner_tg_id),
+            code,
+            idx=999,  # гарантированно попадём на первую неоценённую
+            single_mode=False,
+        )
+        return
 
     owner_name = (owner_user or {}).get("name") or ""
     title = (photo.get("title") or "Фотография").strip()

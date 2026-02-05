@@ -159,6 +159,72 @@ async def _send_fresh_menu(
     is_moderator = _get_flag(user, "is_moderator")
     is_premium = await db.is_user_premium_active(user_id)
 
+    # Если у пользователя нет имени — не даём меню, принуждаем регистрацию
+    user_name = (user.get("name") or "").strip() if user else ""
+    if not user_name:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Указать имя", callback_data="auth:start")
+        kb.adjust(1)
+        prompt_text = (
+            "Чтобы пользоваться ботом, нужно указать имя.\n"
+            "Нажми кнопку ниже и введи свой ник."
+        )
+
+        sent_msg_id = None
+        if prev_menu_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(prev_menu_id),
+                    text=prompt_text,
+                    reply_markup=kb.as_markup(),
+                    parse_mode="HTML",
+                )
+                sent_msg_id = int(prev_menu_id)
+            except Exception:
+                sent_msg_id = None
+
+        if sent_msg_id is None:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=prompt_text,
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+                parse_mode="HTML",
+            )
+            sent_msg_id = sent.message_id
+
+        data["menu_msg_id"] = sent_msg_id
+        await state.set_data(data)
+        try:
+            await db.set_user_menu_msg_id(user_id, sent_msg_id)
+            await db.set_user_screen_msg_id(user_id, sent_msg_id)
+        except Exception:
+            pass
+
+        if prev_menu_id and prev_menu_id != sent_msg_id:
+            await _delete_message_safely(bot, chat_id, prev_menu_id)
+        if prev_rate_kb_id and prev_rate_kb_id != sent_msg_id:
+            if prev_banner_id and int(prev_rate_kb_id) == int(prev_banner_id):
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=int(prev_banner_id),
+                        text="🦒",
+                        reply_markup=ReplyKeyboardRemove(),
+                    )
+                except Exception:
+                    pass
+            else:
+                await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
+            try:
+                await db.set_user_rate_kb_msg_id(user_id, None)
+            except Exception:
+                pass
+        if prev_screen_id and prev_screen_id not in (sent_msg_id, prev_menu_id, prev_rate_kb_id):
+            await _delete_message_safely(bot, chat_id, prev_screen_id)
+        return
+
     menu_text = await build_menu_text(tg_id=user_id, user=user, is_premium=is_premium, lang=lang)
     main_kb = await _build_dynamic_main_menu(
         user=user,
@@ -535,6 +601,54 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     if getattr(message.chat, "type", None) not in ("private",):
         return
 
+    # Блокируем доступ к разделам, если имя не указано
+    try:
+        u = await db.get_user_by_tg_id(message.from_user.id)
+    except Exception:
+        u = None
+    if u is not None and not (u.get("name") or "").strip():
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Указать имя", callback_data="auth:start")
+        kb.adjust(1)
+        prompt_text = "Сначала укажи имя, без этого нельзя пользоваться ботом."
+        try:
+            data = await state.get_data()
+            menu_msg_id = data.get("menu_msg_id")
+        except Exception:
+            menu_msg_id = None
+        if menu_msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=int(menu_msg_id),
+                    text=prompt_text,
+                    reply_markup=kb.as_markup(),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                try:
+                    await message.answer(
+                        prompt_text,
+                        reply_markup=kb.as_markup(),
+                        disable_notification=True,
+                    )
+                except Exception:
+                    pass
+        else:
+            try:
+                await message.answer(
+                    prompt_text,
+                    reply_markup=kb.as_markup(),
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     pseudo_cb = _MessageAsCallback(message)
     if key == "menu":
         await _send_fresh_menu(
@@ -729,6 +843,26 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             except Exception:
                 # Последний шанс — игнорируем, чтобы не падать
                 pass
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    # Если пользователь есть, но имя не заполнено — принуждаем завершить регистрацию
+    if not (user.get("name") or "").strip():
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Указать имя", callback_data="auth:start")
+        kb.adjust(1)
+        try:
+            await message.answer(
+                "Чтобы пользоваться ботом, нужно указать имя.\n"
+                "Нажми кнопку ниже и введи свой ник.",
+                reply_markup=kb.as_markup(),
+                disable_notification=True,
+            )
+        except Exception:
+            pass
         try:
             await message.delete()
         except Exception:

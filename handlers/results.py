@@ -602,7 +602,7 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
         username = item.get("user_username")
 
         if username:
-            link_text = author_name or f"@{username}"
+            link_text = author_name or "Автор"
             author_display = f'<a href="https://t.me/{username}">{link_text}</a>'
         elif author_name:
             author_display = author_name

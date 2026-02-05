@@ -202,7 +202,10 @@ async def build_profile_view(user: dict):
     Собирает основной вид профиля с новой структурой и реальными данными.
     """
     name_raw = user.get("name") or "—"
-    name = html.escape(str(name_raw), quote=False)
+    name_clean = str(name_raw).strip()
+    if name_clean.startswith("@"):
+        name_clean = name_clean.lstrip("@").strip() or "—"
+    name = html.escape(name_clean, quote=False)
     age = user.get("age")
     age_part = f", {age}" if age else ""
 

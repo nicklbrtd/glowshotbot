@@ -63,6 +63,7 @@ from handlers.upload import EDIT_TAGS
 from html import escape
 from config import MODERATION_CHAT_ID, RATE_TUTORIAL_PHOTO_FILE_ID
 from utils.banner import ensure_giraffe_banner
+from utils.registration_guard import require_user_name
 
 router = Router()
 
@@ -1208,13 +1209,14 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
 
     is_author_premium = await _ensure_author_premium_active(photo, author)
 
-    # имя/username автора
-    display_name = author.get("name") if author else ""
-    username = author.get("username") if author else None
-    if username:
-        display_name = display_name or f"@{username}"
+    # имя автора (без @username)
+    display_name = (author.get("name") if author else "") or ""
+    display_name = display_name.strip()
+    if display_name.startswith("@"):
+        display_name = display_name.lstrip("@").strip()
     if not display_name:
         display_name = "Автор"
+    username = author.get("username") if author else None
 
     lines: list[str] = []
     # Метка 1/2, если у автора две активные фото
@@ -2661,6 +2663,11 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     if await _deny_if_full_banned(message=message):
         return
+    try:
+        if not await require_user_name(message):
+            return
+    except Exception:
+        pass
     text = (message.text or "").strip()
     if text == RATE_TUTORIAL_OK_TEXT:
         if should_throttle(message.from_user.id, "rate:tutorial:ok", 0.6):
@@ -3087,8 +3094,11 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
             pass
         return
     user = await get_user_by_tg_id(callback.from_user.id)
-    if user is None:
-        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+    if user is None or not (user.get("name") or "").strip():
+        if not await require_user_name(callback):
+            return
+        if user is None:
+            await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
 
     if state is not None:

@@ -9,6 +9,7 @@ from database import (
     get_referral_stats_for_user,
     get_user_by_tg_id,
 )
+from utils.registration_guard import require_user_name
 
 router = Router(name="referrals")
 
@@ -83,16 +84,9 @@ async def ref_main_command(message: Message):
     Показываем основной экран с условиями, ссылкой и статистикой.
     """
     user = await get_user_by_tg_id(message.from_user.id)
-    if user is None:
-        # Если пользователь ещё не зарегистрирован, мягко подталкиваем к /start
-        sent = await message.answer(
-            "Чтобы пользоваться реферальной программой, сначала зарегистрируйся в боте через /start.",
-            disable_notification=True,
-        )
-        try:
-            await message.delete()
-        except Exception:
-            pass
+    if user is None or not (user.get("name") or "").strip():
+        if not await require_user_name(message):
+            return
         return
 
     text = await _build_ref_main_text(message.from_user.id, message)
@@ -182,3 +176,13 @@ async def ref_thanks(callback: CallbackQuery):
     except Exception:
         pass
     await callback.answer()
+    try:
+        if not await require_user_name(callback):
+            return
+    except Exception:
+        pass
+    try:
+        if not await require_user_name(callback):
+            return
+    except Exception:
+        pass
