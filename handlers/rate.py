@@ -1507,6 +1507,15 @@ async def show_next_photo_for_rating(
         msg_id = None
         old_msg = None
         viewer_tg_id = int(callback.from_user.id)
+        if state is not None:
+            try:
+                data = await state.get_data()
+                msg_id = data.get("rate_msg_id")
+                if msg_id is None:
+                    ui_state = await get_user_ui_state(viewer_tg_id)
+                    msg_id = ui_state.get("rate_msg_id") or ui_state.get("screen_msg_id")
+            except Exception:
+                msg_id = None
 
     viewer = await get_user_by_tg_id(viewer_tg_id)
     lang = _lang(viewer)
