@@ -946,6 +946,11 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
     chat_id = callback.message.chat.id
     data = await state.get_data()
     photo_msg_id = data.get("myphoto_photo_msg_id")
+    # Сбрасываем контекст оценивания, чтобы цифры не считались оценкой вне раздела
+    if "rate_current_photo_id" in data or "rate_show_details" in data:
+        data.pop("rate_current_photo_id", None)
+        data.pop("rate_show_details", None)
+        await state.set_data(data)
 
     await _send_fresh_menu(
         bot=callback.message.bot,

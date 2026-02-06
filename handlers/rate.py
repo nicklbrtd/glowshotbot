@@ -815,7 +815,107 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
         pass
 
 
+async def _clear_rate_comment_draft(state: FSMContext) -> None:
+    """Очистить временные данные комментария, не трогая ключи текущей карточки."""
+    try:
+        data = await state.get_data()
+    except Exception:
+        return
+    changed = False
+    for key in ("photo_id", "comment_text", "is_public", "comment_saved", "rate_msg_id", "rate_chat_id"):
+        if key in data:
+            data.pop(key, None)
+            changed = True
+    if changed:
+        try:
+            await state.set_data(data)
+        except Exception:
+            pass
 
+
+async def _clear_rate_report_draft(state: FSMContext) -> None:
+    """Очистить временные данные жалобы, не трогая ключи текущей карточки."""
+    try:
+        await state.set_state(None)
+    except Exception:
+        pass
+    try:
+        data = await state.get_data()
+    except Exception:
+        return
+    changed = False
+    for key in ("report_photo_id", "report_msg_id", "report_chat_id", "report_reason"):
+        if key in data:
+            data.pop(key, None)
+            changed = True
+    if changed:
+        try:
+            await state.set_data(data)
+        except Exception:
+            pass
+
+
+async def _sync_rate_state_for_card(
+    *,
+    state: FSMContext,
+    card: RatingCard,
+    bot,
+    chat_id: int,
+    lang: str,
+) -> None:
+    """Обновить состояние оценивания под показанную карточку."""
+    try:
+        data = await state.get_data()
+    except Exception:
+        return
+    data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
+    data["rate_show_details"] = False
+    try:
+        await state.set_data(data)
+    except Exception:
+        pass
+
+    if card.photo:
+        if bool(card.photo.get("ratings_enabled", True)):
+            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+        else:
+            await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
+    else:
+        await _delete_rate_reply_keyboard(bot, chat_id, state)
+
+
+async def _safe_create_comment(
+    *,
+    user_id: int,
+    photo_id: int,
+    text: str,
+    is_public: bool,
+    chat_id: int | None,
+    tg_user_id: int | None,
+    handler: str,
+) -> bool:
+    try:
+        await create_comment(
+            user_id=int(user_id),
+            photo_id=int(photo_id),
+            text=text,
+            is_public=bool(is_public),
+        )
+        return True
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=int(chat_id) if chat_id is not None else 0,
+                tg_user_id=int(tg_user_id) if tg_user_id is not None else 0,
+                handler=handler,
+                update_type="comment",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+        return False
 async def _apply_rating_card(
     *,
     bot,
@@ -2031,7 +2131,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 @router.message(RateStates.waiting_report_text)
 async def rate_report_text(message: Message, state: FSMContext) -> None:
     if await _deny_if_full_banned(message=message):
-        await state.clear()
+        await _clear_rate_report_draft(state)
         try:
             await message.delete()
         except Exception:
@@ -2046,7 +2146,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
     # from database import get_photo_by_id, get_moderators  # локальный импорт, чтобы избежать циклов
 
     if photo_id is None or report_msg_id is None or report_chat_id is None:
-        await state.clear()
+        await _clear_rate_report_draft(state)
         await message.delete()
         return
 
@@ -2108,7 +2208,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             )
         except Exception:
             pass
-        await state.clear()
+        await _clear_rate_report_draft(state)
         return
 
     # Remove the user's message to keep the chat clean (expected behavior)
@@ -2118,7 +2218,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
         pass
 
     if user is None:
-        await state.clear()
+        await _clear_rate_report_draft(state)
         return
 
     limit_status = await _get_report_rate_limit_status(int(user["id"]))
@@ -2168,7 +2268,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 except Exception:
                     pass
 
-        await state.clear()
+        await _clear_rate_report_draft(state)
         return
 
     reason_code = report_reason
@@ -2231,7 +2331,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             except Exception:
                 pass
 
-        await state.clear()
+        await _clear_rate_report_draft(state)
         return
 
 
@@ -2319,7 +2419,15 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
         card=card,
     )
 
-    await state.clear()
+    await _sync_rate_state_for_card(
+        state=state,
+        card=card,
+        bot=message.bot,
+        chat_id=report_chat_id,
+        lang=_lang(user),
+    )
+
+    await _clear_rate_report_draft(state)
     return
 
 
@@ -2365,13 +2473,17 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     if photo is None or photo.get("is_deleted"):
         await callback.answer("Фото не найдено.", show_alert=True)
         await show_next_photo_for_rating(callback, user["id"], state=state)
-        await state.clear()
+        await _clear_rate_comment_draft(state)
         return
 
     if not bool(photo.get("ratings_enabled", True)):
         await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
+        try:
+            await mark_viewonly_seen(int(user["id"]), int(photo_id))
+        except Exception:
+            pass
         await show_next_photo_for_rating(callback, user["id"], state=state)
-        await state.clear()
+        await _clear_rate_comment_draft(state)
         return
 
     data = await state.get_data()
@@ -2381,11 +2493,14 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     if comment_photo_id == photo_id and comment_text and not data.get("comment_saved"):
         # 1) Сохраняем комментарий
-        await create_comment(
-            user_id=user["id"],
-            photo_id=photo_id,
+        await _safe_create_comment(
+            user_id=int(user["id"]),
+            photo_id=int(photo_id),
             text=comment_text,
             is_public=bool(is_public),
+            chat_id=callback.message.chat.id if callback.message else None,
+            tg_user_id=callback.from_user.id if callback.from_user else None,
+            handler="rate_super_score:create_comment",
         )
 
         # 2) Пытаемся уведомить автора фотографии
@@ -2490,7 +2605,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     await show_next_photo_for_rating(callback, user["id"], state=state)
 
-    await state.clear()
+    await _clear_rate_comment_draft(state)
 
 
 @router.callback_query(F.data.startswith("rate:score:"))
@@ -2535,13 +2650,17 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     if photo is None or photo.get("is_deleted"):
         await callback.answer("Фото не найдено.", show_alert=True)
         await show_next_photo_for_rating(callback, user["id"], state=state)
-        await state.clear()
+        await _clear_rate_comment_draft(state)
         return
 
     if not bool(photo.get("ratings_enabled", True)):
         await callback.answer("Автор отключил оценки для этого фото.", show_alert=True)
+        try:
+            await mark_viewonly_seen(int(user["id"]), int(photo_id))
+        except Exception:
+            pass
         await show_next_photo_for_rating(callback, user["id"], state=state)
-        await state.clear()
+        await _clear_rate_comment_draft(state)
         return
 
     # Достаём возможный комментарий из FSM
@@ -2552,11 +2671,14 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     # Если к этой же фотке только что писали комментарий — сохраняем его и шлём уведомление автору
     if comment_photo_id == photo_id and comment_text and not data.get("comment_saved"):
-        await create_comment(
-            user_id=user["id"],
-            photo_id=photo_id,
+        await _safe_create_comment(
+            user_id=int(user["id"]),
+            photo_id=int(photo_id),
             text=comment_text,
             is_public=bool(is_public),
+            chat_id=callback.message.chat.id if callback.message else None,
+            tg_user_id=callback.from_user.id if callback.from_user else None,
+            handler="rate_score:create_comment",
         )
 
         if photo is not None:
@@ -2656,7 +2778,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     await show_next_photo_for_rating(callback, user["id"], state=state)
 
     # Чистим состояние (комментарий больше не нужен)
-    await state.clear()
+    await _clear_rate_comment_draft(state)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -2784,7 +2906,7 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
         await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
-        await state.clear()
+        await _clear_rate_comment_draft(state)
         return
 
     if not bool(photo.get("ratings_enabled", True)):
@@ -2792,8 +2914,12 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
             await message.delete()
         except Exception:
             pass
+        try:
+            await mark_viewonly_seen(int(user["id"]), int(photo_id))
+        except Exception:
+            pass
         await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
-        await state.clear()
+        await _clear_rate_comment_draft(state)
         return
 
     # comment flow from FSM if exists
@@ -2802,11 +2928,14 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     is_public = data.get("is_public", True)
 
     if comment_photo_id == photo_id and comment_text and not data.get("comment_saved"):
-        await create_comment(
-            user_id=user["id"],
+        await _safe_create_comment(
+            user_id=int(user["id"]),
             photo_id=int(photo_id),
             text=comment_text,
             is_public=bool(is_public),
+            chat_id=message.chat.id,
+            tg_user_id=message.from_user.id if message.from_user else None,
+            handler="rate_score_from_keyboard:create_comment",
         )
 
         author_user_id = photo.get("user_id")
@@ -2899,7 +3028,7 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
         pass
 
     await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
-    await state.clear()
+    await _clear_rate_comment_draft(state)
 
 @router.callback_query(F.data.startswith("rate:more:"))
 async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
