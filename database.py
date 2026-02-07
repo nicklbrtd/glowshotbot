@@ -24,6 +24,7 @@ _GLOBAL_RATING_TTL_SECONDS = 300
 LINK_RATING_WEIGHT = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
 RATE_POPULAR_MIN_RATINGS = int(os.getenv("RATE_POPULAR_MIN_RATINGS", "10"))
 RATE_LOW_RATINGS_MAX = int(os.getenv("RATE_LOW_RATINGS_MAX", "2"))
+RATE_PREMIUM_BOOST_CHANCE = float(os.getenv("RATE_PREMIUM_BOOST_CHANCE", "0.3"))
 
 
 def _link_rating_weight() -> float:
@@ -42,6 +43,18 @@ def _bayes_prior_weight() -> int:
     Tunable constant. 20 works well for 1..10 ratings.
     """
     return 20
+
+
+def _premium_boost_chance() -> float:
+    try:
+        v = float(RATE_PREMIUM_BOOST_CHANCE)
+    except Exception:
+        v = 0.3
+    if v < 0:
+        return 0.0
+    if v > 0.8:
+        return 0.8
+    return v
 
 
 async def _get_global_rating_mean(conn: asyncpg.Connection) -> tuple[float, int]:
@@ -1462,32 +1475,47 @@ async def get_photo_skip_count_for_photo(photo_id: int) -> int:
         return 0
 
 
-async def get_rating_feed_seq(user_id: int) -> int:
+async def get_rating_feed_state(user_id: int) -> dict:
     p = _assert_pool()
     async with p.acquire() as conn:
-        v = await conn.fetchval(
-            "SELECT seq FROM rating_feed_state WHERE user_id=$1",
+        row = await conn.fetchrow(
+            "SELECT seq, last_author_id FROM rating_feed_state WHERE user_id=$1",
             int(user_id),
         )
-    return int(v or 0)
+    return {
+        "seq": int(row["seq"]) if row and row["seq"] is not None else 0,
+        "last_author_id": int(row["last_author_id"]) if row and row["last_author_id"] is not None else None,
+    }
 
 
-async def set_rating_feed_seq(user_id: int, seq: int) -> None:
+async def get_rating_feed_seq(user_id: int) -> int:
+    state = await get_rating_feed_state(user_id)
+    return int(state.get("seq") or 0)
+
+
+async def set_rating_feed_state(user_id: int, seq: int, *, last_author_id: int | None = None) -> None:
     p = _assert_pool()
     now = get_moscow_now_iso()
     async with p.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO rating_feed_state (user_id, seq, updated_at)
-            VALUES ($1,$2,$3)
+            INSERT INTO rating_feed_state (user_id, seq, last_author_id, updated_at)
+            VALUES ($1,$2,$3,$4)
             ON CONFLICT (user_id)
-            DO UPDATE SET seq=EXCLUDED.seq, updated_at=EXCLUDED.updated_at
+            DO UPDATE SET
+                seq=EXCLUDED.seq,
+                last_author_id=COALESCE(EXCLUDED.last_author_id, rating_feed_state.last_author_id),
+                updated_at=EXCLUDED.updated_at
             """,
             int(user_id),
             int(seq),
+            int(last_author_id) if last_author_id is not None else None,
             now,
         )
 
+
+async def set_rating_feed_seq(user_id: int, seq: int) -> None:
+    await set_rating_feed_state(user_id, seq)
 
 async def get_user_rating_day_stats(user_id: int, day_key: str) -> dict:
     """Return counts of ratings and ones for a user for a given Moscow day."""
@@ -1818,6 +1846,7 @@ async def ensure_schema() -> None:
             CREATE TABLE IF NOT EXISTS rating_feed_state (
               user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               seq INTEGER NOT NULL DEFAULT 0,
+              last_author_id BIGINT,
               updated_at TEXT NOT NULL,
               PRIMARY KEY (user_id)
             );
@@ -1997,6 +2026,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_original TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_public TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_support TEXT;")
+        await conn.execute("ALTER TABLE rating_feed_state ADD COLUMN IF NOT EXISTS last_author_id BIGINT;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -4051,8 +4081,14 @@ async def get_photo_author_tg_id(photo_id: int) -> int | None:
 
 # -------------------- rating flow --------------------
 
-async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | None:
+async def get_random_photo_for_rating_rateable(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+) -> dict | None:
     p = _assert_pool()
+    premium_flag = 1 if require_premium else None
     async with p.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -4067,28 +4103,28 @@ async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | No
               AND p.moderation_status IN ('active','good')
               AND COALESCE(p.ratings_enabled, 1)=1
               AND p.user_id <> $1
-              AND (
-                u.is_premium=1
-                OR p.id IN (
-                    SELECT id
-                    FROM photos
-                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                )
-              )
+              AND ($2::int IS NULL OR p.user_id <> $2)
+              AND ($3::int IS NULL OR u.is_premium=$3)
               AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
             ORDER BY random()
             LIMIT 1
             """,
-            int(viewer_user_id)
+            int(viewer_user_id),
+            int(exclude_author_id) if exclude_author_id is not None else None,
+            int(premium_flag) if premium_flag is not None else None,
         )
     return dict(row) if row else None
 
 
-async def get_popular_photo_for_rating(viewer_user_id: int) -> dict | None:
+async def get_popular_photo_for_rating(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+) -> dict | None:
     p = _assert_pool()
     w = _link_rating_weight()
+    premium_flag = 1 if require_premium else None
     async with p.acquire() as conn:
         global_mean, _ = await _get_global_rating_mean(conn)
         prior = _bayes_prior_weight()
@@ -4112,16 +4148,8 @@ async def get_popular_photo_for_rating(viewer_user_id: int) -> dict | None:
                   AND p.moderation_status IN ('active','good')
                   AND COALESCE(p.ratings_enabled, 1)=1
                   AND p.user_id <> $1
-                  AND (
-                    u.is_premium=1
-                    OR p.id IN (
-                        SELECT id
-                        FROM photos
-                        WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
-                        ORDER BY created_at DESC, id DESC
-                        LIMIT 1
-                    )
-                  )
+                  AND ($6::int IS NULL OR p.user_id <> $6)
+                  AND ($7::int IS NULL OR u.is_premium=$7)
                   AND NOT EXISTS (SELECT 1 FROM ratings r2 WHERE r2.photo_id=p.id AND r2.user_id=$1)
                 GROUP BY p.id, u.id, u.is_premium, u.premium_until, u.tg_channel_link
             )
@@ -4137,18 +4165,26 @@ async def get_popular_photo_for_rating(viewer_user_id: int) -> dict | None:
             float(prior),
             float(global_mean),
             float(w),
+            int(exclude_author_id) if exclude_author_id is not None else None,
+            int(premium_flag) if premium_flag is not None else None,
         )
     return dict(row) if row else None
 
 
-async def get_low_photo_for_rating(viewer_user_id: int) -> dict | None:
+async def _get_rateable_photo_by_ratings_count(
+    viewer_user_id: int,
+    *,
+    min_ratings: int | None = None,
+    max_ratings: int | None = None,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+    order_sql: str = "random()",
+) -> dict | None:
     p = _assert_pool()
-    w = _link_rating_weight()
+    premium_flag = 1 if require_premium else None
     async with p.acquire() as conn:
-        global_mean, _ = await _get_global_rating_mean(conn)
-        prior = _bayes_prior_weight()
         row = await conn.fetchrow(
-            """
+            f"""
             WITH stats AS (
                 SELECT
                     p.*,
@@ -4157,9 +4193,7 @@ async def get_low_photo_for_rating(viewer_user_id: int) -> dict | None:
                     u.premium_until AS user_premium_until,
                     u.tg_channel_link AS user_tg_channel_link,
                     u.tg_channel_link AS tg_channel_link,
-                    COUNT(r.id)::int AS ratings_count,
-                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS sum_values,
-                    COALESCE(SUM(CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS sum_weights
+                    COUNT(r.id)::int AS ratings_count
                 FROM photos p
                 JOIN users u ON u.id=p.user_id
                 LEFT JOIN ratings r ON r.photo_id=p.id
@@ -4167,36 +4201,105 @@ async def get_low_photo_for_rating(viewer_user_id: int) -> dict | None:
                   AND p.moderation_status IN ('active','good')
                   AND COALESCE(p.ratings_enabled, 1)=1
                   AND p.user_id <> $1
-                  AND (
-                    u.is_premium=1
-                    OR p.id IN (
-                        SELECT id
-                        FROM photos
-                        WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
-                        ORDER BY created_at DESC, id DESC
-                        LIMIT 1
-                    )
-                  )
+                  AND ($4::int IS NULL OR p.user_id <> $4)
+                  AND ($5::int IS NULL OR u.is_premium=$5)
                   AND NOT EXISTS (SELECT 1 FROM ratings r2 WHERE r2.photo_id=p.id AND r2.user_id=$1)
                 GROUP BY p.id, u.id, u.is_premium, u.premium_until, u.tg_channel_link
             )
-            SELECT *,
-                   ((($3::float) * ($4::float)) + sum_values) / (($3::float) + sum_weights) AS bayes_score
+            SELECT *
             FROM stats
-            WHERE ratings_count <= $2
-            ORDER BY ratings_count ASC, bayes_score ASC, random()
+            WHERE ($2::int IS NULL OR ratings_count >= $2)
+              AND ($3::int IS NULL OR ratings_count <= $3)
+            ORDER BY {order_sql}
             LIMIT 1
             """,
             int(viewer_user_id),
-            int(RATE_LOW_RATINGS_MAX),
-            float(prior),
-            float(global_mean),
-            float(w),
+            None if min_ratings is None else int(min_ratings),
+            None if max_ratings is None else int(max_ratings),
+            int(exclude_author_id) if exclude_author_id is not None else None,
+            int(premium_flag) if premium_flag is not None else None,
         )
     return dict(row) if row else None
 
 
-async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | None:
+async def get_fresh_photo_for_rating(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+) -> dict | None:
+    # 0 оценок: предпочитаем свежие, но оставляем случайность
+    return await _get_rateable_photo_by_ratings_count(
+        viewer_user_id,
+        min_ratings=0,
+        max_ratings=0,
+        exclude_author_id=exclude_author_id,
+        require_premium=require_premium,
+        order_sql="created_at DESC, id DESC, random()",
+    )
+
+
+async def get_low_photo_for_rating(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+) -> dict | None:
+    # 1..RATE_LOW_RATINGS_MAX
+    if int(RATE_LOW_RATINGS_MAX) < 1:
+        return None
+    return await _get_rateable_photo_by_ratings_count(
+        viewer_user_id,
+        min_ratings=1,
+        max_ratings=int(RATE_LOW_RATINGS_MAX),
+        exclude_author_id=exclude_author_id,
+        require_premium=require_premium,
+        order_sql="ratings_count ASC, created_at DESC, id DESC, random()",
+    )
+
+
+async def get_mid_photo_for_rating(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+) -> dict | None:
+    # (RATE_LOW_RATINGS_MAX+1) .. (RATE_POPULAR_MIN_RATINGS-1)
+    min_mid = int(RATE_LOW_RATINGS_MAX) + 1
+    max_mid = int(RATE_POPULAR_MIN_RATINGS) - 1
+    if max_mid < min_mid:
+        return None
+    return await _get_rateable_photo_by_ratings_count(
+        viewer_user_id,
+        min_ratings=min_mid,
+        max_ratings=max_mid,
+        exclude_author_id=exclude_author_id,
+        require_premium=require_premium,
+        order_sql="random()",
+    )
+
+
+async def get_nonpopular_photo_for_rating(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+    require_premium: bool | None = None,
+) -> dict | None:
+    return await _get_rateable_photo_by_ratings_count(
+        viewer_user_id,
+        min_ratings=None,
+        max_ratings=int(RATE_POPULAR_MIN_RATINGS) - 1,
+        exclude_author_id=exclude_author_id,
+        require_premium=require_premium,
+        order_sql="random()",
+    )
+
+
+async def get_random_photo_for_rating_viewonly(
+    viewer_user_id: int,
+    *,
+    exclude_author_id: int | None = None,
+) -> dict | None:
     p = _assert_pool()
     async with p.acquire() as conn:
         row = await conn.fetchrow(
@@ -4212,16 +4315,7 @@ async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | No
               AND p.moderation_status IN ('active','good')
               AND COALESCE(p.ratings_enabled, 1)=0
               AND p.user_id <> $1
-              AND (
-                u.is_premium=1
-                OR p.id IN (
-                    SELECT id
-                    FROM photos
-                    WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                )
-              )
+              AND ($2::int IS NULL OR p.user_id <> $2)
               AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
               AND NOT EXISTS (
                   SELECT 1 FROM viewonly_views v
@@ -4230,7 +4324,8 @@ async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | No
             ORDER BY random()
             LIMIT 1
             """,
-            int(viewer_user_id)
+            int(viewer_user_id),
+            int(exclude_author_id) if exclude_author_id is not None else None,
         )
     return dict(row) if row else None
 
@@ -4239,37 +4334,151 @@ async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
     """
     Возвращает фото по умной схеме:
     - каждое 10-е: «передышка» (ratings_enabled=0), если доступна;
-    - иначе чередование: популярное / не очень.
+    - иначе чередование: свежее / низкое / среднее / популярное.
+    - если подходящих нет в целевой группе, ищем в соседних, затем в любых.
     """
-    seq = await get_rating_feed_seq(int(viewer_user_id))
+    state = await get_rating_feed_state(int(viewer_user_id))
+    seq = int(state.get("seq") or 0)
+    last_author_id = state.get("last_author_id")
     next_seq = seq + 1
 
     want_viewonly = (next_seq % 10) == 0
     if want_viewonly:
-        vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
+        vo = await get_random_photo_for_rating_viewonly(
+            viewer_user_id,
+            exclude_author_id=last_author_id if last_author_id is not None else None,
+        )
+        if not vo and last_author_id is not None:
+            vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
         if vo:
-            await set_rating_feed_seq(int(viewer_user_id), int(next_seq))
+            author_id = int(vo.get("user_id")) if vo and vo.get("user_id") is not None else None
+            await set_rating_feed_state(int(viewer_user_id), int(next_seq), last_author_id=author_id)
             return vo
 
-    want_popular = (next_seq % 2) == 1
-    photo = None
-    if want_popular:
-        photo = await get_popular_photo_for_rating(viewer_user_id)
-        if not photo:
-            photo = await get_low_photo_for_rating(viewer_user_id)
+    bucket = next_seq % 6
+    if bucket == 1:
+        order = ("fresh", "low", "mid", "popular")
+    elif bucket == 2:
+        order = ("low", "fresh", "mid", "popular")
+    elif bucket == 3:
+        order = ("mid", "low", "fresh", "popular")
+    elif bucket == 4:
+        order = ("popular", "mid", "low", "fresh")
+    elif bucket == 5:
+        order = ("mid", "popular", "low", "fresh")
     else:
-        photo = await get_low_photo_for_rating(viewer_user_id)
-        if not photo:
-            photo = await get_popular_photo_for_rating(viewer_user_id)
+        order = ("popular", "mid", "low", "fresh")
 
-    if photo:
-        await set_rating_feed_seq(int(viewer_user_id), int(next_seq))
+    getters = {
+        "fresh": get_fresh_photo_for_rating,
+        "low": get_low_photo_for_rating,
+        "mid": get_mid_photo_for_rating,
+        "popular": get_popular_photo_for_rating,
+    }
+
+    prefer_premium = random.random() < _premium_boost_chance()
+
+    async def _try_get(getter):
+        photo = None
+        if last_author_id is not None:
+            if prefer_premium:
+                photo = await getter(viewer_user_id, exclude_author_id=last_author_id, require_premium=True)
+                if not photo:
+                    photo = await getter(viewer_user_id, exclude_author_id=last_author_id, require_premium=None)
+            else:
+                photo = await getter(viewer_user_id, exclude_author_id=last_author_id, require_premium=None)
+            if not photo:
+                if prefer_premium:
+                    photo = await getter(viewer_user_id, exclude_author_id=None, require_premium=True)
+                    if not photo:
+                        photo = await getter(viewer_user_id, exclude_author_id=None, require_premium=None)
+                else:
+                    photo = await getter(viewer_user_id, exclude_author_id=None, require_premium=None)
+        else:
+            if prefer_premium:
+                photo = await getter(viewer_user_id, exclude_author_id=None, require_premium=True)
+                if not photo:
+                    photo = await getter(viewer_user_id, exclude_author_id=None, require_premium=None)
+            else:
+                photo = await getter(viewer_user_id, exclude_author_id=None, require_premium=None)
         return photo
 
+    photo = None
+    for key in order:
+        try:
+            photo = await _try_get(getters[key])
+        except Exception:
+            photo = None
+        if photo:
+            break
+
+    if photo:
+        author_id = int(photo.get("user_id")) if photo and photo.get("user_id") is not None else None
+        await set_rating_feed_state(int(viewer_user_id), int(next_seq), last_author_id=author_id)
+        return photo
+
+    # Fallback: если целевые группы пусты — берём любую непопулярную
+    nonpopular = await _try_get(get_nonpopular_photo_for_rating)
+    if nonpopular:
+        author_id = int(nonpopular.get("user_id")) if nonpopular and nonpopular.get("user_id") is not None else None
+        await set_rating_feed_state(int(viewer_user_id), int(next_seq), last_author_id=author_id)
+        return nonpopular
+
+    # Fallback: любые доступные для оценивания
+    any_rateable = None
+    if last_author_id is not None:
+        if prefer_premium:
+            any_rateable = await get_random_photo_for_rating_rateable(
+                viewer_user_id,
+                exclude_author_id=last_author_id,
+                require_premium=True,
+            )
+            if not any_rateable:
+                any_rateable = await get_random_photo_for_rating_rateable(
+                    viewer_user_id,
+                    exclude_author_id=last_author_id,
+                    require_premium=None,
+                )
+        else:
+            any_rateable = await get_random_photo_for_rating_rateable(
+                viewer_user_id,
+                exclude_author_id=last_author_id,
+                require_premium=None,
+            )
+    if not any_rateable:
+        if prefer_premium:
+            any_rateable = await get_random_photo_for_rating_rateable(
+                viewer_user_id,
+                exclude_author_id=None,
+                require_premium=True,
+            )
+            if not any_rateable:
+                any_rateable = await get_random_photo_for_rating_rateable(
+                    viewer_user_id,
+                    exclude_author_id=None,
+                    require_premium=None,
+                )
+        else:
+            any_rateable = await get_random_photo_for_rating_rateable(
+                viewer_user_id,
+                exclude_author_id=None,
+                require_premium=None,
+            )
+    if any_rateable:
+        author_id = int(any_rateable.get("user_id")) if any_rateable and any_rateable.get("user_id") is not None else None
+        await set_rating_feed_state(int(viewer_user_id), int(next_seq), last_author_id=author_id)
+        return any_rateable
+
     # Fallback: если подходящих нет — попробуем передышку
-    vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
+    vo = await get_random_photo_for_rating_viewonly(
+        viewer_user_id,
+        exclude_author_id=last_author_id if last_author_id is not None else None,
+    )
+    if not vo and last_author_id is not None:
+        vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
     if vo:
-        await set_rating_feed_seq(int(viewer_user_id), int(next_seq))
+        author_id = int(vo.get("user_id")) if vo and vo.get("user_id") is not None else None
+        await set_rating_feed_state(int(viewer_user_id), int(next_seq), last_author_id=author_id)
         return vo
     return None
 

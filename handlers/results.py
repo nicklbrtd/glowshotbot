@@ -352,7 +352,7 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     margin_x = 48
 
     top_main = 44
-    top_side = 148
+    top_side = 168
 
     # Order items as 2nd, 1st, 3rd to build podium layout
     podium_images = [images[1], images[0], images[2]]
@@ -440,8 +440,12 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
         author = _plain_text(item.get("author") or item.get("author_name") or item.get("username") or "Автор")
 
         size = sizes.get(place)
-        box_w = (size[0] if size else pos["box"][0])
-        box_h = (size[1] if size else pos["box"][1])
+        if size is None:
+            # Fallback to stored w/h in positions if somehow missing
+            box_w = int(pos.get("w") or 0)
+            box_h = int(pos.get("h") or 0)
+        else:
+            box_w, box_h = int(size[0]), int(size[1])
         max_w = int(box_w + 40)
         line1 = f'"{title}"'
         line1 = _truncate_to_width(draw, line1, title_font, max_w)
