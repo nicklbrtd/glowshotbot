@@ -22,6 +22,8 @@ pool: asyncpg.Pool | None = None
 _GLOBAL_RATING_CACHE: tuple[float, float, int] | None = None
 _GLOBAL_RATING_TTL_SECONDS = 300
 LINK_RATING_WEIGHT = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
+RATE_POPULAR_MIN_RATINGS = int(os.getenv("RATE_POPULAR_MIN_RATINGS", "10"))
+RATE_LOW_RATINGS_MAX = int(os.getenv("RATE_LOW_RATINGS_MAX", "2"))
 
 
 def _link_rating_weight() -> float:
@@ -1442,6 +1444,82 @@ async def get_photo_skip_count_for_photo(photo_id: int) -> int:
         return 0
 
 
+async def get_rating_feed_seq(user_id: int) -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            "SELECT seq FROM rating_feed_state WHERE user_id=$1",
+            int(user_id),
+        )
+    return int(v or 0)
+
+
+async def set_rating_feed_seq(user_id: int, seq: int) -> None:
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO rating_feed_state (user_id, seq, updated_at)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (user_id)
+            DO UPDATE SET seq=EXCLUDED.seq, updated_at=EXCLUDED.updated_at
+            """,
+            int(user_id),
+            int(seq),
+            now,
+        )
+
+
+async def get_user_rating_day_stats(user_id: int, day_key: str) -> dict:
+    """Return counts of ratings and ones for a user for a given Moscow day."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)::int AS total_count,
+                COALESCE(SUM(CASE WHEN value=1 THEN 1 ELSE 0 END), 0)::int AS ones_count
+            FROM ratings
+            WHERE user_id=$1
+              AND COALESCE(source,'feed')='feed'
+              AND value BETWEEN 1 AND 10
+              AND created_at LIKE $2 || '%'
+            """,
+            int(user_id),
+            str(day_key),
+        )
+    if row:
+        return dict(row)
+    return {"total_count": 0, "ones_count": 0}
+
+
+async def mark_user_suspicious_rating(
+    user_id: int,
+    day_key: str,
+    ones_count: int,
+    total_count: int,
+) -> None:
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO rating_suspicious (user_id, day_key, ones_count, total_count, created_at)
+            VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT (user_id, day_key)
+            DO UPDATE SET ones_count=EXCLUDED.ones_count,
+                          total_count=EXCLUDED.total_count,
+                          created_at=EXCLUDED.created_at
+            """,
+            int(user_id),
+            str(day_key),
+            int(ones_count),
+            int(total_count),
+            now,
+        )
+
+
 async def init_db() -> None:
     global pool
     if not DB_DSN:
@@ -1700,6 +1778,30 @@ async def ensure_schema() -> None:
               photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
               created_at TEXT NOT NULL,
               PRIMARY KEY (user_id, photo_id)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rating_suspicious (
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              day_key TEXT NOT NULL,
+              ones_count INTEGER NOT NULL DEFAULT 0,
+              total_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (user_id, day_key)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rating_feed_state (
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              seq INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (user_id)
             );
             """
         )
@@ -3966,6 +4068,116 @@ async def get_random_photo_for_rating_rateable(viewer_user_id: int) -> dict | No
     return dict(row) if row else None
 
 
+async def get_popular_photo_for_rating(viewer_user_id: int) -> dict | None:
+    p = _assert_pool()
+    w = _link_rating_weight()
+    async with p.acquire() as conn:
+        global_mean, _ = await _get_global_rating_mean(conn)
+        prior = _bayes_prior_weight()
+        row = await conn.fetchrow(
+            """
+            WITH stats AS (
+                SELECT
+                    p.*,
+                    u.id AS u_id,
+                    u.is_premium AS user_is_premium,
+                    u.premium_until AS user_premium_until,
+                    u.tg_channel_link AS user_tg_channel_link,
+                    u.tg_channel_link AS tg_channel_link,
+                    COUNT(r.id)::int AS ratings_count,
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS sum_values,
+                    COALESCE(SUM(CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS sum_weights
+                FROM photos p
+                JOIN users u ON u.id=p.user_id
+                LEFT JOIN ratings r ON r.photo_id=p.id
+                WHERE p.is_deleted=0
+                  AND p.moderation_status IN ('active','good')
+                  AND COALESCE(p.ratings_enabled, 1)=1
+                  AND p.user_id <> $1
+                  AND (
+                    u.is_premium=1
+                    OR p.id IN (
+                        SELECT id
+                        FROM photos
+                        WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                    )
+                  )
+                  AND NOT EXISTS (SELECT 1 FROM ratings r2 WHERE r2.photo_id=p.id AND r2.user_id=$1)
+                GROUP BY p.id, u.id, u.is_premium, u.premium_until, u.tg_channel_link
+            )
+            SELECT *,
+                   ((($3::float) * ($4::float)) + sum_values) / (($3::float) + sum_weights) AS bayes_score
+            FROM stats
+            WHERE ratings_count >= $2
+            ORDER BY ratings_count DESC, bayes_score DESC, random()
+            LIMIT 1
+            """,
+            int(viewer_user_id),
+            int(RATE_POPULAR_MIN_RATINGS),
+            float(prior),
+            float(global_mean),
+            float(w),
+        )
+    return dict(row) if row else None
+
+
+async def get_low_photo_for_rating(viewer_user_id: int) -> dict | None:
+    p = _assert_pool()
+    w = _link_rating_weight()
+    async with p.acquire() as conn:
+        global_mean, _ = await _get_global_rating_mean(conn)
+        prior = _bayes_prior_weight()
+        row = await conn.fetchrow(
+            """
+            WITH stats AS (
+                SELECT
+                    p.*,
+                    u.id AS u_id,
+                    u.is_premium AS user_is_premium,
+                    u.premium_until AS user_premium_until,
+                    u.tg_channel_link AS user_tg_channel_link,
+                    u.tg_channel_link AS tg_channel_link,
+                    COUNT(r.id)::int AS ratings_count,
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS sum_values,
+                    COALESCE(SUM(CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS sum_weights
+                FROM photos p
+                JOIN users u ON u.id=p.user_id
+                LEFT JOIN ratings r ON r.photo_id=p.id
+                WHERE p.is_deleted=0
+                  AND p.moderation_status IN ('active','good')
+                  AND COALESCE(p.ratings_enabled, 1)=1
+                  AND p.user_id <> $1
+                  AND (
+                    u.is_premium=1
+                    OR p.id IN (
+                        SELECT id
+                        FROM photos
+                        WHERE user_id=u.id AND is_deleted=0 AND moderation_status IN ('active','good')
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                    )
+                  )
+                  AND NOT EXISTS (SELECT 1 FROM ratings r2 WHERE r2.photo_id=p.id AND r2.user_id=$1)
+                GROUP BY p.id, u.id, u.is_premium, u.premium_until, u.tg_channel_link
+            )
+            SELECT *,
+                   ((($3::float) * ($4::float)) + sum_values) / (($3::float) + sum_weights) AS bayes_score
+            FROM stats
+            WHERE ratings_count <= $2
+            ORDER BY ratings_count ASC, bayes_score ASC, random()
+            LIMIT 1
+            """,
+            int(viewer_user_id),
+            int(RATE_LOW_RATINGS_MAX),
+            float(prior),
+            float(global_mean),
+            float(w),
+        )
+    return dict(row) if row else None
+
+
 async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | None:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -4007,24 +4219,41 @@ async def get_random_photo_for_rating_viewonly(viewer_user_id: int) -> dict | No
 
 async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
     """
-    Возвращает либо обычное фото для оценивания, либо «передышку» (ratings_enabled=0).
-    Вероятность передышки ~10–15% на попытку.
+    Возвращает фото по умной схеме:
+    - каждое 10-е: «передышка» (ratings_enabled=0), если доступна;
+    - иначе чередование: популярное / не очень.
     """
-    prob = random.uniform(0.10, 0.15)
+    seq = await get_rating_feed_seq(int(viewer_user_id))
+    next_seq = seq + 1
 
-    try_viewonly_first = random.random() < prob
-
-    if try_viewonly_first:
+    want_viewonly = (next_seq % 10) == 0
+    if want_viewonly:
         vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
         if vo:
+            await set_rating_feed_seq(int(viewer_user_id), int(next_seq))
             return vo
 
-    rated = await get_random_photo_for_rating_rateable(viewer_user_id)
-    if rated:
-        return rated
+    want_popular = (next_seq % 2) == 1
+    photo = None
+    if want_popular:
+        photo = await get_popular_photo_for_rating(viewer_user_id)
+        if not photo:
+            photo = await get_low_photo_for_rating(viewer_user_id)
+    else:
+        photo = await get_low_photo_for_rating(viewer_user_id)
+        if not photo:
+            photo = await get_popular_photo_for_rating(viewer_user_id)
 
-    # Если обычных нет — попробуем передышку вне зависимости от вероятности
-    return await get_random_photo_for_rating_viewonly(viewer_user_id)
+    if photo:
+        await set_rating_feed_seq(int(viewer_user_id), int(next_seq))
+        return photo
+
+    # Fallback: если подходящих нет — попробуем передышку
+    vo = await get_random_photo_for_rating_viewonly(viewer_user_id)
+    if vo:
+        await set_rating_feed_seq(int(viewer_user_id), int(next_seq))
+        return vo
+    return None
 
 
 async def mark_viewonly_seen(user_id: int, photo_id: int) -> None:

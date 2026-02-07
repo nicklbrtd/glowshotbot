@@ -3,6 +3,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 import traceback
 from dataclasses import dataclass
 from datetime import date, datetime
+import os
 from utils.time import get_moscow_today, get_moscow_now
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -58,6 +59,8 @@ from database import (
     set_user_rate_kb_msg_id,
     set_user_screen_msg_id,
     set_user_rate_tutorial_seen,
+    get_user_rating_day_stats,
+    mark_user_suspicious_rating,
 )
 from handlers.upload import EDIT_TAGS
 from html import escape
@@ -380,6 +383,62 @@ def _format_report_cooldown(seconds: int) -> str:
     return " ".join(parts)
 
 
+_RATE_ONES_DAILY_MIN_TOTAL = int(os.getenv("RATE_ONES_DAILY_MIN_TOTAL", "12"))
+_RATE_ONES_DAILY_LIMIT = int(os.getenv("RATE_ONES_DAILY_LIMIT", "10"))
+_RATE_ONES_DAILY_HARD_CAP = int(os.getenv("RATE_ONES_DAILY_HARD_CAP", "20"))
+_RATE_ONES_DAILY_RATIO = float(os.getenv("RATE_ONES_DAILY_RATIO", "0.85"))
+
+
+async def _check_rate_spam_block(user: dict, *, value: int) -> tuple[bool, str | None]:
+    if not user:
+        return False, None
+    if user.get("is_admin") or user.get("is_moderator"):
+        return False, None
+    try:
+        day_key = _moscow_day_key()
+        stats = await get_user_rating_day_stats(int(user["id"]), str(day_key))
+        ones = int(stats.get("ones_count") or 0)
+        total = int(stats.get("total_count") or 0)
+    except Exception:
+        return False, None
+
+    blocked = False
+    if ones >= _RATE_ONES_DAILY_HARD_CAP:
+        blocked = True
+    elif total >= _RATE_ONES_DAILY_MIN_TOTAL and ones >= _RATE_ONES_DAILY_LIMIT:
+        ratio = (ones / total) if total > 0 else 0.0
+        if ratio >= _RATE_ONES_DAILY_RATIO:
+            blocked = True
+    elif value == 1:
+        ones_next = ones + 1
+        total_next = total + 1
+        if ones_next >= _RATE_ONES_DAILY_HARD_CAP:
+            blocked = True
+        elif total_next >= _RATE_ONES_DAILY_MIN_TOTAL and ones_next >= _RATE_ONES_DAILY_LIMIT:
+            ratio_next = (ones_next / total_next) if total_next > 0 else 0.0
+            if ratio_next >= _RATE_ONES_DAILY_RATIO:
+                blocked = True
+
+    if not blocked:
+        return False, None
+
+    try:
+        await mark_user_suspicious_rating(
+            int(user["id"]),
+            str(day_key),
+            int(ones),
+            int(total),
+        )
+    except Exception:
+        pass
+
+    msg = (
+        "Сегодня достаточно плохих оценок.\n\n"
+        "Сделай паузу и возвращайся позже."
+    )
+    return True, msg
+
+
 def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     """Простейшее склонение русских слов по числу: 1 день, 3 дня, 5 дней."""
     v = abs(value) % 100
@@ -681,7 +740,7 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
             chat_id,
             chat_id,
             reply_markup=_build_rate_reply_keyboard(lang),
-            force_new=True,
+            force_new=False,
         )
     except Exception:
         banner_id = None
@@ -719,7 +778,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
             chat_id,
             chat_id,
             reply_markup=_build_next_only_reply_keyboard(lang),
-            force_new=True,
+            force_new=False,
         )
     except Exception:
         banner_id = None
@@ -757,7 +816,7 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext) ->
             chat_id,
             chat_id,
             reply_markup=_build_rate_tutorial_reply_keyboard(),
-            force_new=True,
+            force_new=False,
         )
     except Exception:
         banner_id = None
@@ -880,6 +939,52 @@ async def _sync_rate_state_for_card(
             await _send_rate_reply_keyboard(bot, chat_id, state, lang)
         else:
             await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
+    else:
+        await _delete_rate_reply_keyboard(bot, chat_id, state)
+
+
+async def _show_rate_block_banner(
+    *,
+    bot,
+    chat_id: int,
+    state: FSMContext,
+    text: str,
+) -> None:
+    """Показать блокировку оценок через баннер и скрыть reply-клавиатуру."""
+    data = await state.get_data()
+    old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            pass
+
+    banner_id = None
+    try:
+        banner_id = await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            chat_id,
+            text=f"🦒\n\n{text}",
+            reply_markup=ReplyKeyboardRemove(),
+            force_new=False,
+        )
+    except Exception:
+        banner_id = None
+
+    if banner_id:
+        data["rate_kb_msg_id"] = int(banner_id)
+        await state.set_data(data)
+        try:
+            await set_user_rate_kb_msg_id(chat_id, int(banner_id))
+        except Exception:
+            pass
+        if old_msg_id and int(old_msg_id) != int(banner_id):
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
+            except Exception:
+                pass
     else:
         await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -2654,6 +2759,19 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     if user is None:
         await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
+    blocked, block_msg = await _check_rate_spam_block(user, value=value)
+    if blocked:
+        try:
+            await _show_rate_block_banner(
+                bot=callback.message.bot,
+                chat_id=callback.message.chat.id,
+                state=state,
+                text=block_msg or "Сегодня лимит оценок исчерпан. Попробуй позже.",
+            )
+            await callback.answer()
+        except Exception:
+            pass
+        return
 
     photo = await get_photo_by_id(photo_id)
     if photo is None or photo.get("is_deleted"):
@@ -2904,6 +3022,22 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     if user is None:
         try:
             await message.delete()
+        except Exception:
+            pass
+        return
+    blocked, block_msg = await _check_rate_spam_block(user, value=value)
+    if blocked:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await _show_rate_block_banner(
+                bot=message.bot,
+                chat_id=message.chat.id,
+                state=state,
+                text=block_msg or "Сегодня лимит оценок исчерпан. Попробуй позже.",
+            )
         except Exception:
             pass
         return

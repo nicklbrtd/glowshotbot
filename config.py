@@ -58,6 +58,10 @@ RATE_TUTORIAL_PHOTO_FILE_ID = os.getenv(
     "AgACAgIAAxkBAAIg2GmDn0m5yO122K7pVB2_9j_sGOegAAK2DWsbRt4hSBEpPEq_thR_AQADAgADdwADOAQ",
 )
 
+# ===== Rating feed tuning =====
+RATE_POPULAR_MIN_RATINGS = int(os.getenv("RATE_POPULAR_MIN_RATINGS", "10"))
+RATE_LOW_RATINGS_MAX = int(os.getenv("RATE_LOW_RATINGS_MAX", "2"))
+
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)
 MANUAL_RUB_ENABLED = os.getenv("MANUAL_RUB_ENABLED", "1").strip().lower() in ("1", "true", "yes")
