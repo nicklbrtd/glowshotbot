@@ -34,6 +34,7 @@ from database_results import (
     refresh_hof_statuses,
     get_alltime_cache,
     upsert_alltime_cache,
+    refresh_alltime_cache_payload,
 )
 
 from services.results_engine import recalc_day_global, get_day_eligibility
@@ -437,7 +438,22 @@ def _alltime_payload_from_items(items: list[dict]) -> dict:
                 "ratings_count": it.get("ratings_count"),
             }
         )
-    return {"items": payload_items}
+    top10_items: list[dict] = []
+    for idx, it in enumerate(items[:10], start=1):
+        top10_items.append(
+            {
+                "place": idx,
+                "photo_id": it.get("photo_id"),
+                "file_id": it.get("file_id"),
+                "title": it.get("title"),
+                "author": it.get("author_name") or it.get("username"),
+                "author_name": it.get("author_name"),
+                "username": it.get("username"),
+                "bayes_score": it.get("bayes_score"),
+                "ratings_count": it.get("ratings_count"),
+            }
+        )
+    return {"items": payload_items, "top10": top10_items}
 
 
 def _format_alltime_item_lines(place: int, item: dict) -> list[str]:
@@ -550,10 +566,22 @@ async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int
 
         items: list[dict] = []
         cached_file_id: str | None = None
+        payload = None
         if cached:
             cached_file_id = cached.get("file_id")
             payload = cached.get("payload") or {}
             items = payload.get("items") or []
+
+        if len(items) < 3:
+            try:
+                payload = await refresh_alltime_cache_payload(day_key=day_key)
+            except Exception:
+                payload = None
+            if payload:
+                items = payload.get("items") or []
+                cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
+                if cached:
+                    cached_file_id = cached.get("file_id")
 
         if len(items) < 3:
             try:
@@ -609,36 +637,120 @@ async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int
                 day_key=day_key,
                 kind=ALLTIME_CACHE_KIND_TOP3,
                 file_id=sent_file_id or cached_file_id,
-                payload={"items": items},
+                payload=payload or {"items": items},
             )
         except Exception:
             pass
         return
 
     # Top-10 list
+    today = get_moscow_today()
     try:
-        top_items = await get_all_time_top(limit=10, min_votes=ALL_TIME_MIN_VOTES)
+        day_key = today.isoformat()
     except Exception:
-        top_items = []
+        day_key = str(today)
 
-    if not top_items:
+    cached = None
+    try:
+        cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
+    except Exception:
+        cached = None
+
+    cached_file_id: str | None = None
+    items_top3: list[dict] = []
+    items_top10: list[dict] = []
+    payload = None
+    if cached:
+        cached_file_id = cached.get("file_id")
+        payload = cached.get("payload") or {}
+        items_top3 = payload.get("items") or []
+        items_top10 = payload.get("top10") or []
+
+    if not items_top10:
+        try:
+            payload = await refresh_alltime_cache_payload(day_key=day_key)
+        except Exception:
+            payload = None
+
+        if payload:
+            items_top3 = payload.get("items") or []
+            items_top10 = payload.get("top10") or []
+            cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
+            if cached:
+                cached_file_id = cached.get("file_id")
+        else:
+            try:
+                top_items = await get_all_time_top(limit=10, min_votes=ALL_TIME_MIN_VOTES)
+            except Exception:
+                top_items = []
+
+            if not top_items:
+                text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."
+                await _show_text(callback, text, build_back_to_results_kb(lang))
+                return
+
+            payload = _alltime_payload_from_items(top_items)
+            items_top3 = payload.get("items") or []
+            items_top10 = payload.get("top10") or []
+
+            try:
+                await upsert_alltime_cache(
+                    day_key=day_key,
+                    kind=ALLTIME_CACHE_KIND_TOP3,
+                    file_id=cached_file_id,
+                    payload=payload,
+                )
+            except Exception:
+                pass
+
+    if len(items_top3) < 3:
         text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."
         await _show_text(callback, text, build_back_to_results_kb(lang))
         return
 
     lines: list[str] = ["🏆 За всё время", ""]
-    for idx, it in enumerate(top_items[:3], start=1):
+    for idx, it in enumerate(items_top3[:3], start=1):
         lines.extend(_format_alltime_item_lines(idx, it))
 
-    if len(top_items) > 3:
+    if len(items_top10) > 3:
         lines.append("")
-    for idx, it in enumerate(top_items[3:10], start=4):
+    for idx, it in enumerate(items_top10[3:10], start=4):
         title = _safe_text(it.get("title") or "Без названия")
-        author = _safe_text(it.get("author_name") or it.get("username") or "Автор")
+        author = _safe_text(it.get("author") or it.get("author_name") or it.get("username") or "Автор")
         lines.append(f'{idx}. "{title}" - {author}')
 
-    kb = build_alltime_menu_kb("top10", lang)
-    await _show_text(callback, "\n".join(lines), kb)
+    image_bytes = None
+    if not cached_file_id and callback.message:
+        image_bytes = await _build_alltime_podium_bytes(callback.message.bot, items_top3)
+
+    sent_file_id = await _send_alltime_podium(
+        callback,
+        file_id=cached_file_id,
+        image_bytes=image_bytes,
+        caption="\n".join(lines),
+        kb=build_alltime_menu_kb("top10", lang),
+    )
+
+    if not sent_file_id and cached_file_id and image_bytes is None and callback.message:
+        image_bytes = await _build_alltime_podium_bytes(callback.message.bot, items_top3)
+        if image_bytes:
+            sent_file_id = await _send_alltime_podium(
+                callback,
+                file_id=None,
+                image_bytes=image_bytes,
+                caption="\n".join(lines),
+                kb=build_alltime_menu_kb("top10", lang),
+            )
+
+    try:
+        await upsert_alltime_cache(
+            day_key=day_key,
+            kind=ALLTIME_CACHE_KIND_TOP3,
+            file_id=sent_file_id or cached_file_id,
+            payload=payload or {"items": items_top3, "top10": items_top10},
+        )
+    except Exception:
+        pass
 
 
 async def _render_hof(callback: CallbackQuery, page: int = 0) -> None:
@@ -695,6 +807,7 @@ async def _render_alltime_me(callback: CallbackQuery) -> None:
 
     items: list[dict] = []
     cached_file_id: str | None = None
+    payload = None
     try:
         cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
     except Exception:
@@ -707,23 +820,37 @@ async def _render_alltime_me(callback: CallbackQuery) -> None:
 
     if len(items) < 3:
         try:
-            top_items = await get_all_time_top(limit=50, min_votes=ALL_TIME_MIN_VOTES)
-            await update_hall_of_fame_from_top(top_items)
+            payload = await refresh_alltime_cache_payload(day_key=day_key)
         except Exception:
-            top_items = []
+            payload = None
 
-        if top_items:
-            payload = _alltime_payload_from_items(top_items)
+        if payload:
             items = payload.get("items") or []
             try:
-                await upsert_alltime_cache(
-                    day_key=day_key,
-                    kind=ALLTIME_CACHE_KIND_TOP3,
-                    file_id=cached_file_id,
-                    payload={"items": items},
-                )
+                cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
             except Exception:
-                pass
+                cached = None
+            if cached:
+                cached_file_id = cached.get("file_id")
+        else:
+            try:
+                top_items = await get_all_time_top(limit=50, min_votes=ALL_TIME_MIN_VOTES)
+                await update_hall_of_fame_from_top(top_items)
+            except Exception:
+                top_items = []
+
+            if top_items:
+                payload = _alltime_payload_from_items(top_items)
+                items = payload.get("items") or []
+                try:
+                    await upsert_alltime_cache(
+                        day_key=day_key,
+                        kind=ALLTIME_CACHE_KIND_TOP3,
+                        file_id=cached_file_id,
+                        payload=payload,
+                    )
+                except Exception:
+                    pass
 
     if len(items) < 3:
         text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."

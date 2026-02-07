@@ -81,7 +81,7 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
                     ph.id AS photo_id,
                     ph.user_id,
                     ph.title,
-                    ph.file_id_public AS file_id,
+                    COALESCE(ph.file_id_public, ph.file_id) AS file_id,
                     ph.created_at,
                     ph.moderation_status,
                     ph.is_deleted,
@@ -95,7 +95,7 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
                 LEFT JOIN users u ON u.id = ph.user_id
                 WHERE ph.is_deleted = 0
                   AND ph.moderation_status IN ('active','good')
-                GROUP BY ph.id, ph.user_id, ph.title, ph.file_id_public, ph.created_at, ph.moderation_status, ph.is_deleted, u.username, u.name
+                GROUP BY ph.id, ph.user_id, ph.title, ph.file_id_public, ph.file_id, ph.created_at, ph.moderation_status, ph.is_deleted, u.username, u.name
             ),
             filtered AS (
                 SELECT *,
@@ -155,7 +155,7 @@ async def get_all_time_user_rank(user_id: int, min_votes: int = ALL_TIME_MIN_VOT
                     ph.id AS photo_id,
                     ph.user_id,
                     ph.title,
-                    ph.file_id_public AS file_id,
+                    COALESCE(ph.file_id_public, ph.file_id) AS file_id,
                     ph.created_at,
                     ph.moderation_status,
                     ph.is_deleted,
@@ -169,7 +169,7 @@ async def get_all_time_user_rank(user_id: int, min_votes: int = ALL_TIME_MIN_VOT
                 LEFT JOIN users u ON u.id = ph.user_id
                 WHERE ph.is_deleted = 0
                   AND ph.moderation_status IN ('active','good')
-                GROUP BY ph.id, ph.user_id, ph.title, ph.file_id_public, ph.created_at, ph.moderation_status, ph.is_deleted, u.username, u.name
+                GROUP BY ph.id, ph.user_id, ph.title, ph.file_id_public, ph.file_id, ph.created_at, ph.moderation_status, ph.is_deleted, u.username, u.name
             ),
             filtered AS (
                 SELECT *,
@@ -405,6 +405,95 @@ async def upsert_alltime_cache(
             file_id,
             payload,
         )
+
+
+def _alltime_payload_photo_ids(payload: dict, key: str) -> list[int]:
+    items = payload.get(key) or []
+    out: list[int] = []
+    for it in items:
+        try:
+            pid = int(it.get("photo_id"))
+        except Exception:
+            continue
+        out.append(pid)
+    return out
+
+
+def _same_alltime_payload(a: dict, b: dict) -> bool:
+    return _alltime_payload_photo_ids(a, "items") == _alltime_payload_photo_ids(b, "items") and _alltime_payload_photo_ids(
+        a, "top10"
+    ) == _alltime_payload_photo_ids(b, "top10")
+
+
+def _build_alltime_cache_payload(top_items: list[dict]) -> dict:
+    payload_items: list[dict] = []
+    for idx, it in enumerate(top_items[:3], start=1):
+        payload_items.append(
+            {
+                "place": idx,
+                "photo_id": it.get("photo_id"),
+                "file_id": it.get("file_id"),
+                "title": it.get("title"),
+                "author": it.get("author_name") or it.get("username"),
+                "author_name": it.get("author_name"),
+                "username": it.get("username"),
+                "bayes_score": it.get("bayes_score"),
+                "ratings_count": it.get("ratings_count"),
+            }
+        )
+    top10_items: list[dict] = []
+    for idx, it in enumerate(top_items[:10], start=1):
+        top10_items.append(
+            {
+                "place": idx,
+                "photo_id": it.get("photo_id"),
+                "file_id": it.get("file_id"),
+                "title": it.get("title"),
+                "author": it.get("author_name") or it.get("username"),
+                "author_name": it.get("author_name"),
+                "username": it.get("username"),
+                "bayes_score": it.get("bayes_score"),
+                "ratings_count": it.get("ratings_count"),
+            }
+        )
+    return {"items": payload_items, "top10": top10_items}
+
+
+async def refresh_alltime_cache_payload(day_key: str | None = None) -> dict | None:
+    """Recalculate all-time cache payload for the given day key (no media upload)."""
+    if not day_key:
+        day_key = get_moscow_today()
+
+    try:
+        top_items = await get_all_time_top(limit=50, min_votes=ALL_TIME_MIN_VOTES)
+        await update_hall_of_fame_from_top(top_items)
+    except Exception:
+        top_items = []
+
+    if not top_items:
+        return None
+
+    payload = _build_alltime_cache_payload(top_items)
+
+    cached = None
+    try:
+        cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
+    except Exception:
+        cached = None
+
+    file_id = None
+    if cached:
+        cached_payload = cached.get("payload") or {}
+        if _same_alltime_payload(cached_payload, payload):
+            file_id = cached.get("file_id")
+
+    await upsert_alltime_cache(
+        day_key=day_key,
+        kind=ALLTIME_CACHE_KIND_TOP3,
+        file_id=file_id,
+        payload=payload,
+    )
+    return payload
 
 # ---- all-time leaderboard ----
 ALL_TIME_MIN_VOTES = 10

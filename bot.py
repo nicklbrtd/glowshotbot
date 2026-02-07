@@ -11,7 +11,7 @@ from aiogram.types import TelegramObject, Update, Message, CallbackQuery
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.dispatcher.event.bases import SkipHandler
 
-from utils.time import get_moscow_now
+from utils.time import get_moscow_now, get_moscow_today
 
 from config import BOT_TOKEN, MASTER_ADMIN_ID
 from database import (
@@ -221,6 +221,26 @@ async def premium_expiry_reminder_loop(bot: Bot) -> None:
             pass
 
         await asyncio.sleep(3600)
+
+
+async def alltime_cache_refresh_loop() -> None:
+    """Refresh all-time cache payload once per Moscow day (no visible messages)."""
+    last_day = None
+    while True:
+        try:
+            day_key = get_moscow_today()
+            if day_key != last_day:
+                try:
+                    from database_results import refresh_alltime_cache_payload
+
+                    await refresh_alltime_cache_payload(day_key=day_key)
+                except Exception:
+                    pass
+                last_day = day_key
+        except Exception:
+            pass
+
+        await asyncio.sleep(900)
 
 from handlers.legal_center import router as help_center_router
 from handlers.admin import router as admin_router
@@ -709,6 +729,8 @@ async def main() -> None:
     asyncio.create_task(premium_expiry_reminder_loop(bot))
     # фоновая отправка запланированных рассылок
     asyncio.create_task(scheduled_broadcast_loop(bot))
+    # ежедневное обновление кэша итогов за всё время (без видимых сообщений)
+    asyncio.create_task(alltime_cache_refresh_loop())
 
     dp = Dispatcher()
 
