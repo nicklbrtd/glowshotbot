@@ -345,15 +345,16 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     bg = Image.new("RGB", (canvas_w, canvas_h), "#000000")
     draw = ImageDraw.Draw(bg)
 
-    main_box = (480, 340)
-    side_box = (360, 280)
+    # Bigger photos + tighter spacing
+    main_box = (580, 420)
+    side_box = (440, 330)
     center_x = canvas_w // 2
-    gap = 40
+    gap = 24
     left_x = center_x - (main_box[0] // 2) - gap - (side_box[0] // 2)
     right_x = center_x + (main_box[0] // 2) + gap + (side_box[0] // 2)
 
-    top_main = 40
-    top_side = 160
+    top_main = 36
+    top_side = 138
 
     positions = [
         {"center": left_x, "top": top_side, "box": side_box},   # 2nd
@@ -365,11 +366,12 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     podium_images = [images[1], images[0], images[2]]
 
     frame_colors = {
-        1: (212, 175, 55),  # gold
+        1: (212, 175, 55),   # gold
         2: (192, 192, 192),  # silver
-        3: (205, 127, 50),  # bronze
+        3: (205, 127, 50),   # bronze
     }
     frame_thickness = 8
+    inner_pad = 18  # prevents "cropped" feeling: adds breathing room inside the frame
 
     sizes: dict[int, tuple[int, int]] = {}
     for place, (pos, img_bytes) in zip([2, 1, 3], zip(positions, podium_images)):
@@ -377,20 +379,36 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         except Exception:
             continue
-        max_w, max_h = pos["box"]
-        resized = _fit_contain(img, max_w, max_h)
-        x = int(pos["center"] - resized.size[0] / 2)
-        y = int(pos["top"])
-        bg.paste(resized, (x, y))
-        sizes[place] = resized.size
 
-        # Draw colored frame
+        box_w, box_h = pos["box"]
+        avail_w = max(1, int(box_w - 2 * inner_pad))
+        avail_h = max(1, int(box_h - 2 * inner_pad))
+
+        resized = _fit_contain(img, avail_w, avail_h)
+
+        # Box rect (frame) and inner placement
+        box_left = int(pos["center"] - box_w / 2)
+        box_top = int(pos["top"])
+        box_right = int(box_left + box_w)
+        box_bottom = int(box_top + box_h)
+
+        x = int(pos["center"] - resized.size[0] / 2)
+        y = int(box_top + inner_pad + (avail_h - resized.size[1]) / 2)
+
+        # Paste image with padding inside the frame
+        bg.paste(resized, (x, y))
+        sizes[place] = (box_w, box_h)
+
+        # Draw colored frame around the whole box (not the image)
         color = frame_colors.get(place, (255, 255, 255))
-        x1, y1 = x, y
-        x2, y2 = x + resized.size[0], y + resized.size[1]
         for i in range(frame_thickness):
             draw.rectangle(
-                (max(0, x1 - i), max(0, y1 - i), min(canvas_w - 1, x2 + i), min(canvas_h - 1, y2 + i)),
+                (
+                    max(0, box_left - i),
+                    max(0, box_top - i),
+                    min(canvas_w - 1, box_right + i),
+                    min(canvas_h - 1, box_bottom + i),
+                ),
                 outline=color,
                 width=1,
             )
@@ -407,15 +425,15 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
         author = _plain_text(item.get("author") or item.get("author_name") or item.get("username") or "Автор")
 
         size = sizes.get(place)
-        box_w = size[0] if size else pos["box"][0]
-        box_h = size[1] if size else pos["box"][1]
+        box_w = (size[0] if size else pos["box"][0])
+        box_h = (size[1] if size else pos["box"][1])
         max_w = int(box_w + 40)
         line1 = f'"{title}"'
         line1 = _truncate_to_width(draw, line1, title_font, max_w)
         line2 = f"- {author}"
         line2 = _truncate_to_width(draw, line2, author_font, max_w)
 
-        y_text = pos["top"] + box_h + 18
+        y_text = int(pos["top"] + box_h + 18)
         w1, h1 = _calc_text_size(draw, line1, title_font)
         w2, h2 = _calc_text_size(draw, line2, author_font)
         x1 = int(pos["center"] - w1 / 2)
