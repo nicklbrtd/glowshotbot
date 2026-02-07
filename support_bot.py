@@ -25,12 +25,16 @@ from database import (
     get_support_users_full,
     is_user_premium_active,
     get_user_by_tg_id,
+    get_user_by_username,
+    get_active_photos_for_user,
+    get_photo_ratings_list,
     ensure_user_minimal_row,
     get_user_premium_status,
     log_bot_error,
 )
 from handlers.admin import router as admin_router
 from handlers import moderator
+from html import escape
 
 # tickets[(user_id, ticket_id)] = информация о тикете (сообщение в чате поддержки и текст пользователя)
 tickets: Dict[tuple[int, int], dict] = {}
@@ -219,6 +223,134 @@ async def main():
             )
         rows.append([InlineKeyboardButton(text="🆘 Вопрос в поддержку", callback_data="support:open")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _is_admin_or_moderator(tg_id: int) -> bool:
+        try:
+            u = await get_user_by_tg_id(int(tg_id))
+        except Exception:
+            u = None
+        return bool(u and (u.get("is_admin") or u.get("is_moderator")))
+
+    @dp.message(Command("counts"))
+    async def counts_cmd(message: Message, command: CommandObject) -> None:
+        if not message.from_user:
+            return
+        if not await _is_admin_or_moderator(int(message.from_user.id)):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        args = (command.args or "").strip()
+        if not args:
+            text = "Укажи username: /counts @username"
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
+            )
+            await message.answer(text, reply_markup=kb)
+            return
+
+        uname = args.split()[0].strip().lstrip("@")
+        if not uname:
+            text = "Укажи корректный username: /counts @username"
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
+            )
+            await message.answer(text, reply_markup=kb)
+            return
+
+        target = await get_user_by_username(uname)
+        if not target:
+            text = "Пользователь не найден."
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
+            )
+            await message.answer(text, reply_markup=kb)
+            return
+
+        photos = []
+        try:
+            photos = await get_active_photos_for_user(int(target["id"]), limit=2)
+        except Exception:
+            photos = []
+
+        if not photos:
+            text = f"У пользователя {escape(str(target.get('name') or uname))} нет активных фото."
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
+            )
+            await message.answer(text, reply_markup=kb)
+            return
+
+        # Берём самую свежую активную
+        try:
+            photos = sorted(
+                photos,
+                key=lambda p: (p.get("created_at") or "", p.get("id") or 0),
+                reverse=True,
+            )
+        except Exception:
+            pass
+        photo = photos[0]
+
+        ratings = await get_photo_ratings_list(int(photo["id"]))
+
+        display_name = (target.get("name") or "").strip()
+        if not display_name:
+            display_name = f"@{uname}"
+        header = f"Оценки на фотографию пользователя {escape(display_name)}."
+        lines = [header]
+        title = (photo.get("title") or "").strip()
+        if title:
+            lines.append(f"Фото: {escape(title)}")
+        lines.append(f"Всего оценок: {len(ratings)}")
+
+        if ratings:
+            for r in ratings:
+                u_username = (r.get("username") or "").strip()
+                u_name = (r.get("name") or "").strip()
+                u_tg = r.get("tg_id")
+                if u_username:
+                    label = f"@{u_username}"
+                elif u_name:
+                    label = u_name
+                elif u_tg:
+                    label = f"id:{u_tg}"
+                else:
+                    label = "unknown"
+                lines.append(f"{escape(label)} - {int(r.get('value') or 0)}")
+        else:
+            lines.append("Оценок пока нет.")
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
+        )
+        await message.answer("\n".join(lines), reply_markup=kb)
+
+    @dp.callback_query(F.data == "support:counts:del")
+    async def counts_delete(callback: CallbackQuery) -> None:
+        if not callback.from_user:
+            return
+        if not await _is_admin_or_moderator(int(callback.from_user.id)):
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        try:
+            await callback.answer()
+        except Exception:
+            pass
 
     def _role_label(is_admin: bool, is_moderator: bool) -> str:
         if is_admin and is_moderator:

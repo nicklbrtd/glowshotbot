@@ -1429,6 +1429,24 @@ async def get_ratings_count_for_photo(photo_id: int) -> int:
     return int(v or 0)
 
 
+async def get_photo_ratings_list(photo_id: int) -> list[dict]:
+    """List ratings with rater usernames for a photo."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT r.value, r.created_at, u.username, u.name, u.tg_id
+            FROM ratings r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.photo_id = $1
+              AND r.value BETWEEN 1 AND 10
+            ORDER BY r.value ASC, r.created_at DESC, r.id DESC
+            """,
+            int(photo_id),
+        )
+    return [dict(r) for r in rows] if rows else []
+
+
 async def get_photo_skip_count_for_photo(photo_id: int) -> int:
     """Placeholder for per-photo skip statistics.
 
