@@ -345,22 +345,14 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     bg = Image.new("RGB", (canvas_w, canvas_h), "#000000")
     draw = ImageDraw.Draw(bg)
 
-    # Bigger photos + tighter spacing
+    # Bigger photos + tighter spacing (but keep the trio centered as a group)
     main_box = (560, 410)
     side_box = (420, 320)
-    center_x = canvas_w // 2
     gap = 28
-    left_x = center_x - (main_box[0] // 2) - gap - (side_box[0] // 2)
-    right_x = center_x + (main_box[0] // 2) + gap + (side_box[0] // 2)
+    margin_x = 48
 
     top_main = 44
     top_side = 148
-
-    positions = [
-        {"center": left_x, "top": top_side, "box": side_box},   # 2nd
-        {"center": center_x, "top": top_main, "box": main_box}, # 1st
-        {"center": right_x, "top": top_side, "box": side_box},  # 3rd
-    ]
 
     # Order items as 2nd, 1st, 3rd to build podium layout
     podium_images = [images[1], images[0], images[2]]
@@ -372,34 +364,65 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     }
     frame_thickness = 8
 
+    # First pass: decode + resize, so we can compute exact x positions and avoid hugging edges
+    resized_imgs: dict[int, Image.Image] = {}
     sizes: dict[int, tuple[int, int]] = {}
-    for place, (pos, img_bytes) in zip([2, 1, 3], zip(positions, podium_images)):
+
+    for place, (box, img_bytes) in zip([2, 1, 3], [(side_box, podium_images[0]), (main_box, podium_images[1]), (side_box, podium_images[2])]):
         try:
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         except Exception:
             continue
-
-        max_w, max_h = pos["box"]
+        max_w, max_h = box
         resized = _fit_contain(img, max_w, max_h)
-
-        x = int(pos["center"] - resized.size[0] / 2)
-        y = int(pos["top"])
-
-        # Paste image
-        bg.paste(resized, (x, y))
+        resized_imgs[place] = resized
         sizes[place] = resized.size
 
-        # Draw colored frame around the photo itself
+    # If something failed to decode, bail out
+    if len(resized_imgs) < 3:
+        return None
+
+    w2, h2 = sizes[2]
+    w1, h1 = sizes[1]
+    w3, h3 = sizes[3]
+
+    # Center the whole trio as a group. If it doesn't fit within margins, shrink the gap.
+    available = (canvas_w - 2 * margin_x) - (w2 + w1 + w3)
+    if available < 2 * gap:
+        gap = max(10, available // 2)
+
+    total_w = w2 + w1 + w3 + 2 * gap
+    start_x = int((canvas_w - total_w) / 2)
+    start_x = max(margin_x, start_x)
+
+    # Exact left edges for each photo
+    x2 = start_x
+    x1 = x2 + w2 + gap
+    x3 = x1 + w1 + gap
+
+    positions = [
+        {"left": x2, "top": top_side, "w": w2, "h": h2, "center": x2 + w2 / 2},  # 2nd
+        {"left": x1, "top": top_main, "w": w1, "h": h1, "center": x1 + w1 / 2},  # 1st
+        {"left": x3, "top": top_side, "w": w3, "h": h3, "center": x3 + w3 / 2},  # 3rd
+    ]
+
+    # Paste + frame
+    for place, pos in zip([2, 1, 3], positions):
+        resized = resized_imgs[place]
+        x = int(pos["left"])
+        y = int(pos["top"])
+        bg.paste(resized, (x, y))
+
         color = frame_colors.get(place, (255, 255, 255))
-        x1, y1 = x, y
-        x2, y2 = x + resized.size[0], y + resized.size[1]
+        x1f, y1f = x, y
+        x2f, y2f = x + resized.size[0], y + resized.size[1]
         for i in range(frame_thickness):
             draw.rectangle(
                 (
-                    max(0, x1 - i),
-                    max(0, y1 - i),
-                    min(canvas_w - 1, x2 + i),
-                    min(canvas_h - 1, y2 + i),
+                    max(0, x1f - i),
+                    max(0, y1f - i),
+                    min(canvas_w - 1, x2f + i),
+                    min(canvas_h - 1, y2f + i),
                 ),
                 outline=color,
                 width=1,
