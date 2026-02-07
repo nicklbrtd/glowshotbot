@@ -185,6 +185,26 @@ async def admin_activity_menu(callback: CallbackQuery, state: FSMContext):
     if user is None:
         return
 
+    # Убираем предыдущее сообщение админ-меню, чтобы не плодить хвосты.
+    try:
+        data = await state.get_data()
+        admin_chat_id = data.get("admin_chat_id")
+        admin_msg_id = data.get("admin_msg_id")
+        if admin_chat_id and admin_msg_id and callback.message:
+            try:
+                await callback.message.bot.delete_message(
+                    chat_id=int(admin_chat_id),
+                    message_id=int(admin_msg_id),
+                )
+            except Exception:
+                pass
+            try:
+                await state.update_data(admin_chat_id=None, admin_msg_id=None)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     text = (
         "📈 <b>Активность</b>\n\n"
         "Выбери период:\n"

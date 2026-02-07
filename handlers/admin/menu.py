@@ -105,9 +105,26 @@ async def admin_menu(callback: CallbackQuery, state: FSMContext):
 
     # ВАЖНО: при входе в главное админ-меню всегда сбрасываем состояния
     await _reset_fsm_state_only(state)
-
-    # Запоминаем id текущего сообщения, чтобы дальше ВСЕГДА его редактировать
-    await state.update_data(admin_chat_id=callback.message.chat.id, admin_msg_id=callback.message.message_id)
+    # Если пришли из раздела с отдельным сообщением (например, активность),
+    # чистим его, чтобы не оставлять хвосты.
+    try:
+        data = await state.get_data()
+        act_chat_id = data.get("admin_activity_chat_id")
+        act_msg_id = data.get("admin_activity_msg_id")
+        if act_chat_id and act_msg_id:
+            try:
+                await callback.message.bot.delete_message(
+                    chat_id=int(act_chat_id),
+                    message_id=int(act_msg_id),
+                )
+            except Exception:
+                pass
+            try:
+                await state.update_data(admin_activity_chat_id=None, admin_activity_msg_id=None)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     await edit_or_answer(
         callback.message,
