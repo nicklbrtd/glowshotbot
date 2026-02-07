@@ -346,15 +346,15 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     draw = ImageDraw.Draw(bg)
 
     # Bigger photos + tighter spacing
-    main_box = (580, 420)
-    side_box = (440, 330)
+    main_box = (560, 410)
+    side_box = (420, 320)
     center_x = canvas_w // 2
-    gap = 24
+    gap = 28
     left_x = center_x - (main_box[0] // 2) - gap - (side_box[0] // 2)
     right_x = center_x + (main_box[0] // 2) + gap + (side_box[0] // 2)
 
-    top_main = 36
-    top_side = 138
+    top_main = 44
+    top_side = 148
 
     positions = [
         {"center": left_x, "top": top_side, "box": side_box},   # 2nd
@@ -371,7 +371,6 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
         3: (205, 127, 50),   # bronze
     }
     frame_thickness = 8
-    inner_pad = 18  # prevents "cropped" feeling: adds breathing room inside the frame
 
     sizes: dict[int, tuple[int, int]] = {}
     for place, (pos, img_bytes) in zip([2, 1, 3], zip(positions, podium_images)):
@@ -380,34 +379,27 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
         except Exception:
             continue
 
-        box_w, box_h = pos["box"]
-        avail_w = max(1, int(box_w - 2 * inner_pad))
-        avail_h = max(1, int(box_h - 2 * inner_pad))
-
-        resized = _fit_contain(img, avail_w, avail_h)
-
-        # Box rect (frame) and inner placement
-        box_left = int(pos["center"] - box_w / 2)
-        box_top = int(pos["top"])
-        box_right = int(box_left + box_w)
-        box_bottom = int(box_top + box_h)
+        max_w, max_h = pos["box"]
+        resized = _fit_contain(img, max_w, max_h)
 
         x = int(pos["center"] - resized.size[0] / 2)
-        y = int(box_top + inner_pad + (avail_h - resized.size[1]) / 2)
+        y = int(pos["top"])
 
-        # Paste image with padding inside the frame
+        # Paste image
         bg.paste(resized, (x, y))
-        sizes[place] = (box_w, box_h)
+        sizes[place] = resized.size
 
-        # Draw colored frame around the whole box (not the image)
+        # Draw colored frame around the photo itself
         color = frame_colors.get(place, (255, 255, 255))
+        x1, y1 = x, y
+        x2, y2 = x + resized.size[0], y + resized.size[1]
         for i in range(frame_thickness):
             draw.rectangle(
                 (
-                    max(0, box_left - i),
-                    max(0, box_top - i),
-                    min(canvas_w - 1, box_right + i),
-                    min(canvas_h - 1, box_bottom + i),
+                    max(0, x1 - i),
+                    max(0, y1 - i),
+                    min(canvas_w - 1, x2 + i),
+                    min(canvas_h - 1, y2 + i),
                 ),
                 outline=color,
                 width=1,
