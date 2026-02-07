@@ -456,7 +456,7 @@ def _build_alltime_cache_payload(top_items: list[dict]) -> dict:
                 "ratings_count": it.get("ratings_count"),
             }
         )
-    return {"items": payload_items, "top10": top10_items}
+    return {"v": 2, "items": payload_items, "top10": top10_items}
 
 
 async def refresh_alltime_cache_payload(day_key: str | None = None) -> dict | None:

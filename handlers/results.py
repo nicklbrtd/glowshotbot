@@ -317,15 +317,14 @@ def _truncate_to_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.Ima
     return suffix
 
 
-def _fit_cover_square(img: Image.Image, size: int) -> Image.Image:
+def _fit_contain(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
     w, h = img.size
-    if w == 0 or h == 0:
-        return img.resize((size, size))
-    side = min(w, h)
-    left = int((w - side) / 2)
-    top = int((h - side) / 2)
-    cropped = img.crop((left, top, left + side, top + side))
-    return cropped.resize((size, size), Image.Resampling.LANCZOS)
+    if w <= 0 or h <= 0:
+        return img.resize((max_w, max_h))
+    scale = min(float(max_w) / float(w), float(max_h) / float(h))
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 
 async def _download_photo_bytes(bot: Bot, file_id: str) -> bytes | None:
@@ -342,58 +341,81 @@ def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> byt
     if len(items) < 3 or len(images) < 3:
         return None
 
-    canvas_w, canvas_h = 1200, 720
+    canvas_w, canvas_h = 1280, 720
     bg = Image.new("RGB", (canvas_w, canvas_h), "#000000")
     draw = ImageDraw.Draw(bg)
 
-    side_size = 280
-    main_size = 340
+    main_box = (480, 340)
+    side_box = (360, 280)
     center_x = canvas_w // 2
-    left_x = int(canvas_w * 0.25)
-    right_x = int(canvas_w * 0.75)
+    gap = 40
+    left_x = center_x - (main_box[0] // 2) - gap - (side_box[0] // 2)
+    right_x = center_x + (main_box[0] // 2) + gap + (side_box[0] // 2)
 
-    top_main = 50
-    top_side = 140
+    top_main = 40
+    top_side = 160
 
     positions = [
-        {"center": left_x, "top": top_side, "size": side_size},   # 2nd
-        {"center": center_x, "top": top_main, "size": main_size}, # 1st
-        {"center": right_x, "top": top_side, "size": side_size},  # 3rd
+        {"center": left_x, "top": top_side, "box": side_box},   # 2nd
+        {"center": center_x, "top": top_main, "box": main_box}, # 1st
+        {"center": right_x, "top": top_side, "box": side_box},  # 3rd
     ]
 
     # Order items as 2nd, 1st, 3rd to build podium layout
     podium_images = [images[1], images[0], images[2]]
 
-    for pos, img_bytes in zip(positions, podium_images):
+    frame_colors = {
+        1: (212, 175, 55),  # gold
+        2: (192, 192, 192),  # silver
+        3: (205, 127, 50),  # bronze
+    }
+    frame_thickness = 8
+
+    sizes: dict[int, tuple[int, int]] = {}
+    for place, (pos, img_bytes) in zip([2, 1, 3], zip(positions, podium_images)):
         try:
             img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         except Exception:
             continue
-        resized = _fit_cover_square(img, pos["size"])
-        x = int(pos["center"] - pos["size"] / 2)
+        max_w, max_h = pos["box"]
+        resized = _fit_contain(img, max_w, max_h)
+        x = int(pos["center"] - resized.size[0] / 2)
         y = int(pos["top"])
         bg.paste(resized, (x, y))
+        sizes[place] = resized.size
+
+        # Draw colored frame
+        color = frame_colors.get(place, (255, 255, 255))
+        x1, y1 = x, y
+        x2, y2 = x + resized.size[0], y + resized.size[1]
+        for i in range(frame_thickness):
+            draw.rectangle(
+                (max(0, x1 - i), max(0, y1 - i), min(canvas_w - 1, x2 + i), min(canvas_h - 1, y2 + i)),
+                outline=color,
+                width=1,
+            )
 
     title_font = _load_font(26)
     author_font = _load_font(22)
 
-    medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
     text_color = (255, 255, 255)
     author_color = (200, 200, 200)
 
-    for idx, pos in zip([2, 1, 3], positions):
-        item = items[idx - 1]
+    for place, pos in zip([2, 1, 3], positions):
+        item = items[place - 1]
         title = _plain_text(item.get("title") or "Без названия")
         author = _plain_text(item.get("author") or item.get("author_name") or item.get("username") or "Автор")
-        medal = medal_map.get(idx, "🏅")
 
-        max_w = int(pos["size"] + 40)
-        line1 = f'{medal} "{title}"'
+        size = sizes.get(place)
+        box_w = size[0] if size else pos["box"][0]
+        box_h = size[1] if size else pos["box"][1]
+        max_w = int(box_w + 40)
+        line1 = f'"{title}"'
         line1 = _truncate_to_width(draw, line1, title_font, max_w)
         line2 = f"- {author}"
         line2 = _truncate_to_width(draw, line2, author_font, max_w)
 
-        y_text = pos["top"] + pos["size"] + 18
+        y_text = pos["top"] + box_h + 18
         w1, h1 = _calc_text_size(draw, line1, title_font)
         w2, h2 = _calc_text_size(draw, line2, author_font)
         x1 = int(pos["center"] - w1 / 2)
@@ -453,7 +475,7 @@ def _alltime_payload_from_items(items: list[dict]) -> dict:
                 "ratings_count": it.get("ratings_count"),
             }
         )
-    return {"items": payload_items, "top10": top10_items}
+    return {"v": 2, "items": payload_items, "top10": top10_items}
 
 
 def _format_alltime_item_lines(place: int, item: dict) -> list[str]:
@@ -467,6 +489,13 @@ def _format_alltime_item_lines(place: int, item: dict) -> list[str]:
         f'{medal} "{title}" - {author}',
         f"-- 🔸 {score} · ⭐️ {votes}",
     ]
+
+
+def _is_alltime_payload_current(payload: dict | None) -> bool:
+    try:
+        return int((payload or {}).get("v") or 0) >= 2
+    except Exception:
+        return False
 
 
 async def _send_alltime_podium(
@@ -570,7 +599,12 @@ async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int
         if cached:
             cached_file_id = cached.get("file_id")
             payload = cached.get("payload") or {}
-            items = payload.get("items") or []
+            if not _is_alltime_payload_current(payload):
+                payload = None
+                cached_file_id = None
+                items = []
+            else:
+                items = payload.get("items") or []
 
         if len(items) < 3:
             try:
@@ -663,8 +697,14 @@ async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int
     if cached:
         cached_file_id = cached.get("file_id")
         payload = cached.get("payload") or {}
-        items_top3 = payload.get("items") or []
-        items_top10 = payload.get("top10") or []
+        if not _is_alltime_payload_current(payload):
+            payload = None
+            cached_file_id = None
+            items_top3 = []
+            items_top10 = []
+        else:
+            items_top3 = payload.get("items") or []
+            items_top10 = payload.get("top10") or []
 
     if not items_top10:
         try:
@@ -816,7 +856,12 @@ async def _render_alltime_me(callback: CallbackQuery) -> None:
     if cached:
         cached_file_id = cached.get("file_id")
         payload = cached.get("payload") or {}
-        items = payload.get("items") or []
+        if not _is_alltime_payload_current(payload):
+            payload = None
+            cached_file_id = None
+            items = []
+        else:
+            items = payload.get("items") or []
 
     if len(items) < 3:
         try:
