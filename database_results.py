@@ -38,6 +38,9 @@ HOF_STATUS_DELETED = "deleted_by_author"
 HOF_STATUS_HIDDEN = "hidden"
 HOF_STATUS_MODERATED = "moderated"
 
+# ---- all-time cache ----
+ALLTIME_CACHE_KIND_TOP3 = "top3"
+
 
 async def ensure_hof_schema() -> None:
     """Create hall_of_fame table if missing."""
@@ -133,6 +136,87 @@ async def get_all_time_top(limit: int = 50, min_votes: int = ALL_TIME_MIN_VOTES)
         )
 
     return [dict(r) for r in rows]
+
+
+async def get_all_time_user_rank(user_id: int, min_votes: int = ALL_TIME_MIN_VOTES) -> dict | None:
+    """Return the user's best all-time photo + its rank among all authors."""
+    p = _pool()
+    prior = _bayes_prior_weight()
+    weight = _link_rating_weight() if _link_rating_weight is not None else 0.5
+    async with p.acquire() as conn:
+        from database import _get_global_rating_mean  # lazy import to avoid cycle
+
+        global_mean, _ = await _get_global_rating_mean(conn)
+
+        row = await conn.fetchrow(
+            """
+            WITH s AS (
+                SELECT
+                    ph.id AS photo_id,
+                    ph.user_id,
+                    ph.title,
+                    ph.file_id_public AS file_id,
+                    ph.created_at,
+                    ph.moderation_status,
+                    ph.is_deleted,
+                    u.username,
+                    u.name AS author_name,
+                    COUNT(r.id)::int AS ratings_count,
+                    COALESCE(SUM(r.value * CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS ratings_sum,
+                    COALESCE(SUM(CASE WHEN r.source='link' THEN $5 ELSE 1 END), 0)::float AS ratings_weighted_count
+                FROM photos ph
+                LEFT JOIN ratings r ON r.photo_id = ph.id
+                LEFT JOIN users u ON u.id = ph.user_id
+                WHERE ph.is_deleted = 0
+                  AND ph.moderation_status IN ('active','good')
+                GROUP BY ph.id, ph.user_id, ph.title, ph.file_id_public, ph.created_at, ph.moderation_status, ph.is_deleted, u.username, u.name
+            ),
+            filtered AS (
+                SELECT *,
+                    CASE
+                        WHEN ratings_weighted_count > 0 THEN (($1::float * $2::float) + ratings_sum) / ($1::float + ratings_weighted_count)
+                        ELSE NULL
+                    END AS bayes_score
+                FROM s
+                WHERE ratings_count >= $3
+            ),
+            ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY user_id
+                        ORDER BY
+                            bayes_score DESC NULLS LAST,
+                            ratings_count DESC,
+                            created_at DESC,
+                            photo_id ASC
+                    ) AS rn
+                FROM filtered
+            ),
+            finals AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        ORDER BY
+                            bayes_score DESC NULLS LAST,
+                            ratings_count DESC,
+                            created_at DESC,
+                            photo_id ASC
+                    ) AS rank_global
+                FROM ranked
+                WHERE rn = 1
+            )
+            SELECT *
+            FROM finals
+            WHERE user_id = $4
+            LIMIT 1
+            """,
+            float(prior),
+            float(global_mean),
+            int(min_votes),
+            int(user_id),
+            float(weight),
+        )
+
+    return dict(row) if row else None
 
 
 async def update_hall_of_fame_from_top(top_items: list[dict]) -> None:
@@ -252,6 +336,75 @@ async def get_hof_items(limit: int = 50) -> list[dict]:
             int(limit),
         )
     return [dict(r) for r in rows]
+
+
+async def ensure_alltime_cache_schema() -> None:
+    """Create all-time cache table if missing."""
+    p = _pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS alltime_cache (
+                day_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                file_id TEXT,
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (day_key, kind)
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_alltime_cache_kind_day
+            ON alltime_cache (kind, day_key);
+            """
+        )
+
+
+async def get_alltime_cache(day_key: str, kind: str = ALLTIME_CACHE_KIND_TOP3) -> dict | None:
+    p = _pool()
+    await ensure_alltime_cache_schema()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT day_key, kind, file_id, payload, created_at, updated_at
+            FROM alltime_cache
+            WHERE day_key=$1 AND kind=$2
+            LIMIT 1
+            """,
+            str(day_key),
+            str(kind),
+        )
+        return dict(row) if row else None
+
+
+async def upsert_alltime_cache(
+    *,
+    day_key: str,
+    kind: str = ALLTIME_CACHE_KIND_TOP3,
+    file_id: str | None,
+    payload: dict,
+) -> None:
+    p = _pool()
+    await ensure_alltime_cache_schema()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO alltime_cache (day_key, kind, file_id, payload)
+            VALUES ($1,$2,$3,$4::jsonb)
+            ON CONFLICT (day_key, kind)
+            DO UPDATE SET
+                file_id=EXCLUDED.file_id,
+                payload=EXCLUDED.payload,
+                updated_at=NOW();
+            """,
+            str(day_key),
+            str(kind),
+            file_id,
+            payload,
+        )
 
 # ---- all-time leaderboard ----
 ALL_TIME_MIN_VOTES = 10

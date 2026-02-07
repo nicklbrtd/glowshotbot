@@ -163,12 +163,9 @@ async def _send_fresh_menu(
     user_name = (user.get("name") or "").strip() if user else ""
     if not user_name:
         kb = InlineKeyboardBuilder()
-        kb.button(text="Указать имя", callback_data="auth:start")
+        kb.button(text="Добавить имя", callback_data="auth:start")
         kb.adjust(1)
-        prompt_text = (
-            "Чтобы пользоваться ботом, нужно указать имя.\n"
-            "Нажми кнопку ниже и введи свой ник."
-        )
+        prompt_text = "Чтобы перейти в этот раздел вам нужно добавить свое имя."
 
         sent_msg_id = None
         if prev_menu_id:
@@ -608,9 +605,9 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
         u = None
     if u is not None and not (u.get("name") or "").strip():
         kb = InlineKeyboardBuilder()
-        kb.button(text="Указать имя", callback_data="auth:start")
+        kb.button(text="Добавить имя", callback_data="auth:start")
         kb.adjust(1)
-        prompt_text = "Сначала укажи имя, без этого нельзя пользоваться ботом."
+        prompt_text = "Чтобы перейти в этот раздел вам нужно добавить свое имя."
         try:
             data = await state.get_data()
             menu_msg_id = data.get("menu_msg_id")
@@ -852,12 +849,11 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
     # Если пользователь есть, но имя не заполнено — принуждаем завершить регистрацию
     if not (user.get("name") or "").strip():
         kb = InlineKeyboardBuilder()
-        kb.button(text="Указать имя", callback_data="auth:start")
+        kb.button(text="Добавить имя", callback_data="auth:start")
         kb.adjust(1)
         try:
             await message.answer(
-                "Чтобы пользоваться ботом, нужно указать имя.\n"
-                "Нажми кнопку ниже и введи свой ник.",
+                "Чтобы перейти в этот раздел вам нужно добавить свое имя.",
                 reply_markup=kb.as_markup(),
                 disable_notification=True,
             )

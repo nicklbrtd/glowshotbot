@@ -3,11 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from datetime import datetime, timedelta
+import html
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+import io
+from PIL import Image, ImageDraw, ImageFont  # type: ignore[import]
 
 from keyboards.common import build_back_to_menu_kb
 from utils.i18n import t
@@ -16,21 +20,25 @@ from utils.time import get_moscow_now, get_moscow_today
 
 from database_results import (
     PERIOD_DAY,
-    PERIOD_ALL_TIME,
     SCOPE_GLOBAL,
     SCOPE_CITY,
     SCOPE_COUNTRY,
     KIND_TOP_PHOTOS,
     ALL_TIME_MIN_VOTES,
+    ALLTIME_CACHE_KIND_TOP3,
     get_results_items,
     get_all_time_top,
+    get_all_time_user_rank,
     update_hall_of_fame_from_top,
     get_hof_items,
     refresh_hof_statuses,
+    get_alltime_cache,
+    upsert_alltime_cache,
 )
 
 from services.results_engine import recalc_day_global, get_day_eligibility
 from database import get_user_by_tg_id, set_user_screen_msg_id
+from utils.registration_guard import require_user_name
 
 
 try:
@@ -109,10 +117,8 @@ def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
 
 def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    if mode != "top10":
-        kb.button(text="📜 Топ 10", callback_data="results:alltime:top10")
-    if mode != "top50":
-        kb.button(text="📜 Топ 50", callback_data="results:alltime:top50")
+    kb.button(text="📃 Топ 10", callback_data="results:alltime:top10")
+    kb.button(text="📍 Где я?", callback_data="results:alltime:me")
     kb.button(text="👑 Зал славы", callback_data="results:hof")
     kb.button(text=t("results.btn.back_results", lang), callback_data="results:menu")
     kb.adjust(1)
@@ -268,13 +274,350 @@ def _fmt_date_str(dt_str: str | None) -> str:
             return ""
 
 
+def _safe_text(value: str | None) -> str:
+    return html.escape(str(value or "").strip(), quote=False)
+
+
+def _plain_text(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except Exception:
+        try:
+            return ImageFont.truetype("arial.ttf", size=size)
+        except Exception:
+            return ImageFont.load_default()
+
+
+def _calc_text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        w, h = draw.textsize(text, font=font)
+        return int(w), int(h)
+
+
+def _truncate_to_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int) -> str:
+    if not text:
+        return text
+    if _calc_text_size(draw, text, font)[0] <= max_w:
+        return text
+    suffix = "…"
+    trimmed = text
+    while trimmed:
+        trimmed = trimmed[:-1]
+        candidate = trimmed + suffix
+        if _calc_text_size(draw, candidate, font)[0] <= max_w:
+            return candidate
+    return suffix
+
+
+def _fit_cover_square(img: Image.Image, size: int) -> Image.Image:
+    w, h = img.size
+    if w == 0 or h == 0:
+        return img.resize((size, size))
+    side = min(w, h)
+    left = int((w - side) / 2)
+    top = int((h - side) / 2)
+    cropped = img.crop((left, top, left + side, top + side))
+    return cropped.resize((size, size), Image.Resampling.LANCZOS)
+
+
+async def _download_photo_bytes(bot: Bot, file_id: str) -> bytes | None:
+    try:
+        tg_file = await bot.get_file(file_id)
+        buff = io.BytesIO()
+        await bot.download_file(tg_file.file_path, destination=buff)
+        return buff.getvalue()
+    except Exception:
+        return None
+
+
+def _compose_alltime_podium_image(items: list[dict], images: list[bytes]) -> bytes | None:
+    if len(items) < 3 or len(images) < 3:
+        return None
+
+    canvas_w, canvas_h = 1200, 720
+    bg = Image.new("RGB", (canvas_w, canvas_h), "#000000")
+    draw = ImageDraw.Draw(bg)
+
+    side_size = 280
+    main_size = 340
+    center_x = canvas_w // 2
+    left_x = int(canvas_w * 0.25)
+    right_x = int(canvas_w * 0.75)
+
+    top_main = 50
+    top_side = 140
+
+    positions = [
+        {"center": left_x, "top": top_side, "size": side_size},   # 2nd
+        {"center": center_x, "top": top_main, "size": main_size}, # 1st
+        {"center": right_x, "top": top_side, "size": side_size},  # 3rd
+    ]
+
+    # Order items as 2nd, 1st, 3rd to build podium layout
+    podium_images = [images[1], images[0], images[2]]
+
+    for pos, img_bytes in zip(positions, podium_images):
+        try:
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        except Exception:
+            continue
+        resized = _fit_cover_square(img, pos["size"])
+        x = int(pos["center"] - pos["size"] / 2)
+        y = int(pos["top"])
+        bg.paste(resized, (x, y))
+
+    title_font = _load_font(26)
+    author_font = _load_font(22)
+
+    medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
+    text_color = (255, 255, 255)
+    author_color = (200, 200, 200)
+
+    for idx, pos in zip([2, 1, 3], positions):
+        item = items[idx - 1]
+        title = _plain_text(item.get("title") or "Без названия")
+        author = _plain_text(item.get("author") or item.get("author_name") or item.get("username") or "Автор")
+        medal = medal_map.get(idx, "🏅")
+
+        max_w = int(pos["size"] + 40)
+        line1 = f'{medal} "{title}"'
+        line1 = _truncate_to_width(draw, line1, title_font, max_w)
+        line2 = f"- {author}"
+        line2 = _truncate_to_width(draw, line2, author_font, max_w)
+
+        y_text = pos["top"] + pos["size"] + 18
+        w1, h1 = _calc_text_size(draw, line1, title_font)
+        w2, h2 = _calc_text_size(draw, line2, author_font)
+        x1 = int(pos["center"] - w1 / 2)
+        x2 = int(pos["center"] - w2 / 2)
+
+        draw.text((x1, y_text), line1, font=title_font, fill=text_color)
+        draw.text((x2, y_text + h1 + 6), line2, font=author_font, fill=author_color)
+
+    out = io.BytesIO()
+    bg.save(out, format="JPEG", quality=92, subsampling=0, optimize=True)
+    return out.getvalue()
+
+
+async def _build_alltime_podium_bytes(bot: Bot, items: list[dict]) -> bytes | None:
+    if len(items) < 3:
+        return None
+    images: list[bytes] = []
+    for it in items[:3]:
+        file_id = it.get("file_id")
+        if not file_id:
+            return None
+        data = await _download_photo_bytes(bot, str(file_id))
+        if not data:
+            return None
+        images.append(data)
+    return _compose_alltime_podium_image(items[:3], images)
+
+
+def _alltime_payload_from_items(items: list[dict]) -> dict:
+    payload_items: list[dict] = []
+    for idx, it in enumerate(items[:3], start=1):
+        payload_items.append(
+            {
+                "place": idx,
+                "photo_id": it.get("photo_id"),
+                "file_id": it.get("file_id"),
+                "title": it.get("title"),
+                "author": it.get("author_name") or it.get("username"),
+                "author_name": it.get("author_name"),
+                "username": it.get("username"),
+                "bayes_score": it.get("bayes_score"),
+                "ratings_count": it.get("ratings_count"),
+            }
+        )
+    return {"items": payload_items}
+
+
+def _format_alltime_item_lines(place: int, item: dict) -> list[str]:
+    medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
+    medal = medal_map.get(place, "🏅")
+    title = _safe_text(item.get("title") or "Без названия")
+    author = _safe_text(item.get("author") or item.get("author_name") or item.get("username") or "Автор")
+    score = _fmt_score(item.get("bayes_score"))
+    votes = int(item.get("ratings_count") or 0)
+    return [
+        f'{medal} "{title}" - {author}',
+        f"-- 🔸 {score} · ⭐️ {votes}",
+    ]
+
+
+async def _send_alltime_podium(
+    callback: CallbackQuery,
+    *,
+    file_id: str | None,
+    image_bytes: bytes | None,
+    caption: str,
+    kb: InlineKeyboardMarkup,
+) -> str | None:
+    msg = callback.message
+    if msg is None:
+        return None
+
+    if file_id:
+        try:
+            await msg.edit_media(
+                media=InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML"),
+                reply_markup=kb,
+            )
+            return file_id
+        except Exception:
+            pass
+
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        try:
+            sent = await msg.bot.send_photo(
+                chat_id=msg.chat.id,
+                photo=file_id,
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+            if sent and sent.photo:
+                return sent.photo[-1].file_id
+        except Exception:
+            pass
+
+    if image_bytes:
+        media = InputMediaPhoto(
+            media=BufferedInputFile(image_bytes, filename="alltime_top3.jpg"),
+            caption=caption,
+            parse_mode="HTML",
+        )
+        try:
+            sent = await msg.edit_media(media=media, reply_markup=kb)
+            try:
+                return sent.photo[-1].file_id  # type: ignore[union-attr]
+            except Exception:
+                return None
+        except Exception:
+            pass
+
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        try:
+            sent = await msg.bot.send_photo(
+                chat_id=msg.chat.id,
+                photo=BufferedInputFile(image_bytes, filename="alltime_top3.jpg"),
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+            if sent and sent.photo:
+                return sent.photo[-1].file_id
+        except Exception:
+            pass
+
+    await _show_text(callback, caption, kb)
+    return None
+
+
 async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int = 0) -> None:
     user = await get_user_by_tg_id(int(callback.from_user.id)) if callback.from_user else None
     lang = _lang(user)
-    # Refresh HoF lazily
+    if limit == 3:
+        today = get_moscow_today()
+        try:
+            day_key = today.isoformat()
+        except Exception:
+            day_key = str(today)
+
+        cached = None
+        try:
+            cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
+        except Exception:
+            cached = None
+
+        items: list[dict] = []
+        cached_file_id: str | None = None
+        if cached:
+            cached_file_id = cached.get("file_id")
+            payload = cached.get("payload") or {}
+            items = payload.get("items") or []
+
+        if len(items) < 3:
+            try:
+                top_items = await get_all_time_top(limit=50, min_votes=ALL_TIME_MIN_VOTES)
+                await update_hall_of_fame_from_top(top_items)
+            except Exception:
+                top_items = []
+
+            if not top_items:
+                text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."
+                await _show_text(callback, text, build_back_to_results_kb(lang))
+                return
+
+            payload = _alltime_payload_from_items(top_items)
+            items = payload.get("items") or []
+            cached_file_id = None
+
+        if len(items) < 3:
+            text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."
+            await _show_text(callback, text, build_back_to_results_kb(lang))
+            return
+
+        lines: list[str] = ["🏆 За всё время", ""]
+        for idx, it in enumerate(items[:3], start=1):
+            lines.extend(_format_alltime_item_lines(idx, it))
+        caption = "\n".join(lines)
+
+        image_bytes = None
+        if not cached_file_id and callback.message:
+            image_bytes = await _build_alltime_podium_bytes(callback.message.bot, items)
+
+        sent_file_id = await _send_alltime_podium(
+            callback,
+            file_id=cached_file_id,
+            image_bytes=image_bytes,
+            caption=caption,
+            kb=build_alltime_menu_kb("top3", lang),
+        )
+
+        if not sent_file_id and cached_file_id and image_bytes is None and callback.message:
+            image_bytes = await _build_alltime_podium_bytes(callback.message.bot, items)
+            if image_bytes:
+                sent_file_id = await _send_alltime_podium(
+                    callback,
+                    file_id=None,
+                    image_bytes=image_bytes,
+                    caption=caption,
+                    kb=build_alltime_menu_kb("top3", lang),
+                )
+
+        try:
+            await upsert_alltime_cache(
+                day_key=day_key,
+                kind=ALLTIME_CACHE_KIND_TOP3,
+                file_id=sent_file_id or cached_file_id,
+                payload={"items": items},
+            )
+        except Exception:
+            pass
+        return
+
+    # Top-10 list
     try:
-        top_items = await get_all_time_top(limit=max(50, limit), min_votes=ALL_TIME_MIN_VOTES)
-        await update_hall_of_fame_from_top(top_items)
+        top_items = await get_all_time_top(limit=10, min_votes=ALL_TIME_MIN_VOTES)
     except Exception:
         top_items = []
 
@@ -283,42 +626,18 @@ async def _render_alltime_top(callback: CallbackQuery, limit: int = 3, page: int
         await _show_text(callback, text, build_back_to_results_kb(lang))
         return
 
-    if limit == 3:
-        items = top_items[:3]
-        lines = ["🏆 За всё время", ""]
-        for idx, it in enumerate(items, start=1):
-            title = (it.get("title") or "Без названия").strip()
-            author = (it.get("author_name") or it.get("username") or "").strip()
-            score = _fmt_score(it.get("bayes_score"))
-            votes = int(it.get("ratings_count") or 0)
-            pub = _fmt_date_str(it.get("created_at"))
-            line = f"{idx}. \"{title}\" — {author or 'Автор'}\nРейтинг: {score} • v={votes}"
-            if pub:
-                line += f" • {pub}"
-            lines.append(line)
-            lines.append("")
+    lines: list[str] = ["🏆 За всё время", ""]
+    for idx, it in enumerate(top_items[:3], start=1):
+        lines.extend(_format_alltime_item_lines(idx, it))
 
-        kb = build_alltime_menu_kb("top3", lang)
-        await _show_text(callback, "\n".join(lines).strip(), kb)
-        return
+    if len(top_items) > 3:
+        lines.append("")
+    for idx, it in enumerate(top_items[3:10], start=4):
+        title = _safe_text(it.get("title") or "Без названия")
+        author = _safe_text(it.get("author_name") or it.get("username") or "Автор")
+        lines.append(f'{idx}. "{title}" - {author}')
 
-    # paged top10/50 list
-    items = top_items[:limit]
-    per_page = 10
-    max_page = max((len(items) - 1) // per_page, 0)
-    page = max(0, min(page, max_page))
-    chunk = items[page * per_page : (page + 1) * per_page]
-
-    lines = ["🏆 За всё время", ""]
-    for idx, it in enumerate(chunk, start=page * per_page + 1):
-        title = (it.get("title") or "Без названия").strip()
-        author = (it.get("author_name") or it.get("username") or "").strip()
-        score = _fmt_score(it.get("bayes_score"))
-        votes = int(it.get("ratings_count") or 0)
-        line = f"{idx}. \"{title}\" — {author or 'Автор'} — {score} — v={votes}"
-        lines.append(line)
-
-    kb = build_alltime_paged_kb("alltime:top10" if limit == 10 else "alltime:top50", page, max_page, lang)
+    kb = build_alltime_menu_kb("top10", lang)
     await _show_text(callback, "\n".join(lines), kb)
 
 
@@ -364,6 +683,89 @@ async def _render_hof(callback: CallbackQuery, page: int = 0) -> None:
     await _show_text(callback, "\n".join(lines).strip(), kb)
 
 
+async def _render_alltime_me(callback: CallbackQuery) -> None:
+    user = await get_user_by_tg_id(int(callback.from_user.id)) if callback.from_user else None
+    lang = _lang(user)
+
+    today = get_moscow_today()
+    try:
+        day_key = today.isoformat()
+    except Exception:
+        day_key = str(today)
+
+    items: list[dict] = []
+    cached_file_id: str | None = None
+    try:
+        cached = await get_alltime_cache(day_key, ALLTIME_CACHE_KIND_TOP3)
+    except Exception:
+        cached = None
+
+    if cached:
+        cached_file_id = cached.get("file_id")
+        payload = cached.get("payload") or {}
+        items = payload.get("items") or []
+
+    if len(items) < 3:
+        try:
+            top_items = await get_all_time_top(limit=50, min_votes=ALL_TIME_MIN_VOTES)
+            await update_hall_of_fame_from_top(top_items)
+        except Exception:
+            top_items = []
+
+        if top_items:
+            payload = _alltime_payload_from_items(top_items)
+            items = payload.get("items") or []
+            try:
+                await upsert_alltime_cache(
+                    day_key=day_key,
+                    kind=ALLTIME_CACHE_KIND_TOP3,
+                    file_id=cached_file_id,
+                    payload={"items": items},
+                )
+            except Exception:
+                pass
+
+    if len(items) < 3:
+        text = "🏆 За всё время\n\nПока недостаточно данных для рейтинга."
+        await _show_text(callback, text, build_back_to_results_kb(lang))
+        return
+
+    lines: list[str] = ["🏆 За всё время", ""]
+    for idx, it in enumerate(items[:3], start=1):
+        lines.extend(_format_alltime_item_lines(idx, it))
+
+    lines.append("")
+    lines.append("Твои результаты:")
+
+    user_rank = None
+    user_id = None
+    if user:
+        try:
+            user_id = int(user.get("id"))
+        except Exception:
+            user_id = None
+
+    if user_id is not None:
+        try:
+            user_rank = await get_all_time_user_rank(user_id, min_votes=ALL_TIME_MIN_VOTES)
+        except Exception:
+            user_rank = None
+
+    if not user_rank:
+        lines.append("📍 Пока нет места в рейтинге.")
+    else:
+        title = _safe_text(user_rank.get("title") or "Без названия")
+        rank_num = int(user_rank.get("rank_global") or 0)
+        score = _fmt_score(user_rank.get("bayes_score"))
+        votes = int(user_rank.get("ratings_count") or 0)
+        lines.append(f'📍 "{title}"')
+        lines.append(f"Место: {rank_num}")
+        lines.append(f"-- 🔸 {score} · ⭐️ {votes}")
+
+    kb = build_alltime_menu_kb("me", lang)
+    await _show_text(callback, "\n".join(lines), kb)
+
+
 async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, limit: int = 10) -> list[dict]:
     items = await get_results_items(
         period=PERIOD_DAY,
@@ -405,6 +807,8 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
 
 @router.callback_query(F.data == "results:menu")
 async def results_menu(callback: CallbackQuery, state: FSMContext | None = None):
+    if not await require_user_name(callback):
+        return
     try:
         await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
     except Exception:
@@ -450,26 +854,12 @@ async def results_alltime(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("results:alltime:top10"))
 async def results_alltime_top10(callback: CallbackQuery):
-    parts = (callback.data or "").split(":")
-    page = 0
-    if len(parts) == 4:
-        try:
-            page = int(parts[3])
-        except Exception:
-            page = 0
-    await _render_alltime_top(callback, limit=10, page=page)
+    await _render_alltime_top(callback, limit=10)
 
 
-@router.callback_query(F.data.startswith("results:alltime:top50"))
-async def results_alltime_top50(callback: CallbackQuery):
-    parts = (callback.data or "").split(":")
-    page = 0
-    if len(parts) == 4:
-        try:
-            page = int(parts[3])
-        except Exception:
-            page = 0
-    await _render_alltime_top(callback, limit=50, page=page)
+@router.callback_query(F.data == "results:alltime:me")
+async def results_alltime_me(callback: CallbackQuery):
+    await _render_alltime_me(callback)
 
 
 @router.callback_query(F.data == "results:hof")
