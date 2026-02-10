@@ -13,6 +13,7 @@ async def ensure_giraffe_banner(
     text: str = "🦒",
     reply_markup: ReplyKeyboardMarkup | ReplyKeyboardRemove | InlineKeyboardMarkup | None = None,
     force_new: bool = False,
+    send_if_missing: bool = True,
 ) -> int | None:
     """
     Keep a single giraffe banner per user:
@@ -51,8 +52,12 @@ async def ensure_giraffe_banner(
             elif "message to edit not found" in msg or "message_id invalid" in msg:
                 old_banner = None
             elif "message can't be edited" in msg:
-                # Too old — we'll send a new banner below.
-                pass
+                # Too old. В touch-режиме НЕ создаём новый баннер (иначе он уедет вниз под карточку).
+                if not send_if_missing:
+                    sent_id = int(old_banner)
+                else:
+                    # We'll send a new banner below.
+                    pass
             else:
                 sent_id = int(old_banner)
         except Exception:
@@ -74,8 +79,11 @@ async def ensure_giraffe_banner(
             elif "message to edit not found" in msg or "message_id invalid" in msg:
                 old_banner = None
             elif "message can't be edited" in msg:
-                # Too old — create a fresh banner below.
-                pass
+                if not send_if_missing:
+                    sent_id = int(old_banner)
+                else:
+                    # Too old — create a fresh banner below.
+                    pass
             else:
                 # Unexpected error: keep old banner id to avoid spamming.
                 sent_id = int(old_banner)
@@ -83,16 +91,20 @@ async def ensure_giraffe_banner(
             sent_id = int(old_banner) if old_banner else None
 
     if sent_id is None:
-        sent = None
-        try:
-            sent = await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                disable_notification=True,
-            )
-        except Exception:
+        if not send_if_missing:
+            # Touch mode: не создаём новый баннер вообще.
+            sent_id = int(old_banner) if old_banner is not None else None
+        else:
             sent = None
+            try:
+                sent = await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    disable_notification=True,
+                )
+            except Exception:
+                sent = None
 
         if sent:
             sent_id = int(sent.message_id)

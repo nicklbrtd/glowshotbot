@@ -86,6 +86,7 @@ async def _touch_giraffe_banner(bot, chat_id: int, tg_id: int) -> None:
             text="🦒",
             reply_markup=None,
             force_new=False,
+            send_if_missing=False,
         )
     except Exception:
         pass
