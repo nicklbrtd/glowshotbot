@@ -751,29 +751,38 @@ async def _send_rate_kb_message(
     text: str,
 ) -> None:
     data = await state.get_data()
-    sent_id = None
+    old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            old_msg_id = None
+
+    if data.get("rate_kb_mode") == mode and old_msg_id:
+        return
+
+    banner_id = None
     try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
+        banner_id = await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            chat_id,
             text=text,
             reply_markup=reply_markup,
-            disable_notification=True,
+            force_new=False,
         )
-        sent_id = sent.message_id
     except Exception:
-        sent_id = None
+        banner_id = None
 
-    if sent_id is not None:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=sent_id)
-        except Exception:
-            pass
+    if banner_id is None:
+        return
 
-    data["rate_kb_msg_id"] = None
+    data["rate_kb_msg_id"] = int(banner_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
     try:
-        await set_user_rate_kb_msg_id(chat_id, None)
+        await set_user_rate_kb_msg_id(chat_id, int(banner_id))
     except Exception:
         pass
 
