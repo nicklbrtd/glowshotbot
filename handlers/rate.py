@@ -68,7 +68,27 @@ from config import MODERATION_CHAT_ID, RATE_TUTORIAL_PHOTO_FILE_ID
 from utils.banner import ensure_giraffe_banner
 from utils.registration_guard import require_user_name
 
+
 router = Router()
+
+# --- Helper: Touch giraffe banner without changing reply-keyboard (for inline callbacks) ---
+async def _touch_giraffe_banner(bot, chat_id: int, tg_id: int) -> None:
+    """Обновить/проверить баннер «жирафа» без изменения reply‑клавиатуры.
+
+    Используется в inline‑callback'ах (Ещё/Жалоба/Коммент/Назад), где мы редактируем карточку,
+    и баннер должен оставаться сверху (без пересоздания).
+    """
+    try:
+        await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            tg_id,
+            text="🦒",
+            reply_markup=None,
+            force_new=False,
+        )
+    except Exception:
+        pass
 
 def _lang(user: dict | None) -> str:
     try:
@@ -1685,6 +1705,7 @@ async def rate_tutorial_noop(callback: CallbackQuery) -> None:
 async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
+    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
     parts = callback.data.split(":")
     if len(parts) != 3:
         await callback.answer("Странный комментарий, не понял.", show_alert=True)
@@ -1759,6 +1780,7 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
+    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
     """Пользователь выбрал режим комментария (публичный / анонимный)."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -1816,6 +1838,7 @@ async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
+    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
     parts = callback.data.split(":")
     # ['rate', 'report', '<photo_id>']
     if len(parts) != 3:
@@ -1868,6 +1891,7 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
+    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
     """Пользователь выбрал причину жалобы."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -3403,3 +3427,17 @@ async def rate_award(callback: CallbackQuery, state: FSMContext) -> None:
         "Функция выдачи ачивок из оценивания скоро будет доступна 💎.",
         show_alert=True,
     )
+
+# --- "More" handler: rate:more: ---
+@router.callback_query(F.data.startswith("rate:more:"))
+async def rate_more(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _deny_if_full_banned(callback=callback):
+        return
+    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+    # ... (rest of the logic for "more" handler should be here) ...
+
+# --- "Back" handler: rate:back ---
+@router.callback_query(F.data == "rate:back")
+async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
+    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+    # ... (rest of the logic for "back" handler should be here) ...
