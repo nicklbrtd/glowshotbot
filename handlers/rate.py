@@ -1624,9 +1624,9 @@ async def show_next_photo_for_rating(
             return
         bot = callback.message.bot
         chat_id = callback.message.chat.id
-        msg = None if replace_message else callback.message
-        msg_id = None if replace_message else callback.message.message_id
-        old_msg = callback.message if replace_message else None
+        msg = None
+        msg_id = None
+        old_msg = callback.message
         viewer_tg_id = int(callback.from_user.id)
     else:
         if await _deny_if_full_banned(message=callback):
@@ -1644,6 +1644,8 @@ async def show_next_photo_for_rating(
                 if msg_id is None:
                     ui_state = await get_user_ui_state(viewer_tg_id)
                     msg_id = ui_state.get("rate_msg_id") or ui_state.get("screen_msg_id")
+                if msg_id:
+                    old_msg = msg_id
             except Exception:
                 msg_id = None
 
@@ -1678,8 +1680,8 @@ async def show_next_photo_for_rating(
     await _apply_rating_card(
         bot=bot,
         chat_id=chat_id,
-        message=msg,
-        message_id=msg_id,
+        message=None,
+        message_id=None,
         card=card,
         state=state,
     )
@@ -1692,7 +1694,10 @@ async def show_next_photo_for_rating(
 
     if old_msg is not None:
         try:
-            await old_msg.delete()
+            if hasattr(old_msg, "delete"):
+                await old_msg.delete()
+            else:
+                await bot.delete_message(chat_id=chat_id, message_id=int(old_msg))
         except Exception:
             pass
 
