@@ -750,13 +750,36 @@ async def _send_rate_kb_message(
     mode: str,
     text: str,
 ) -> None:
-    # Reply‑клавиатура отправляется вместе с карточкой фото, тут только фиксируем состояние.
     data = await state.get_data()
-    data["rate_kb_msg_id"] = None
+    old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            old_msg_id = None
+
+    if old_msg_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
+        except Exception:
+            pass
+
+    try:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_notification=True,
+        )
+    except Exception:
+        return
+
+    data["rate_kb_msg_id"] = int(sent.message_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
     try:
-        await set_user_rate_kb_msg_id(chat_id, None)
+        await set_user_rate_kb_msg_id(chat_id, int(sent.message_id))
     except Exception:
         pass
 
