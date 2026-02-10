@@ -1,5 +1,6 @@
 from aiogram import Bot
 from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest
 
 from database import get_user_ui_state, set_user_banner_msg_id
 
@@ -18,6 +19,13 @@ async def ensure_giraffe_banner(
     try:
         ui_state = await get_user_ui_state(int(tg_id))
         banner_id = ui_state.get("banner_msg_id")
+        if banner_id is None:
+            banner_id = ui_state.get("rate_kb_msg_id")
+            if banner_id:
+                try:
+                    await set_user_banner_msg_id(int(tg_id), int(banner_id))
+                except Exception:
+                    pass
     except Exception:
         banner_id = None
 
@@ -30,6 +38,19 @@ async def ensure_giraffe_banner(
                 reply_markup=reply_markup,
             )
             return int(banner_id)
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if (
+                "message is not modified" in msg
+                or "message can't be edited" in msg
+                or "reply markup" in msg
+                or "inline keyboard" in msg
+            ):
+                return int(banner_id)
+            if "message to edit not found" in msg or "message_id invalid" in msg:
+                banner_id = None
+            else:
+                return int(banner_id)
         except Exception:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=int(banner_id))

@@ -725,6 +725,8 @@ def _build_rate_tutorial_reply_keyboard() -> ReplyKeyboardMarkup:
 async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
     """Держим одно сообщение с клавиатурой оценок (редактируем, не пересылаем)."""
     data = await state.get_data()
+    if data.get("rate_kb_mode") == "rate":
+        return
     old_msg_id = data.get("rate_kb_msg_id")
     if old_msg_id is None:
         try:
@@ -747,6 +749,7 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
 
     if banner_id:
         data["rate_kb_msg_id"] = int(banner_id)
+        data["rate_kb_mode"] = "rate"
         await state.set_data(data)
         try:
             await set_user_rate_kb_msg_id(chat_id, int(banner_id))
@@ -763,6 +766,8 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
 async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
     """Держим одно сообщение с клавиатурой только «Дальше» (редактируем, не пересылаем)."""
     data = await state.get_data()
+    if data.get("rate_kb_mode") == "next":
+        return
     old_msg_id = data.get("rate_kb_msg_id")
     if old_msg_id is None:
         try:
@@ -785,6 +790,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
 
     if banner_id:
         data["rate_kb_msg_id"] = int(banner_id)
+        data["rate_kb_mode"] = "next"
         await state.set_data(data)
         try:
             await set_user_rate_kb_msg_id(chat_id, int(banner_id))
@@ -801,6 +807,8 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
 async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
     """Сообщение с одной reply‑кнопкой «Все понятно!» (редактируем, не пересылаем)."""
     data = await state.get_data()
+    if data.get("rate_kb_mode") == "tutorial":
+        return
     old_msg_id = data.get("rate_kb_msg_id")
     if old_msg_id is None:
         try:
@@ -823,6 +831,7 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext) ->
 
     if banner_id:
         data["rate_kb_msg_id"] = int(banner_id)
+        data["rate_kb_mode"] = "tutorial"
         await state.set_data(data)
         try:
             await set_user_rate_kb_msg_id(chat_id, int(banner_id))
@@ -867,6 +876,7 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
         except Exception:
             pass
     data["rate_kb_msg_id"] = None
+    data["rate_kb_mode"] = "none"
     await state.set_data(data)
     try:
         await set_user_rate_kb_msg_id(chat_id, None)
@@ -952,6 +962,8 @@ async def _show_rate_block_banner(
 ) -> None:
     """Показать блокировку оценок через баннер и скрыть reply-клавиатуру."""
     data = await state.get_data()
+    if data.get("rate_kb_mode") == "block":
+        return
     old_msg_id = data.get("rate_kb_msg_id")
     if old_msg_id is None:
         try:
@@ -975,6 +987,7 @@ async def _show_rate_block_banner(
 
     if banner_id:
         data["rate_kb_msg_id"] = int(banner_id)
+        data["rate_kb_mode"] = "block"
         await state.set_data(data)
         try:
             await set_user_rate_kb_msg_id(chat_id, int(banner_id))
