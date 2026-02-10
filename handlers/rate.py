@@ -726,7 +726,7 @@ def _rate_kb_hint(lang: str, mode: str) -> str:
         return t("rate.kb.next", lang)
     if mode == "tutorial":
         return t("rate.kb.tutorial", lang)
-    return "🦒"
+    return t("rate.kb.hint", lang)
 
 
 async def _send_rate_kb_message(
@@ -740,6 +740,12 @@ async def _send_rate_kb_message(
 ) -> None:
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
+    if old_msg_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_msg_id = ui_state.get("rate_kb_msg_id")
+        except Exception:
+            old_msg_id = None
 
     if data.get("rate_kb_mode") == mode and old_msg_id:
         return
@@ -808,18 +814,27 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext, la
 async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
     data = await state.get_data()
     msg_id = data.get("rate_kb_msg_id")
+    banner_id = None
     if msg_id is None:
         try:
             ui_state = await get_user_ui_state(chat_id)
             msg_id = ui_state.get("rate_kb_msg_id")
+            banner_id = ui_state.get("banner_msg_id")
         except Exception:
             msg_id = None
-    banner_id = None
+    if banner_id is None:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            banner_id = ui_state.get("banner_msg_id")
+        except Exception:
+            banner_id = None
+    data["rate_kb_msg_id"] = None
+    data["rate_kb_mode"] = "none"
+    await state.set_data(data)
     try:
-        ui_state = await get_user_ui_state(chat_id)
-        banner_id = ui_state.get("banner_msg_id")
+        await set_user_rate_kb_msg_id(chat_id, None)
     except Exception:
-        banner_id = None
+        pass
     if banner_id:
         try:
             await bot.edit_message_text(
@@ -828,20 +843,14 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
                 text="🦒",
                 reply_markup=ReplyKeyboardRemove(),
             )
+            return
         except Exception:
             pass
-    elif msg_id:
+    if msg_id:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
         except Exception:
             pass
-    data["rate_kb_msg_id"] = None
-    data["rate_kb_mode"] = "none"
-    await state.set_data(data)
-    try:
-        await set_user_rate_kb_msg_id(chat_id, None)
-    except Exception:
-        pass
 
 
 async def _clear_rate_comment_draft(state: FSMContext) -> None:
