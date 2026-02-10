@@ -17,7 +17,7 @@ import database as db
 from keyboards.common import build_main_menu
 from utils.antispam import should_throttle
 from handlers.upload import my_photo_menu
-from handlers.rate import rate_root, _delete_rate_reply_keyboard
+from handlers.rate import rate_root
 from handlers.profile import profile_menu
 from handlers.results import results_menu
 from handlers.premium import maybe_send_premium_expiry_warning
@@ -192,6 +192,8 @@ async def _send_fresh_menu(
             sent_msg_id = sent.message_id
 
         data["menu_msg_id"] = sent_msg_id
+        data["rate_kb_msg_id"] = None
+        data["rate_kb_mode"] = "none"
         await state.set_data(data)
         try:
             await db.set_user_menu_msg_id(user_id, sent_msg_id)
@@ -201,10 +203,12 @@ async def _send_fresh_menu(
 
         if prev_menu_id and prev_menu_id != sent_msg_id:
             await _delete_message_safely(bot, chat_id, prev_menu_id)
-        try:
-            await _delete_rate_reply_keyboard(bot, chat_id, state)
-        except Exception:
-            pass
+        if prev_rate_kb_id and prev_rate_kb_id != sent_msg_id:
+            await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
+            try:
+                await db.set_user_rate_kb_msg_id(user_id, None)
+            except Exception:
+                pass
         if prev_screen_id and prev_screen_id not in (sent_msg_id, prev_menu_id, prev_rate_kb_id):
             await _delete_message_safely(bot, chat_id, prev_screen_id)
         return
@@ -228,6 +232,8 @@ async def _send_fresh_menu(
     )
 
     data["menu_msg_id"] = sent.message_id
+    data["rate_kb_msg_id"] = None
+    data["rate_kb_mode"] = "none"
     await state.set_data(data)
     try:
         await db.set_user_menu_msg_id(user_id, sent.message_id)
@@ -237,10 +243,12 @@ async def _send_fresh_menu(
 
     if prev_menu_id and prev_menu_id != sent.message_id:
         await _delete_message_safely(bot, chat_id, prev_menu_id)
-    try:
-        await _delete_rate_reply_keyboard(bot, chat_id, state)
-    except Exception:
-        pass
+    if prev_rate_kb_id and prev_rate_kb_id != sent.message_id:
+        await _delete_message_safely(bot, chat_id, prev_rate_kb_id)
+        try:
+            await db.set_user_rate_kb_msg_id(user_id, None)
+        except Exception:
+            pass
     if prev_screen_id and prev_screen_id not in (sent.message_id, prev_menu_id, prev_rate_kb_id):
         await _delete_message_safely(bot, chat_id, prev_screen_id)
 

@@ -3358,6 +3358,10 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
         except Exception:
             pass
         return
+    try:
+        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
+    except Exception:
+        pass
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None or not (user.get("name") or "").strip():
         if not await require_user_name(callback):
