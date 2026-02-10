@@ -726,7 +726,7 @@ def _rate_kb_hint(lang: str, mode: str) -> str:
         return t("rate.kb.next", lang)
     if mode == "tutorial":
         return t("rate.kb.tutorial", lang)
-    return t("rate.kb.hint", lang)
+    return "🦒"
 
 
 async def _send_rate_kb_message(
@@ -740,39 +740,33 @@ async def _send_rate_kb_message(
 ) -> None:
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
-    if old_msg_id is None:
-        try:
-            ui_state = await get_user_ui_state(chat_id)
-            old_msg_id = ui_state.get("rate_kb_msg_id")
-        except Exception:
-            old_msg_id = None
 
     if data.get("rate_kb_mode") == mode and old_msg_id:
         return
 
+    banner_id: int | None = None
     try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
+        banner_id = await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            chat_id,
             text=text,
             reply_markup=reply_markup,
-            disable_notification=True,
+            force_new=False,
         )
     except Exception:
+        banner_id = None
+
+    if banner_id is None:
         return
 
-    data["rate_kb_msg_id"] = sent.message_id
+    data["rate_kb_msg_id"] = int(banner_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
     try:
-        await set_user_rate_kb_msg_id(chat_id, int(sent.message_id))
+        await set_user_rate_kb_msg_id(chat_id, int(banner_id))
     except Exception:
         pass
-
-    if old_msg_id and int(old_msg_id) != int(sent.message_id):
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
-        except Exception:
-            pass
 
 
 async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
@@ -783,7 +777,7 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
         state,
         reply_markup=_build_rate_reply_keyboard(lang),
         mode="rate",
-        text=_rate_kb_hint(lang, "rate"),
+        text="🦒",
     )
 
 
@@ -795,7 +789,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
         state,
         reply_markup=_build_next_only_reply_keyboard(lang),
         mode="next",
-        text=_rate_kb_hint(lang, "next"),
+        text="🦒",
     )
 
 
@@ -807,7 +801,7 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext, la
         state,
         reply_markup=_build_rate_tutorial_reply_keyboard(),
         mode="tutorial",
-        text=_rate_kb_hint(lang, "tutorial"),
+        text="🦒",
     )
 
 
@@ -820,24 +814,27 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
             msg_id = ui_state.get("rate_kb_msg_id")
         except Exception:
             msg_id = None
-    if msg_id:
+    banner_id = None
+    try:
+        ui_state = await get_user_ui_state(chat_id)
+        banner_id = ui_state.get("banner_msg_id")
+    except Exception:
+        banner_id = None
+    if banner_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=int(banner_id),
+                text="🦒",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+        except Exception:
+            pass
+    elif msg_id:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
         except Exception:
             pass
-    try:
-        tmp = await bot.send_message(
-            chat_id=chat_id,
-            text=".",
-            reply_markup=ReplyKeyboardRemove(),
-            disable_notification=True,
-        )
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
-        except Exception:
-            pass
-    except Exception:
-        pass
     data["rate_kb_msg_id"] = None
     data["rate_kb_mode"] = "none"
     await state.set_data(data)
@@ -942,7 +939,8 @@ async def _show_rate_block_banner(
             chat_id,
             chat_id,
             text=f"🦒\n\n{text}",
-            force_new=False,
+            reply_markup=ReplyKeyboardRemove(),
+            force_new=True,
         )
     except Exception:
         banner_id = None

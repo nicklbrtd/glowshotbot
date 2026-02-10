@@ -25,9 +25,6 @@ async def ensure_giraffe_banner(
     except Exception:
         banner_id = None
 
-    if reply_markup is not None and not isinstance(reply_markup, InlineKeyboardMarkup):
-        reply_markup = None
-
     if banner_id and not force_new:
         try:
             await bot.edit_message_text(
