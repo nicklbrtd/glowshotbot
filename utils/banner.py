@@ -1,8 +1,13 @@
+import logging
+
 from aiogram import Bot
 from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 
 from database import get_user_ui_state, set_user_banner_msg_id
+
+
+logger = logging.getLogger(__name__)
 
 
 async def ensure_giraffe_banner(
@@ -36,6 +41,7 @@ async def ensure_giraffe_banner(
     # Если reply_markup не задан, не нужно спамить новыми баннерами.
     # Иначе можно случайно удалить предыдущий баннер, который держал ReplyKeyboard (оценки).
     can_edit_plain = reply_markup is None and not force_new
+    touch_mode = reply_markup is None and not send_if_missing
 
     if can_edit_plain and old_banner:
         try:
@@ -92,11 +98,24 @@ async def ensure_giraffe_banner(
 
     if sent_id is None:
         # В touch-режиме мы НЕ создаём новый баннер. Просто возвращаем старый id (если есть).
+        if touch_mode:
+            return int(old_banner) if old_banner is not None else None
+
         if not send_if_missing:
             return int(old_banner) if old_banner is not None else None
 
         sent = None
         try:
+            logger.info(
+                "giraffe_banner.send_message",
+                extra={
+                    "chat_id": chat_id,
+                    "tg_id": tg_id,
+                    "force_new": force_new,
+                    "reply_markup": type(reply_markup).__name__ if reply_markup else None,
+                    "send_if_missing": send_if_missing,
+                },
+            )
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=text,

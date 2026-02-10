@@ -1,3 +1,5 @@
+import logging
+
 from aiogram import Router, F
 from aiogram.dispatcher.event.bases import SkipHandler
 import traceback
@@ -70,6 +72,7 @@ from utils.registration_guard import require_user_name
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 # --- Helper: Touch giraffe banner without changing reply-keyboard (for inline callbacks) ---
 async def _touch_giraffe_banner(bot, chat_id: int, tg_id: int) -> None:
@@ -88,8 +91,15 @@ async def _touch_giraffe_banner(bot, chat_id: int, tg_id: int) -> None:
             force_new=False,
             send_if_missing=False,
         )
-    except Exception:
-        pass
+        logger.info(
+            "rate.touch_giraffe_banner",
+            extra={"chat_id": chat_id, "tg_id": tg_id},
+        )
+    except Exception as e:
+        logger.info(
+            "rate.touch_giraffe_banner.error",
+            extra={"chat_id": chat_id, "tg_id": tg_id, "error": str(e)},
+        )
 
 def _lang(user: dict | None) -> str:
     try:
@@ -1706,7 +1716,20 @@ async def rate_tutorial_noop(callback: CallbackQuery) -> None:
 async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
-    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.comment",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
     parts = callback.data.split(":")
     if len(parts) != 3:
         await callback.answer("Странный комментарий, не понял.", show_alert=True)
@@ -1781,7 +1804,20 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
-    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.comment_mode",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
     """Пользователь выбрал режим комментария (публичный / анонимный)."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -1839,7 +1875,20 @@ async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
-    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.report",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
     parts = callback.data.split(":")
     # ['rate', 'report', '<photo_id>']
     if len(parts) != 3:
@@ -1892,7 +1941,20 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
 async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None:
     if await _deny_if_full_banned(callback=callback):
         return
-    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.report_reason",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
     """Пользователь выбрал причину жалобы."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -3155,6 +3217,20 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:more:"))
 async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.more",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
     if should_throttle(callback.from_user.id, "rate:more", 0.5):
         try:
             await callback.answer()
@@ -3193,19 +3269,6 @@ async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_data(data)
     except Exception:
         pass
-
-    try:
-        lang = _lang(await get_user_by_tg_id(callback.from_user.id))
-        await _send_reply_keyboard_for_photo(
-            callback.message.bot,
-            callback.message.chat.id,
-            state,
-            lang,
-            is_rateable,
-        )
-    except Exception:
-        if not is_rateable:
-            await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
 
     await callback.answer("Ок")
 
@@ -3299,6 +3362,20 @@ async def rate_start(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "rate:back")
 async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.back",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
     if should_throttle(callback.from_user.id, "rate:back", 0.6):
         try:
             await callback.answer()
@@ -3324,19 +3401,6 @@ async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
         reply_markup=kb,
         show_caption_above_media=True,
     )
-
-    try:
-        lang = _lang(await get_user_by_tg_id(callback.from_user.id))
-        await _send_reply_keyboard_for_photo(
-            callback.message.bot,
-            callback.message.chat.id,
-            state,
-            lang,
-            is_rateable,
-        )
-    except Exception:
-        if not is_rateable:
-            await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
 
     try:
         await callback.answer()
