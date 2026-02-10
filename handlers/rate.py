@@ -676,9 +676,8 @@ def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     """Reply‑клавиатура для оценок 1–10."""
     row1 = [KeyboardButton(text=str(i)) for i in range(1, 6)]
     row2 = [KeyboardButton(text=str(i)) for i in range(6, 11)]
-    row3 = [KeyboardButton(text=t("rate.btn.next", lang))]
     return ReplyKeyboardMarkup(
-        keyboard=[row1, row2, row3],
+        keyboard=[row1, row2],
         resize_keyboard=True,
         one_time_keyboard=False,
         selective=True,
@@ -693,6 +692,18 @@ def _build_next_only_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
         one_time_keyboard=True,
         selective=True,
     )
+
+async def _send_reply_keyboard_for_photo(
+    bot,
+    chat_id: int,
+    state: FSMContext,
+    lang: str,
+    is_rateable: bool,
+) -> None:
+    if is_rateable:
+        await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+    else:
+        await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
 
 
 RATE_TUTORIAL_OK_TEXT = "Все понятно!"
@@ -930,7 +941,13 @@ async def _sync_rate_state_for_card(
         pass
 
     if card.photo:
-        await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+        await _send_reply_keyboard_for_photo(
+            bot,
+            chat_id,
+            state,
+            lang,
+            bool(card.photo.get("ratings_enabled", True)),
+        )
     else:
         await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -1634,6 +1651,8 @@ async def show_next_photo_for_rating(
     lang = _lang(viewer)
     card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id)
 
+    is_rateable = bool(card.photo and card.photo.get("ratings_enabled", True))
+
     if state is not None:
         data = await state.get_data()
         data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
@@ -1644,11 +1663,11 @@ async def show_next_photo_for_rating(
         need_kb = False
         try:
             data = await state.get_data()
-            need_kb = data.get("rate_kb_mode") != "rate" or not data.get("rate_kb_msg_id")
+            need_kb = data.get("rate_kb_mode") not in ("rate", "next") or not data.get("rate_kb_msg_id")
         except Exception:
             need_kb = True
         if need_kb:
-            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+            await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
             # ensure banner stays above the next photo
             msg = None
             msg_id = None
@@ -1670,7 +1689,7 @@ async def show_next_photo_for_rating(
 
     if state is not None:
         if card.photo:
-            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+            await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
         else:
             await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -2099,7 +2118,13 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
         # клавиатура оценок должна быть в чате
         try:
-            await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, _lang(user_for_rate))
+            await _send_reply_keyboard_for_photo(
+                message.bot,
+                rate_chat_id,
+                state,
+                _lang(user_for_rate),
+                True,
+            )
         except Exception:
             pass
         return
@@ -2138,7 +2163,13 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 except Exception:
                     pass
             try:
-                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, _lang(user_for_rate))
+                await _send_reply_keyboard_for_photo(
+                    message.bot,
+                    rate_chat_id,
+                    state,
+                    _lang(user_for_rate),
+                    bool(photo_for_caption and photo_for_caption.get("ratings_enabled", True)),
+                )
             except Exception:
                 pass
             return
@@ -2255,7 +2286,13 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 pass
 
         try:
-            await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+            await _send_reply_keyboard_for_photo(
+                message.bot,
+                rate_chat_id,
+                state,
+                rater_lang,
+                bool(photo_for_caption and photo_for_caption.get("ratings_enabled", True)),
+            )
         except Exception:
             pass
     except TelegramBadRequest:
@@ -3244,18 +3281,18 @@ async def rate_more_toggle(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
 
-    if is_rateable:
-        try:
-            await _send_rate_reply_keyboard(
-                callback.message.bot,
-                callback.message.chat.id,
-                state,
-                _lang(await get_user_by_tg_id(callback.from_user.id)),
-            )
-        except Exception:
-            pass
-    else:
-        await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
+    try:
+        lang = _lang(await get_user_by_tg_id(callback.from_user.id))
+        await _send_reply_keyboard_for_photo(
+            callback.message.bot,
+            callback.message.chat.id,
+            state,
+            lang,
+            is_rateable,
+        )
+    except Exception:
+        if not is_rateable:
+            await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
 
     await callback.answer("Ок")
 
@@ -3375,18 +3412,18 @@ async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
         show_caption_above_media=True,
     )
 
-    if is_rateable:
-        try:
-            await _send_rate_reply_keyboard(
-                callback.message.bot,
-                callback.message.chat.id,
-                state,
-                _lang(await get_user_by_tg_id(callback.from_user.id)),
-            )
-        except Exception:
-            pass
-    else:
-        await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
+    try:
+        lang = _lang(await get_user_by_tg_id(callback.from_user.id))
+        await _send_reply_keyboard_for_photo(
+            callback.message.bot,
+            callback.message.chat.id,
+            state,
+            lang,
+            is_rateable,
+        )
+    except Exception:
+        if not is_rateable:
+            await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
 
     try:
         await callback.answer()
