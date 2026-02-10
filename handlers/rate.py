@@ -940,7 +940,7 @@ async def _show_rate_block_banner(
             chat_id,
             text=f"🦒\n\n{text}",
             reply_markup=ReplyKeyboardRemove(),
-            force_new=True,
+            force_new=False,
         )
     except Exception:
         banner_id = None

@@ -43,10 +43,7 @@ async def ensure_giraffe_banner(
             else:
                 return int(banner_id)
         except Exception:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=int(banner_id))
-            except Exception:
-                pass
+            return int(banner_id)
     elif banner_id and force_new:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=int(banner_id))
