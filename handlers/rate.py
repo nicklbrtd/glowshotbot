@@ -862,6 +862,8 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
     await state.set_data(data)
     try:
         await set_user_rate_kb_msg_id(chat_id, None)
+        from database import set_user_banner_msg_id
+        await set_user_banner_msg_id(chat_id, None)
     except Exception:
         pass
     try:
@@ -1071,6 +1073,7 @@ async def _apply_rating_card(
     message_id: int | None,
     card: RatingCard,
     state: FSMContext | None = None,
+    reply_kb: ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
 ) -> None:
     """Всегда отправляет новую карточку и удаляет предыдущую, без редактирования."""
     prev_id = None
@@ -1086,7 +1089,7 @@ async def _apply_rating_card(
                 chat_id=chat_id,
                 photo=card.photo_file_id,
                 caption=card.caption,
-                reply_markup=card.keyboard,
+                reply_markup=reply_kb or card.keyboard,
                 parse_mode="HTML",
                 disable_notification=True,
                 show_caption_above_media=True,
@@ -1095,7 +1098,7 @@ async def _apply_rating_card(
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=card.caption,
-                reply_markup=card.keyboard,
+                reply_markup=reply_kb or card.keyboard,
                 parse_mode="HTML",
                 disable_notification=True,
             )
@@ -1540,17 +1543,43 @@ async def show_next_photo_for_rating(
         data["rate_show_details"] = False
         await state.set_data(data)
 
-    # Показываем/обновляем клавиатуру ДО отправки фото, чтобы жираф оставался сверху
-    if state is not None and card.photo:
+    # Показываем/обновляем reply‑клавиатуру ДО отправки карточки, чтобы «жираф» оставался сверху.
+    # ВАЖНО: даже если `state` не передали (None), мы всё равно обязаны восстановить reply‑клавиатуру,
+    # иначе после любого ReplyKeyboardRemove кнопки 1–10 «пропадут».
+    try:
+        if card.photo:
+            if state is not None:
+                await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
+            else:
+                # Без FSM: просто перерисовываем баннер с нужной reply‑клавиатурой
+                reply_kb = _build_rate_reply_keyboard(lang) if is_rateable else _build_next_only_reply_keyboard(lang)
+                await ensure_giraffe_banner(
+                    bot,
+                    chat_id,
+                    viewer_tg_id,
+                    text="🦒",
+                    reply_markup=reply_kb,
+                    force_new=False,
+                )
+        else:
+            # Нет фото — скрываем reply‑клавиатуру
+            if state is not None:
+                await _delete_rate_reply_keyboard(bot, chat_id, state)
+            else:
+                await ensure_giraffe_banner(
+                    bot,
+                    chat_id,
+                    viewer_tg_id,
+                    text="🦒",
+                    reply_markup=ReplyKeyboardRemove(),
+                    force_new=False,
+                )
+    except Exception:
+        # Фоллбек: хотя бы держим баннер
         try:
-            await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
+            await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=False)
         except Exception:
             pass
-
-    try:
-        await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=False)
-    except Exception:
-        pass
 
     await _apply_rating_card(
         bot=bot,
@@ -1977,6 +2006,10 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 message_id=rate_msg_id,
                 card=card,
             )
+            try:
+                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+            except Exception:
+                pass
         else:
             try:
                 await message.bot.edit_message_text(
@@ -2126,6 +2159,14 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 message_id=rate_msg_id,
                 card=card,
             )
+            try:
+                # После отправки комментария возвращаем клавиатуру оценок (если фото всё ещё для оценивания)
+                if is_rateable:
+                    await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+                else:
+                    await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+            except Exception:
+                pass
         else:
             try:
                 await message.bot.edit_message_text(
