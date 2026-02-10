@@ -19,8 +19,10 @@ async def ensure_giraffe_banner(
     - try to update the existing one when possible;
     - if it is too old or missing, send a new banner and delete the stale one;
     - always remember the latest banner id.
-    Editing Telegram messages is only allowed with inline keyboards, so for
-    reply keyboards we always send a fresh banner.
+    For InlineKeyboardMarkup we edit the existing banner when possible.
+    For ReplyKeyboardMarkup/Remove we send a banner message to apply the keyboard.
+    When reply_markup is None we prefer editing the existing banner to avoid deleting
+    a previous banner that could be anchoring a reply keyboard.
     """
     try:
         ui_state = await get_user_ui_state(int(tg_id))
@@ -30,6 +32,31 @@ async def ensure_giraffe_banner(
 
     sent_id: int | None = None
     can_edit_inline = isinstance(reply_markup, InlineKeyboardMarkup) and not force_new
+    # Если reply_markup не задан, не нужно спамить новыми баннерами.
+    # Иначе можно случайно удалить предыдущий баннер, который держал ReplyKeyboard (оценки).
+    can_edit_plain = reply_markup is None and not force_new
+
+    if can_edit_plain and old_banner:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=int(old_banner),
+                text=text,
+            )
+            sent_id = int(old_banner)
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if "message is not modified" in msg:
+                sent_id = int(old_banner)
+            elif "message to edit not found" in msg or "message_id invalid" in msg:
+                old_banner = None
+            elif "message can't be edited" in msg:
+                # Too old — we'll send a new banner below.
+                pass
+            else:
+                sent_id = int(old_banner)
+        except Exception:
+            sent_id = int(old_banner)
 
     if can_edit_inline and old_banner:
         try:
@@ -69,7 +96,13 @@ async def ensure_giraffe_banner(
 
         if sent:
             sent_id = int(sent.message_id)
-            if old_banner and old_banner != sent_id:
+            # Удаляем старый баннер только когда мы действительно отправили новый с reply_markup.
+            # Если reply_markup=None, старый мог быть «якорем» ReplyKeyboard, и его удаление ломает кнопки.
+            if (
+                old_banner
+                and old_banner != sent_id
+                and reply_markup is not None
+            ):
                 try:
                     await bot.delete_message(chat_id=chat_id, message_id=int(old_banner))
                 except Exception:
