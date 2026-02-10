@@ -700,15 +700,10 @@ async def _send_reply_keyboard_for_photo(
     lang: str,
     is_rateable: bool,
 ) -> None:
-    # Reply keyboards теперь отправляем вместе с карточкой фото, отдельно не шлём.
-    try:
-        data = await state.get_data()
-        data["rate_kb_msg_id"] = None
-        data["rate_kb_mode"] = "none"
-        await state.set_data(data)
-        await set_user_rate_kb_msg_id(chat_id, None)
-    except Exception:
-        pass
+    if is_rateable:
+        await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+    else:
+        await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
 
 
 RATE_TUTORIAL_OK_TEXT = "Все понятно!"
@@ -1033,7 +1028,6 @@ async def _apply_rating_card(
     message_id: int | None,
     card: RatingCard,
     state: FSMContext | None = None,
-    reply_kb: ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
 ) -> None:
     """Аккуратно применяет карточку оценивания к существующему сообщению или отправляет новое при ошибке."""
     if card.photo_file_id is None:
@@ -1103,7 +1097,7 @@ async def _apply_rating_card(
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=card.caption,
-                reply_markup=reply_kb,
+                reply_markup=card.keyboard,
                 parse_mode="HTML",
                 disable_notification=True,
             )
@@ -1184,7 +1178,7 @@ async def _apply_rating_card(
             chat_id=chat_id,
             photo=card.photo_file_id,
             caption=card.caption,
-            reply_markup=reply_kb,
+            reply_markup=card.keyboard,
             parse_mode="HTML",
             disable_notification=True,
             show_caption_above_media=True,
@@ -1207,7 +1201,7 @@ async def _apply_rating_card(
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=card.caption,
-                reply_markup=reply_kb,
+                reply_markup=card.keyboard,
                 parse_mode="HTML",
                 disable_notification=True,
             )
@@ -1654,11 +1648,13 @@ async def show_next_photo_for_rating(
         message_id=None,
         card=card,
         state=state,
-        reply_kb=reply_kb,
     )
 
-    if state is not None and not card.photo:
-        await _delete_rate_reply_keyboard(bot, chat_id, state)
+    if state is not None:
+        if card.photo:
+            await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
+        else:
+            await _delete_rate_reply_keyboard(bot, chat_id, state)
 
     if old_msg is not None:
         try:
@@ -1698,8 +1694,6 @@ async def _show_rate_tutorial(callback: CallbackQuery | Message, state: FSMConte
     except Exception:
         pass
 
-    await _send_tutorial_reply_keyboard(bot, chat_id, state, _lang(await get_user_by_tg_id(user_id)))
-
     try:
         sent = await bot.send_photo(
             chat_id=chat_id,
@@ -1724,6 +1718,17 @@ async def _show_rate_tutorial(callback: CallbackQuery | Message, state: FSMConte
     await state.set_data(data)
     try:
         await set_user_screen_msg_id(user_id, sent.message_id)
+    except Exception:
+        pass
+
+    # Показать reply‑клавиатуру «Все понятно!»
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=_rate_kb_hint(_lang(await get_user_by_tg_id(user_id)), "tutorial"),
+            reply_markup=_build_rate_tutorial_reply_keyboard(),
+            disable_notification=True,
+        )
     except Exception:
         pass
 
@@ -2072,7 +2077,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 message=None,
                 message_id=rate_msg_id,
                 card=card,
-                reply_kb=_build_rate_reply_keyboard(rater_lang),
             )
         else:
             try:
@@ -2110,7 +2114,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     message=None,
                     message_id=rate_msg_id,
                     card=card,
-                    reply_kb=_build_next_only_reply_keyboard(rater_lang),
                 )
             else:
                 try:
@@ -2223,7 +2226,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 message=None,
                 message_id=rate_msg_id,
                 card=card,
-                reply_kb=_build_rate_reply_keyboard(rater_lang),
             )
         else:
             try:
@@ -2529,14 +2531,12 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
     card = await _build_next_rating_card(int(user["id"]), viewer_tg_id=int(message.from_user.id))
     lang = _lang(user)
     is_rateable = bool(card.photo and card.photo.get("ratings_enabled", True))
-    reply_kb = _build_rate_reply_keyboard(lang) if is_rateable else _build_next_only_reply_keyboard(lang)
     await _apply_rating_card(
         bot=message.bot,
         chat_id=report_chat_id,
         message=None,
         message_id=report_msg_id,
         card=card,
-        reply_kb=reply_kb,
     )
 
     await _sync_rate_state_for_card(
