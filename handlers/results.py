@@ -1023,7 +1023,7 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
             callback.message.bot,
             callback.message.chat.id,
             callback.from_user.id,
-            force_new=True,
+            force_new=False,
         )
     except Exception:
         pass

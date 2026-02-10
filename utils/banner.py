@@ -26,13 +26,10 @@ async def ensure_giraffe_banner(
         banner_id = None
         kb_id = None
 
-    if reply_is_reply_kb:
-        force_new = True
-
     if banner_id and kb_id and int(banner_id) == int(kb_id) and not force_new:
         return int(banner_id)
 
-    if banner_id and not force_new:
+    if banner_id:
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,
@@ -51,11 +48,6 @@ async def ensure_giraffe_banner(
                 return int(banner_id)
         except Exception:
             return int(banner_id)
-    elif banner_id and force_new:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=int(banner_id))
-        except Exception:
-            pass
 
     try:
         sent = await bot.send_message(

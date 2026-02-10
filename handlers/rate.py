@@ -679,7 +679,7 @@ def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[row1, row2],
         resize_keyboard=True,
-        one_time_keyboard=False,
+        one_time_keyboard=True,
         selective=True,
     )
 
@@ -762,27 +762,40 @@ async def _send_rate_kb_message(
     if data.get("rate_kb_mode") == mode and old_msg_id:
         return
 
-    banner_id: int | None = None
+    banner_id = None
     try:
-        banner_id = await ensure_giraffe_banner(
-            bot,
-            chat_id,
-            chat_id,
-            text=text,
-            reply_markup=reply_markup,
-            force_new=True,
-        )
+        ui_state = await get_user_ui_state(chat_id)
+        banner_id = ui_state.get("banner_msg_id")
     except Exception:
         banner_id = None
 
-    if banner_id is None:
+    if old_msg_id:
+        try:
+            if banner_id is None or int(old_msg_id) != int(banner_id):
+                await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
+        except Exception:
+            pass
+
+    kb_msg_id = None
+    try:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_notification=True,
+        )
+        kb_msg_id = sent.message_id
+    except Exception:
+        kb_msg_id = None
+
+    if kb_msg_id is None:
         return
 
-    data["rate_kb_msg_id"] = int(banner_id)
+    data["rate_kb_msg_id"] = int(kb_msg_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
     try:
-        await set_user_rate_kb_msg_id(chat_id, int(banner_id))
+        await set_user_rate_kb_msg_id(chat_id, int(kb_msg_id))
     except Exception:
         pass
 
@@ -795,7 +808,7 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
         state,
         reply_markup=_build_rate_reply_keyboard(lang),
         mode="rate",
-        text="🦒",
+        text=_rate_kb_hint(lang, "rate"),
     )
 
 
@@ -807,7 +820,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
         state,
         reply_markup=_build_next_only_reply_keyboard(lang),
         mode="next",
-        text="🦒",
+        text=_rate_kb_hint(lang, "next"),
     )
 
 
@@ -819,7 +832,7 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext, la
         state,
         reply_markup=_build_rate_tutorial_reply_keyboard(),
         mode="tutorial",
-        text="🦒",
+        text=_rate_kb_hint(lang, "tutorial"),
     )
 
 
@@ -1674,7 +1687,7 @@ async def show_next_photo_for_rating(
 
     if card.photo is None and msg is None and msg_id is None:
         try:
-            await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=True)
+            await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=False)
         except Exception:
             pass
 
@@ -3445,16 +3458,6 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
             data["rate_kb_mode"] = "none"
             await state.set_data(data)
             await set_user_rate_kb_msg_id(callback.from_user.id, None)
-        except Exception:
-            pass
-    else:
-        try:
-            await ensure_giraffe_banner(
-                callback.message.bot,
-                callback.message.chat.id,
-                callback.from_user.id,
-                force_new=True,
-            )
         except Exception:
             pass
     user = await get_user_by_tg_id(callback.from_user.id)

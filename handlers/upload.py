@@ -1119,7 +1119,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             callback.message.bot,
             callback.message.chat.id,
             callback.from_user.id,
-            force_new=True,
+            force_new=False,
         )
     except Exception:
         pass
