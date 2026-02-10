@@ -91,22 +91,22 @@ async def ensure_giraffe_banner(
             sent_id = int(old_banner) if old_banner else None
 
     if sent_id is None:
+        # В touch-режиме мы НЕ создаём новый баннер. Просто возвращаем старый id (если есть).
         if not send_if_missing:
-            # Touch mode: не создаём новый баннер вообще.
-            sent_id = int(old_banner) if old_banner is not None else None
-        else:
-            sent = None
-            try:
-                sent = await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    disable_notification=True,
-                )
-            except Exception:
-                sent = None
+            return int(old_banner) if old_banner is not None else None
 
-        if sent:
+        sent = None
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+            )
+        except Exception:
+            sent = None
+
+        if sent is not None:
             sent_id = int(sent.message_id)
             # Удаляем старый баннер только когда мы действительно отправили новый с reply_markup.
             # Если reply_markup=None, старый мог быть «якорем» ReplyKeyboard, и его удаление ломает кнопки.
