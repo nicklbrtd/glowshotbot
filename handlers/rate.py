@@ -776,6 +776,18 @@ async def _send_rate_kb_message(
         banner_id = None
 
     if banner_id is None:
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+            )
+            banner_id = sent.message_id
+        except Exception:
+            banner_id = None
+
+    if banner_id is None:
         return
 
     data["rate_kb_msg_id"] = int(banner_id)
