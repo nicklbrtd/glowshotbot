@@ -788,6 +788,12 @@ async def _send_rate_kb_message(
     if banner_id is None:
         return
 
+    if old_msg_id and int(old_msg_id) != int(banner_id):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
+        except Exception:
+            pass
+
     data["rate_kb_msg_id"] = int(banner_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
@@ -850,6 +856,7 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
             banner_id = ui_state.get("banner_msg_id")
         except Exception:
             banner_id = None
+    # Сбрасываем идентификаторы сразу, чтобы не переиспользовать битые баннеры
     data["rate_kb_msg_id"] = None
     data["rate_kb_mode"] = "none"
     await state.set_data(data)
@@ -1065,143 +1072,7 @@ async def _apply_rating_card(
     card: RatingCard,
     state: FSMContext | None = None,
 ) -> None:
-    """Аккуратно применяет карточку оценивания к существующему сообщению или отправляет новое при ошибке."""
-    if card.photo_file_id is None:
-        # Текстовая карточка (нет фото). Если предыдущее сообщение было с фото — удаляем его, чтобы не оставалась картинка.
-        if message is not None and message.photo:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            message = None
-
-        if message_id is not None and (message is None or message.photo):
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception:
-                pass
-            message_id = None
-
-        # Если есть текстовое сообщение без фото — пробуем отредактировать, иначе шлём новое.
-        if message is not None and not message.photo:
-            try:
-                await message.edit_text(
-                    text=card.caption,
-                    reply_markup=card.keyboard,
-                    parse_mode="HTML",
-                )
-                if state is not None:
-                    data = await state.get_data()
-                    data["rate_msg_id"] = message.message_id
-                    await state.set_data(data)
-                try:
-                    await set_user_screen_msg_id(chat_id, message.message_id)
-                except Exception:
-                    pass
-                return
-            except Exception:
-                message = None
-
-        if message_id is not None:
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=card.caption,
-                    reply_markup=card.keyboard,
-                    parse_mode="HTML",
-                )
-                if state is not None:
-                    data = await state.get_data()
-                    data["rate_msg_id"] = message_id
-                    await state.set_data(data)
-                try:
-                    await set_user_screen_msg_id(chat_id, message_id)
-                except Exception:
-                    pass
-                return
-            except Exception:
-                message_id = None
-        prev_id = None
-        if state is not None:
-            try:
-                prev_id = (await state.get_data()).get("rate_msg_id")
-            except Exception:
-                prev_id = None
-
-        try:
-            sent = await bot.send_message(
-                chat_id=chat_id,
-                text=card.caption,
-                reply_markup=card.keyboard,
-                parse_mode="HTML",
-                disable_notification=True,
-            )
-            if state is not None:
-                data = await state.get_data()
-                data["rate_msg_id"] = sent.message_id
-                await state.set_data(data)
-            try:
-                await set_user_screen_msg_id(chat_id, sent.message_id)
-            except Exception:
-                pass
-            if prev_id and prev_id != sent.message_id:
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=prev_id)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return
-
-    media = InputMediaPhoto(
-        media=card.photo_file_id,
-        caption=card.caption,
-        parse_mode="HTML",
-        show_caption_above_media=True,
-    )
-
-    if message is not None and message.photo:
-        try:
-            await message.edit_media(media=media, reply_markup=card.keyboard)
-            if state is not None:
-                data = await state.get_data()
-                data["rate_msg_id"] = message.message_id
-                await state.set_data(data)
-            try:
-                await set_user_screen_msg_id(chat_id, message.message_id)
-            except Exception:
-                pass
-            return
-        except Exception:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-
-    if message_id is not None:
-        try:
-            await bot.edit_message_media(
-                chat_id=chat_id,
-                message_id=message_id,
-                media=media,
-                reply_markup=card.keyboard,
-            )
-            if state is not None:
-                data = await state.get_data()
-                data["rate_msg_id"] = message_id
-                await state.set_data(data)
-            try:
-                await set_user_screen_msg_id(chat_id, message_id)
-            except Exception:
-                pass
-            return
-        except Exception:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception:
-                pass
-
+    """Всегда отправляет новую карточку и удаляет предыдущую, без редактирования."""
     prev_id = None
     if state is not None:
         try:
@@ -1210,30 +1081,17 @@ async def _apply_rating_card(
             prev_id = None
 
     try:
-        sent = await bot.send_photo(
-            chat_id=chat_id,
-            photo=card.photo_file_id,
-            caption=card.caption,
-            reply_markup=card.keyboard,
-            parse_mode="HTML",
-            disable_notification=True,
-            show_caption_above_media=True,
-        )
-        if state is not None:
-            data = await state.get_data()
-            data["rate_msg_id"] = sent.message_id
-            await state.set_data(data)
-        try:
-            await set_user_screen_msg_id(chat_id, sent.message_id)
-        except Exception:
-            pass
-        if prev_id and prev_id != sent.message_id:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=prev_id)
-            except Exception:
-                pass
-    except Exception:
-        try:
+        if card.photo_file_id:
+            sent = await bot.send_photo(
+                chat_id=chat_id,
+                photo=card.photo_file_id,
+                caption=card.caption,
+                reply_markup=card.keyboard,
+                parse_mode="HTML",
+                disable_notification=True,
+                show_caption_above_media=True,
+            )
+        else:
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=card.caption,
@@ -1241,10 +1099,21 @@ async def _apply_rating_card(
                 parse_mode="HTML",
                 disable_notification=True,
             )
-            try:
-                await set_user_screen_msg_id(chat_id, sent.message_id)
-            except Exception:
-                pass
+    except Exception:
+        return
+
+    if state is not None:
+        data = await state.get_data()
+        data["rate_msg_id"] = sent.message_id
+        await state.set_data(data)
+    try:
+        await set_user_screen_msg_id(chat_id, sent.message_id)
+    except Exception:
+        pass
+
+    if prev_id and prev_id != sent.message_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(prev_id))
         except Exception:
             pass
 
@@ -1694,15 +1563,6 @@ async def show_next_photo_for_rating(
 
     if state is not None and not card.photo:
         await _delete_rate_reply_keyboard(bot, chat_id, state)
-
-    if old_msg is not None:
-        try:
-            if hasattr(old_msg, "delete"):
-                await old_msg.delete()
-            else:
-                await bot.delete_message(chat_id=chat_id, message_id=int(old_msg))
-        except Exception:
-            pass
 
     if is_cb:
         try:
