@@ -643,7 +643,12 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
         return
     try:
-        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
+        await ensure_giraffe_banner(
+            callback.message.bot,
+            callback.message.chat.id,
+            callback.from_user.id,
+            force_new=True,
+        )
     except Exception:
         pass
 

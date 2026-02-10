@@ -16,14 +16,21 @@ async def ensure_giraffe_banner(
 ) -> int | None:
     """Ensure a single giraffe banner exists above section content."""
     banner_id = None
+    reply_is_reply_kb = isinstance(reply_markup, (ReplyKeyboardMarkup, ReplyKeyboardRemove))
+    kb_id = None
     try:
         ui_state = await get_user_ui_state(int(tg_id))
         banner_id = ui_state.get("banner_msg_id")
         kb_id = ui_state.get("rate_kb_msg_id")
-        if banner_id and kb_id and int(banner_id) == int(kb_id):
-            banner_id = None
     except Exception:
         banner_id = None
+        kb_id = None
+
+    if reply_is_reply_kb:
+        force_new = True
+
+    if banner_id and kb_id and int(banner_id) == int(kb_id) and not force_new:
+        return int(banner_id)
 
     if banner_id and not force_new:
         try:

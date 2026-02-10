@@ -676,10 +676,11 @@ def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     """Reply‑клавиатура для оценок 1–10."""
     row1 = [KeyboardButton(text=str(i)) for i in range(1, 6)]
     row2 = [KeyboardButton(text=str(i)) for i in range(6, 11)]
+    row3 = [KeyboardButton(text=t("rate.btn.next", lang))]
     return ReplyKeyboardMarkup(
-        keyboard=[row1, row2],
+        keyboard=[row1, row2, row3],
         resize_keyboard=True,
-        one_time_keyboard=True,
+        one_time_keyboard=False,
         selective=True,
     )
 
@@ -758,7 +759,7 @@ async def _send_rate_kb_message(
             chat_id,
             text=text,
             reply_markup=reply_markup,
-            force_new=False,
+            force_new=True,
         )
     except Exception:
         banner_id = None
@@ -835,6 +836,19 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
         await set_user_rate_kb_msg_id(chat_id, None)
     except Exception:
         pass
+    try:
+        tmp = await bot.send_message(
+            chat_id=chat_id,
+            text=".",
+            reply_markup=ReplyKeyboardRemove(),
+            disable_notification=True,
+        )
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
+        except Exception:
+            pass
+    except Exception:
+        pass
     if banner_id:
         try:
             await bot.edit_message_text(
@@ -847,6 +861,8 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
         except Exception:
             pass
     if msg_id:
+        if banner_id and int(msg_id) == int(banner_id):
+            return
         try:
             await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
         except Exception:
@@ -914,10 +930,7 @@ async def _sync_rate_state_for_card(
         pass
 
     if card.photo:
-        if bool(card.photo.get("ratings_enabled", True)):
-            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
-        else:
-            await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
+        await _send_rate_reply_keyboard(bot, chat_id, state, lang)
     else:
         await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -1617,12 +1630,6 @@ async def show_next_photo_for_rating(
             except Exception:
                 msg_id = None
 
-    if msg is None and msg_id is None:
-        try:
-            await ensure_giraffe_banner(bot, chat_id, viewer_tg_id)
-        except Exception:
-            pass
-
     viewer = await get_user_by_tg_id(viewer_tg_id)
     lang = _lang(viewer)
     card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id)
@@ -1632,6 +1639,25 @@ async def show_next_photo_for_rating(
         data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
         data["rate_show_details"] = False
         await state.set_data(data)
+
+    if state is not None and card.photo:
+        need_kb = False
+        try:
+            data = await state.get_data()
+            need_kb = data.get("rate_kb_mode") != "rate" or not data.get("rate_kb_msg_id")
+        except Exception:
+            need_kb = True
+        if need_kb:
+            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
+            # ensure banner stays above the next photo
+            msg = None
+            msg_id = None
+
+    if card.photo is None and msg is None and msg_id is None:
+        try:
+            await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=True)
+        except Exception:
+            pass
 
     await _apply_rating_card(
         bot=bot,
@@ -1644,10 +1670,7 @@ async def show_next_photo_for_rating(
 
     if state is not None:
         if card.photo:
-            if bool(card.photo.get("ratings_enabled", True)):
-                await _send_rate_reply_keyboard(bot, chat_id, state, lang)
-            else:
-                await _send_next_only_reply_keyboard(bot, chat_id, state, lang)
+            await _send_rate_reply_keyboard(bot, chat_id, state, lang)
         else:
             await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -1678,9 +1701,15 @@ async def _show_rate_tutorial(callback: CallbackQuery | Message, state: FSMConte
         user_id = int(callback.from_user.id)
 
     try:
-        await ensure_giraffe_banner(bot, chat_id, user_id)
+        data = await state.get_data()
+        data["rate_kb_msg_id"] = None
+        data["rate_kb_mode"] = "none"
+        await state.set_data(data)
+        await set_user_rate_kb_msg_id(user_id, None)
     except Exception:
         pass
+
+    await _send_tutorial_reply_keyboard(bot, chat_id, state, _lang(await get_user_by_tg_id(user_id)))
 
     try:
         sent = await bot.send_photo(
@@ -1708,8 +1737,6 @@ async def _show_rate_tutorial(callback: CallbackQuery | Message, state: FSMConte
         await set_user_screen_msg_id(user_id, sent.message_id)
     except Exception:
         pass
-
-    await _send_tutorial_reply_keyboard(bot, chat_id, state, _lang(await get_user_by_tg_id(user_id)))
 
     if old_msg is not None:
         try:
@@ -2111,7 +2138,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 except Exception:
                     pass
             try:
-                await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, _lang(user_for_rate))
+                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, _lang(user_for_rate))
             except Exception:
                 pass
             return
@@ -2228,7 +2255,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 pass
 
         try:
-            await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
+            await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
         except Exception:
             pass
     except TelegramBadRequest:
@@ -2952,6 +2979,15 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
 
+        try:
+            data = await state.get_data()
+            data["rate_kb_msg_id"] = None
+            data["rate_kb_mode"] = "none"
+            await state.set_data(data)
+            await set_user_rate_kb_msg_id(message.from_user.id, None)
+        except Exception:
+            pass
+
         await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
         return
     if text.startswith("/"):
@@ -3365,10 +3401,25 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
         except Exception:
             pass
         return
-    try:
-        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
-    except Exception:
-        pass
+    if state is not None:
+        try:
+            data = await state.get_data()
+            data["rate_kb_msg_id"] = None
+            data["rate_kb_mode"] = "none"
+            await state.set_data(data)
+            await set_user_rate_kb_msg_id(callback.from_user.id, None)
+        except Exception:
+            pass
+    else:
+        try:
+            await ensure_giraffe_banner(
+                callback.message.bot,
+                callback.message.chat.id,
+                callback.from_user.id,
+                force_new=True,
+            )
+        except Exception:
+            pass
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None or not (user.get("name") or "").strip():
         if not await require_user_name(callback):

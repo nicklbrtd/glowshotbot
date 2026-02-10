@@ -1019,7 +1019,12 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
     if not await require_user_name(callback):
         return
     try:
-        await ensure_giraffe_banner(callback.message.bot, callback.message.chat.id, callback.from_user.id)
+        await ensure_giraffe_banner(
+            callback.message.bot,
+            callback.message.chat.id,
+            callback.from_user.id,
+            force_new=True,
+        )
     except Exception:
         pass
     user = await get_user_by_tg_id(int(callback.from_user.id))

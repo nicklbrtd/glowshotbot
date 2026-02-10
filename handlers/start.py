@@ -134,7 +134,7 @@ async def _send_fresh_menu(
     Сначала отправляем новое меню, затем удаляем старое (если было), чтобы не было пустоты."""
 
     try:
-        await ensure_giraffe_banner(bot, chat_id, user_id)
+        await ensure_giraffe_banner(bot, chat_id, user_id, force_new=True)
     except Exception:
         pass
 
