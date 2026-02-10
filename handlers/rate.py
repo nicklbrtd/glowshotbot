@@ -759,35 +759,40 @@ async def _send_rate_kb_message(
         except Exception:
             old_msg_id = None
 
-    if old_msg_id:
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
-        except Exception:
-            pass
-
+    banner_id = None
     try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
+        banner_id = await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            chat_id,
             text=text,
             reply_markup=reply_markup,
-            disable_notification=True,
+            force_new=False,
         )
     except Exception:
-        # второй шанс без disable_notification
+        banner_id = None
+
+    if banner_id is None:
         try:
-            sent = await bot.send_message(
-                chat_id=chat_id,
+            banner_id = await ensure_giraffe_banner(
+                bot,
+                chat_id,
+                chat_id,
                 text=text,
                 reply_markup=reply_markup,
+                force_new=True,
             )
         except Exception:
-            return
+            banner_id = None
 
-    data["rate_kb_msg_id"] = int(sent.message_id)
+    if banner_id is None:
+        return
+
+    data["rate_kb_msg_id"] = int(banner_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
     try:
-        await set_user_rate_kb_msg_id(chat_id, int(sent.message_id))
+        await set_user_rate_kb_msg_id(chat_id, int(banner_id))
     except Exception:
         pass
 
@@ -1659,13 +1664,19 @@ async def show_next_photo_for_rating(
     card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id)
 
     is_rateable = bool(card.photo and card.photo.get("ratings_enabled", True))
-    reply_kb = _build_rate_reply_keyboard(lang) if is_rateable else _build_next_only_reply_keyboard(lang)
 
     if state is not None:
         data = await state.get_data()
         data["rate_current_photo_id"] = card.photo["id"] if card.photo else None
         data["rate_show_details"] = False
         await state.set_data(data)
+
+    # Показываем/обновляем клавиатуру ДО отправки фото, чтобы жираф оставался сверху
+    if state is not None and card.photo:
+        try:
+            await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
+        except Exception:
+            pass
 
     try:
         await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=False)
@@ -1681,11 +1692,8 @@ async def show_next_photo_for_rating(
         state=state,
     )
 
-    if state is not None:
-        if card.photo:
-            await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
-        else:
-            await _delete_rate_reply_keyboard(bot, chat_id, state)
+    if state is not None and not card.photo:
+        await _delete_rate_reply_keyboard(bot, chat_id, state)
 
     if old_msg is not None:
         try:
