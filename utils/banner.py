@@ -19,6 +19,7 @@ async def ensure_giraffe_banner(
     reply_markup: ReplyKeyboardMarkup | ReplyKeyboardRemove | InlineKeyboardMarkup | None = None,
     force_new: bool = False,
     send_if_missing: bool = True,
+    reason: str | None = None,
 ) -> int | None:
     """
     Keep a single giraffe banner per user:
@@ -35,6 +36,7 @@ async def ensure_giraffe_banner(
         old_banner = ui_state.get("banner_msg_id")
     except Exception:
         old_banner = None
+    original_banner_id = old_banner
 
     sent_id: int | None = None
     can_edit_inline = isinstance(reply_markup, InlineKeyboardMarkup) and not force_new
@@ -114,6 +116,8 @@ async def ensure_giraffe_banner(
                     "force_new": force_new,
                     "reply_markup": type(reply_markup).__name__ if reply_markup else None,
                     "send_if_missing": send_if_missing,
+                    "old_banner_id": original_banner_id,
+                    "reason": reason,
                 },
             )
             sent = await bot.send_message(
@@ -127,17 +131,22 @@ async def ensure_giraffe_banner(
 
         if sent is not None:
             sent_id = int(sent.message_id)
-            # Удаляем старый баннер только когда мы действительно отправили новый с reply_markup.
-            # Если reply_markup=None, старый мог быть «якорем» ReplyKeyboard, и его удаление ломает кнопки.
-            if (
-                old_banner
-                and old_banner != sent_id
-                and reply_markup is not None
-            ):
+            # Всегда пытаемся удалить предыдущий баннер, если уверены, что это именно он.
+            if original_banner_id and original_banner_id != sent_id:
                 try:
-                    await bot.delete_message(chat_id=chat_id, message_id=int(old_banner))
-                except Exception:
-                    pass
+                    await bot.delete_message(chat_id=chat_id, message_id=int(original_banner_id))
+                except Exception as e:
+                    logger.warning(
+                        "giraffe_banner.delete_old_failed",
+                        extra={
+                            "chat_id": chat_id,
+                            "tg_id": tg_id,
+                            "old_banner_id": original_banner_id,
+                            "new_banner_id": sent_id,
+                            "error": str(e),
+                            "reason": reason,
+                        },
+                    )
         else:
             # Sending failed — fall back to the previous banner if it exists.
             sent_id = int(old_banner) if old_banner is not None else None

@@ -101,6 +101,52 @@ async def _touch_giraffe_banner(bot, chat_id: int, tg_id: int) -> None:
             extra={"chat_id": chat_id, "tg_id": tg_id, "error": str(e)},
         )
 
+
+async def _dedupe_banner_messages(
+    bot,
+    chat_id: int,
+    keep_id: int | None,
+    candidates: list[int | None],
+    *,
+    reason: str,
+) -> None:
+    normalized: list[int] = []
+    for cid in candidates:
+        if cid is None:
+            continue
+        try:
+            normalized.append(int(cid))
+        except Exception:
+            continue
+
+    if keep_id is None:
+        if len(set(normalized)) > 1:
+            logger.warning(
+                "rate.banner.dedupe.multi_no_keep",
+                extra={"chat_id": chat_id, "candidates": list(set(normalized)), "reason": reason},
+            )
+        return
+
+    ids_to_remove: set[int] = set()
+    for val in normalized:
+        if val == int(keep_id):
+            continue
+        ids_to_remove.add(val)
+
+    if ids_to_remove:
+        logger.warning(
+            "rate.banner.dedupe",
+            extra={"chat_id": chat_id, "keep_id": keep_id, "remove_ids": list(ids_to_remove), "reason": reason},
+        )
+    for mid in ids_to_remove:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception as e:
+            logger.info(
+                "rate.banner.dedupe.delete_failed",
+                extra={"chat_id": chat_id, "message_id": mid, "error": str(e), "reason": reason},
+            )
+
 def _lang(user: dict | None) -> str:
     try:
         raw = (user or {}).get("lang") or (user or {}).get("language") or (user or {}).get("language_code")
@@ -783,12 +829,20 @@ async def _send_rate_kb_message(
 ) -> None:
     data = await state.get_data()
     old_msg_id = data.get("rate_kb_msg_id")
+    old_banner_id = None
     if old_msg_id is None:
         try:
             ui_state = await get_user_ui_state(chat_id)
             old_msg_id = ui_state.get("rate_kb_msg_id")
+            old_banner_id = ui_state.get("banner_msg_id")
         except Exception:
             old_msg_id = None
+    else:
+        try:
+            ui_state = await get_user_ui_state(chat_id)
+            old_banner_id = ui_state.get("banner_msg_id")
+        except Exception:
+            old_banner_id = None
 
     banner_id = None
     try:
@@ -799,6 +853,7 @@ async def _send_rate_kb_message(
             text=text,
             reply_markup=reply_markup,
             force_new=False,
+            reason=f"rate_kb:{mode}",
         )
     except Exception:
         banner_id = None
@@ -812,6 +867,7 @@ async def _send_rate_kb_message(
                 text=text,
                 reply_markup=reply_markup,
                 force_new=True,
+                reason=f"rate_kb:{mode}:force_new",
             )
         except Exception:
             banner_id = None
@@ -822,8 +878,11 @@ async def _send_rate_kb_message(
     if old_msg_id and int(old_msg_id) != int(banner_id):
         try:
             await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.info(
+                "rate.banner.delete_old_rate_kb_failed",
+                extra={"chat_id": chat_id, "old_msg_id": old_msg_id, "error": str(e)},
+            )
 
     data["rate_kb_msg_id"] = int(banner_id)
     data["rate_kb_mode"] = mode
@@ -832,6 +891,15 @@ async def _send_rate_kb_message(
         await set_user_rate_kb_msg_id(chat_id, int(banner_id))
     except Exception:
         pass
+
+    # safety dedupe if DB/state had divergent ids
+    await _dedupe_banner_messages(
+        bot,
+        chat_id,
+        int(banner_id),
+        [old_msg_id, old_banner_id],
+        reason=f"rate_kb:{mode}:dedupe",
+    )
 
 
 async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: str) -> None:
@@ -874,60 +942,74 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
     data = await state.get_data()
     msg_id = data.get("rate_kb_msg_id")
     banner_id = None
+    ui_state = {}
+    try:
+        ui_state = await get_user_ui_state(chat_id)
+    except Exception:
+        ui_state = {}
     if msg_id is None:
-        try:
-            ui_state = await get_user_ui_state(chat_id)
-            msg_id = ui_state.get("rate_kb_msg_id")
-            banner_id = ui_state.get("banner_msg_id")
-        except Exception:
-            msg_id = None
-    if banner_id is None:
-        try:
-            ui_state = await get_user_ui_state(chat_id)
-            banner_id = ui_state.get("banner_msg_id")
-        except Exception:
-            banner_id = None
-    # Сбрасываем идентификаторы сразу, чтобы не переиспользовать битые баннеры
+        msg_id = ui_state.get("rate_kb_msg_id")
+    banner_id = ui_state.get("banner_msg_id")
+    screen_id = ui_state.get("screen_msg_id")
+
+    # Сбрасываем идентификаторы клавиатуры сразу (клавиатура убирается)
     data["rate_kb_msg_id"] = None
     data["rate_kb_mode"] = "none"
     await state.set_data(data)
     try:
         await set_user_rate_kb_msg_id(chat_id, None)
-        from database import set_user_banner_msg_id
-        await set_user_banner_msg_id(chat_id, None)
     except Exception:
         pass
+
+    new_banner_id: int | None = None
     try:
-        tmp = await bot.send_message(
-            chat_id=chat_id,
-            text=".",
+        new_banner_id = await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            chat_id,
+            text="🦒",
             reply_markup=ReplyKeyboardRemove(),
-            disable_notification=True,
+            force_new=False,
+            reason="remove_reply_kb",
         )
+    except Exception as e:
+        logger.info(
+            "rate.banner.remove_reply_kb.failed_edit",
+            extra={"chat_id": chat_id, "error": str(e)},
+        )
+        new_banner_id = None
+
+    if new_banner_id is None:
+        # Fallback: отправляем невидимое сообщение для применения remove и тут же удаляем
         try:
-            await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
-        except Exception:
-            pass
-    except Exception:
-        pass
-    if banner_id:
-        try:
-            await bot.edit_message_text(
+            tmp = await bot.send_message(
                 chat_id=chat_id,
-                message_id=int(banner_id),
-                text="🦒",
+                text="\u2060",  # невидимый символ
                 reply_markup=ReplyKeyboardRemove(),
+                disable_notification=True,
             )
-            return
-        except Exception:
-            pass
-    if msg_id:
-        if banner_id and int(msg_id) == int(banner_id):
-            return
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
-        except Exception:
-            pass
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
+            except Exception as e:
+                logger.info(
+                    "rate.banner.remove_reply_kb.delete_tmp_failed",
+                    extra={"chat_id": chat_id, "tmp_id": tmp.message_id, "error": str(e)},
+                )
+        except Exception as e:
+            logger.info(
+                "rate.banner.remove_reply_kb.tmp_send_failed",
+                extra={"chat_id": chat_id, "error": str(e)},
+            )
+
+    # Дедупликация: удаляем старые баннеры/клавы, не совпадающие с текущим
+    keep = new_banner_id if new_banner_id is not None else banner_id
+    await _dedupe_banner_messages(
+        bot,
+        chat_id,
+        keep,
+        [msg_id, banner_id, screen_id],
+        reason="remove_reply_kb:dedupe",
+    )
 
 
 async def _clear_rate_comment_draft(state: FSMContext) -> None:
@@ -1030,6 +1112,7 @@ async def _show_rate_block_banner(
             text=f"🦒\n\n{text}",
             reply_markup=ReplyKeyboardRemove(),
             force_new=False,
+            reason="rate_block",
         )
     except Exception:
         banner_id = None
@@ -1044,22 +1127,16 @@ async def _show_rate_block_banner(
             except Exception:
                 pass
         try:
-            tmp = await bot.send_message(
-                chat_id=chat_id,
-                text=".",
-                reply_markup=ReplyKeyboardRemove(),
-                disable_notification=True,
-            )
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
-            except Exception:
-                pass
-        except Exception:
-            pass
-        try:
             await set_user_rate_kb_msg_id(chat_id, None)
         except Exception:
             pass
+        await _dedupe_banner_messages(
+            bot,
+            chat_id,
+            int(banner_id),
+            [old_msg_id],
+            reason="rate_block:dedupe",
+        )
     else:
         await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -1591,19 +1668,32 @@ async def show_next_photo_for_rating(
                     text="🦒",
                     reply_markup=reply_kb,
                     force_new=False,
+                    reason="show_next_photo:set_reply_kb",
                 )
         else:
             # Нет фото — скрываем reply‑клавиатуру
             if state is not None:
                 await _delete_rate_reply_keyboard(bot, chat_id, state)
             else:
-                await ensure_giraffe_banner(
+                new_id = await ensure_giraffe_banner(
                     bot,
                     chat_id,
                     viewer_tg_id,
                     text="🦒",
                     reply_markup=ReplyKeyboardRemove(),
                     force_new=False,
+                    reason="show_next_photo:no_photos",
+                )
+                try:
+                    ui_state = await get_user_ui_state(chat_id)
+                except Exception:
+                    ui_state = {}
+                await _dedupe_banner_messages(
+                    bot,
+                    chat_id,
+                    new_id,
+                    [ui_state.get("banner_msg_id"), ui_state.get("rate_kb_msg_id")],
+                    reason="show_next_photo:no_photos:dedupe",
                 )
     except Exception:
         # Фоллбек: хотя бы держим баннер
@@ -1620,9 +1710,6 @@ async def show_next_photo_for_rating(
         card=card,
         state=state,
     )
-
-    if state is not None and not card.photo:
-        await _delete_rate_reply_keyboard(bot, chat_id, state)
 
     if is_cb:
         try:
