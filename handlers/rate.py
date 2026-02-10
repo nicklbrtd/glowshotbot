@@ -764,38 +764,25 @@ async def _send_rate_kb_message(
 
     banner_id = None
     try:
-        ui_state = await get_user_ui_state(chat_id)
-        banner_id = ui_state.get("banner_msg_id")
+        banner_id = await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            force_new=False,
+        )
     except Exception:
         banner_id = None
 
-    if old_msg_id:
-        try:
-            if banner_id is None or int(old_msg_id) != int(banner_id):
-                await bot.delete_message(chat_id=chat_id, message_id=int(old_msg_id))
-        except Exception:
-            pass
-
-    kb_msg_id = None
-    try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=reply_markup,
-            disable_notification=True,
-        )
-        kb_msg_id = sent.message_id
-    except Exception:
-        kb_msg_id = None
-
-    if kb_msg_id is None:
+    if banner_id is None:
         return
 
-    data["rate_kb_msg_id"] = int(kb_msg_id)
+    data["rate_kb_msg_id"] = int(banner_id)
     data["rate_kb_mode"] = mode
     await state.set_data(data)
     try:
-        await set_user_rate_kb_msg_id(chat_id, int(kb_msg_id))
+        await set_user_rate_kb_msg_id(chat_id, int(banner_id))
     except Exception:
         pass
 
@@ -808,7 +795,7 @@ async def _send_rate_reply_keyboard(bot, chat_id: int, state: FSMContext, lang: 
         state,
         reply_markup=_build_rate_reply_keyboard(lang),
         mode="rate",
-        text=_rate_kb_hint(lang, "rate"),
+        text="🦒",
     )
 
 
@@ -820,7 +807,7 @@ async def _send_next_only_reply_keyboard(bot, chat_id: int, state: FSMContext, l
         state,
         reply_markup=_build_next_only_reply_keyboard(lang),
         mode="next",
-        text=_rate_kb_hint(lang, "next"),
+        text="🦒",
     )
 
 
@@ -832,7 +819,7 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext, la
         state,
         reply_markup=_build_rate_tutorial_reply_keyboard(),
         mode="tutorial",
-        text=_rate_kb_hint(lang, "tutorial"),
+        text="🦒",
     )
 
 
@@ -1681,11 +1668,8 @@ async def show_next_photo_for_rating(
             need_kb = True
         if need_kb:
             await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
-            # ensure banner stays above the next photo
-            msg = None
-            msg_id = None
 
-    if card.photo is None and msg is None and msg_id is None:
+    if msg is None and msg_id is None:
         try:
             await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=False)
         except Exception:
