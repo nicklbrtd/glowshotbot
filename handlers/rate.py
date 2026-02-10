@@ -680,7 +680,7 @@ def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
         keyboard=[row1, row2],
         resize_keyboard=True,
         one_time_keyboard=False,
-        selective=True,
+        selective=False,
     )
 
 
@@ -690,7 +690,7 @@ def _build_next_only_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text=t("rate.btn.next", lang))]],
         resize_keyboard=True,
         one_time_keyboard=False,
-        selective=True,
+        selective=False,
     )
 
 async def _send_reply_keyboard_for_photo(
@@ -773,7 +773,15 @@ async def _send_rate_kb_message(
             disable_notification=True,
         )
     except Exception:
-        return
+        # второй шанс без disable_notification
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            return
 
     data["rate_kb_msg_id"] = int(sent.message_id)
     data["rate_kb_mode"] = mode
