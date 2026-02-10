@@ -19,15 +19,14 @@ async def ensure_giraffe_banner(
     try:
         ui_state = await get_user_ui_state(int(tg_id))
         banner_id = ui_state.get("banner_msg_id")
-        if banner_id is None:
-            banner_id = ui_state.get("rate_kb_msg_id")
-            if banner_id:
-                try:
-                    await set_user_banner_msg_id(int(tg_id), int(banner_id))
-                except Exception:
-                    pass
+        kb_id = ui_state.get("rate_kb_msg_id")
+        if banner_id and kb_id and int(banner_id) == int(kb_id):
+            banner_id = None
     except Exception:
         banner_id = None
+
+    if reply_markup is not None and not isinstance(reply_markup, InlineKeyboardMarkup):
+        reply_markup = None
 
     if banner_id and not force_new:
         try:
@@ -40,12 +39,7 @@ async def ensure_giraffe_banner(
             return int(banner_id)
         except TelegramBadRequest as e:
             msg = str(e).lower()
-            if (
-                "message is not modified" in msg
-                or "message can't be edited" in msg
-                or "reply markup" in msg
-                or "inline keyboard" in msg
-            ):
+            if "message is not modified" in msg or "message can't be edited" in msg:
                 return int(banner_id)
             if "message to edit not found" in msg or "message_id invalid" in msg:
                 banner_id = None

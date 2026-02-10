@@ -319,6 +319,9 @@ EN = {
     "rate.btn.hide": "🕵️ Hide",
     "rate.btn.next": "➡️ Next",
     "rate.btn.invite": "📤 Share link",
+    "rate.kb.hint": "Pick a score 1–10 ⬇️",
+    "rate.kb.next": "Tap “Next” ⬇️",
+    "rate.kb.tutorial": "Tap “Got it!” ⬇️",
 
     # My photo buttons
     "myphoto.btn.share": "🔗 Share photo",
