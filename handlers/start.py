@@ -24,7 +24,6 @@ from handlers.premium import maybe_send_premium_expiry_warning
 from config import MASTER_ADMIN_ID
 from utils.time import get_moscow_now, get_moscow_today, is_happy_hour
 from utils.banner import ensure_giraffe_banner
-from database import set_user_menu_msg_id, set_user_screen_msg_id
 
 router = Router()
 
@@ -146,32 +145,6 @@ def _menu_info_inline_kb(lang: str) -> InlineKeyboardMarkup:
     kb.button(text="⬅️ Назад", callback_data="menu:info:back")
     kb.adjust(1)
     return kb.as_markup()
-
-
-async def _hide_menu_message(bot, chat_id: int, user_id: int, state: FSMContext) -> None:
-    """Удаляет текущее меню (reply/inline) и чистит state/db."""
-    try:
-        data = await state.get_data()
-    except Exception:
-        data = {}
-    menu_msg_id = data.get("menu_msg_id")
-    if menu_msg_id is None:
-        try:
-            ui_state = await db.get_user_ui_state(user_id)
-            menu_msg_id = ui_state.get("menu_msg_id")
-        except Exception:
-            menu_msg_id = None
-    await _delete_message_safely(bot, chat_id, menu_msg_id)
-    try:
-        data["menu_msg_id"] = None
-        await state.set_data(data)
-    except Exception:
-        pass
-    try:
-        await set_user_menu_msg_id(user_id, None)
-        await set_user_screen_msg_id(user_id, None)
-    except Exception:
-        pass
 
 
 async def _send_fresh_menu(
@@ -717,16 +690,12 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             lang_hint=getattr(message.from_user, "language_code", None),
         )
     elif key == "myphoto":
-        await _hide_menu_message(message.bot, message.chat.id, int(message.from_user.id), state)
         await my_photo_menu(pseudo_cb, state)
     elif key == "rate":
-        await _hide_menu_message(message.bot, message.chat.id, int(message.from_user.id), state)
         await rate_root(pseudo_cb, state=state, replace_message=True)
     elif key == "profile":
-        await _hide_menu_message(message.bot, message.chat.id, int(message.from_user.id), state)
         await profile_menu(pseudo_cb, state)
     elif key == "results":
-        await _hide_menu_message(message.bot, message.chat.id, int(message.from_user.id), state)
         await results_menu(pseudo_cb, state)
 
     # После успешного перехода удаляем сообщение пользователя и старое меню
@@ -735,7 +704,10 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     except Exception:
         pass
 
-    await _hide_menu_message(message.bot, message.chat.id, int(message.from_user.id), state)
+    data = await state.get_data()
+    prev_menu_id = data.get("menu_msg_id")
+    if prev_menu_id:
+        await _delete_message_safely(message.bot, message.chat.id, prev_menu_id)
 
 
 @router.message(CommandStart())
@@ -1017,66 +989,6 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         state=state,
         lang_hint=getattr(callback.from_user, "language_code", None),
     )
-
-
-@router.callback_query(F.data == "menu:info")
-async def menu_info(callback: CallbackQuery, state: FSMContext):
-    """Показать правила в том же сообщении меню."""
-    user = await db.get_user_by_tg_id(callback.from_user.id)
-    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
-    try:
-        await callback.message.edit_text(
-            _rules_text(),
-            reply_markup=_menu_info_inline_kb(lang),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        pass
-    await callback.answer()
-
-
-@router.callback_query(F.data == "menu:info:back")
-async def menu_info_back(callback: CallbackQuery, state: FSMContext):
-    """Вернуть обычное меню в том же сообщении."""
-    user = await db.get_user_by_tg_id(callback.from_user.id)
-    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
-    is_premium = await db.is_user_premium_active(callback.from_user.id)
-    is_admin = _get_flag(user, "is_admin")
-    is_moderator = _get_flag(user, "is_moderator")
-    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium, lang=lang)
-    inline_kb = _menu_inline_kb(lang)
-    main_kb = await _build_dynamic_main_menu(
-        user=user,
-        lang=lang,
-        is_admin=is_admin,
-        is_moderator=is_moderator,
-        is_premium=is_premium,
-    )
-    try:
-        await callback.message.edit_text(
-            menu_text,
-            reply_markup=inline_kb,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        # если текст не поменялся — просто обновим inline
-        try:
-            await callback.message.edit_reply_markup(reply_markup=inline_kb)
-        except Exception:
-            pass
-    # восстановим reply-клавиатуру
-    try:
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=t("kb.back_to_menu", lang),
-            reply_markup=main_kb,
-            disable_notification=True,
-        )
-    except Exception:
-        pass
-    await callback.answer()
     data = await state.get_data()
     menu_msg_id = data.get("menu_msg_id")
 
