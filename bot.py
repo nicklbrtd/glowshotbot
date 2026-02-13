@@ -28,6 +28,7 @@ from database import (
     restore_photos_from_status,
     get_user_by_tg_id,
     get_tech_mode_state,
+    get_update_mode_state,
     get_due_scheduled_broadcasts,
     mark_scheduled_broadcast_sent,
     mark_scheduled_broadcast_failed,
@@ -70,6 +71,55 @@ async def _delete_message_after(bot: Bot, chat_id: int, message_id: int, delay_s
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
+
+
+class UpdateModeMiddleware(BaseMiddleware):
+    """
+    Режим «Обновление»: при включении полностью игнорируем любые действия обычных пользователей.
+    Админы/модераторы/саппорт работают как обычно. Сообщения не отправляем.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        try:
+            state = await get_update_mode_state()
+        except Exception:
+            return await handler(event, data)
+
+        if not bool(state.get("update_enabled")):
+            return await handler(event, data)
+
+        chat_id, tg_user_id = None, None
+        try:
+            if isinstance(event, Update):
+                chat_id, tg_user_id = _extract_chat_and_user_from_update(event)
+            elif hasattr(event, "from_user") and getattr(event, "from_user"):
+                tg_user_id = event.from_user.id  # type: ignore[attr-defined]
+                if hasattr(event, "chat") and getattr(event, "chat"):
+                    chat_id = event.chat.id  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        if tg_user_id is None:
+            return await handler(event, data)
+
+        if MASTER_ADMIN_ID and tg_user_id == MASTER_ADMIN_ID:
+            return await handler(event, data)
+
+        try:
+            u = await get_user_by_tg_id(int(tg_user_id))
+        except Exception:
+            u = None
+
+        if u and (u.get("is_admin") or u.get("is_moderator") or u.get("is_support")):
+            return await handler(event, data)
+
+        # Полный игнор для остальных
+        raise SkipHandler
 
 
 async def scheduled_broadcast_loop(bot: Bot) -> None:
@@ -769,6 +819,9 @@ async def main() -> None:
     asyncio.create_task(notifications_worker(bot, send_fn=_send_notification))
 
     dp = Dispatcher()
+
+    # Режим обновления: полный игнор для всех, кроме админов/модераторов/поддержки
+    dp.update.middleware(UpdateModeMiddleware())
 
     # Глобальный тех.режим: доступ только админам/модераторам/поддержке
     dp.update.middleware(TechModeMiddleware())
