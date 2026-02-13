@@ -47,7 +47,6 @@ from database import (
     ensure_user_author_code,
     get_weekly_idea_requests,
     increment_weekly_idea_requests,
-    set_user_screen_msg_id,
     get_user_stats,
     add_credits,
     is_today_slot_locked,
@@ -62,6 +61,7 @@ from database_results import (
 
 from utils.time import get_moscow_now
 from utils.watermark import apply_text_watermark
+from utils.ui import cleanup_previous_screen, remember_screen
 
 
 router = Router()
@@ -1112,6 +1112,13 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         return
+    await cleanup_previous_screen(
+        callback.message.bot,
+        callback.message.chat.id,
+        callback.from_user.id,
+        state=state,
+        exclude_ids={callback.message.message_id},
+    )
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -1202,6 +1209,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             myphoto_is_premium=is_premium_user,
         )
 
+        sent_id = None
         if opened_from_menu:
             sent = await callback.message.bot.send_message(
                 chat_id=callback.message.chat.id,
@@ -1209,42 +1217,29 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                 reply_markup=kb,
                 disable_notification=True,
             )
-            try:
-                await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
-            except Exception:
-                pass
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            data["menu_msg_id"] = None
-            await state.set_data(data)
+            sent_id = sent.message_id
         else:
             try:
                 if callback.message.photo:
                     await callback.message.edit_caption(caption=text, reply_markup=kb)
                 else:
                     await callback.message.edit_text(text, reply_markup=kb)
-                try:
-                    await set_user_screen_msg_id(callback.from_user.id, callback.message.message_id)
-                except Exception:
-                    pass
+                sent_id = callback.message.message_id
             except Exception:
                 try:
                     await callback.message.delete()
                 except Exception:
                     pass
-
                 sent = await callback.message.bot.send_message(
                     chat_id=callback.message.chat.id,
                     text=text,
                     reply_markup=kb,
                     disable_notification=True,
                 )
-                try:
-                    await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
-                except Exception:
-                    pass
+                sent_id = sent.message_id
+
+        if sent_id is not None:
+            await remember_screen(callback.from_user.id, sent_id, state=state)
 
         await callback.answer()
         return

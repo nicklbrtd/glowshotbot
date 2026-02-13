@@ -17,6 +17,7 @@ from keyboards.common import build_back_to_menu_kb
 from utils.i18n import t
 from utils.banner import ensure_giraffe_banner
 from utils.time import get_moscow_now, get_moscow_today
+from utils.ui import cleanup_previous_screen, remember_screen
 
 from database_results import (
     PERIOD_DAY,
@@ -1018,6 +1019,13 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
 async def results_menu(callback: CallbackQuery, state: FSMContext | None = None):
     if not await require_user_name(callback):
         return
+    await cleanup_previous_screen(
+        callback.message.bot,
+        callback.message.chat.id,
+        callback.from_user.id,
+        state=state,
+        exclude_ids={callback.message.message_id},
+    )
     try:
         await ensure_giraffe_banner(
             callback.message.bot,
@@ -1050,7 +1058,7 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
     except Exception:
         sent = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     try:
-        await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
+        await remember_screen(callback.from_user.id, sent.message_id, state=state)
     except Exception:
         pass
 

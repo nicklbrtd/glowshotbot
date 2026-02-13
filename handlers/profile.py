@@ -58,6 +58,7 @@ from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT, rank_progress_bar
 from utils.time import get_moscow_now, is_happy_hour
+from utils.ui import cleanup_previous_screen, remember_screen
 
 router = Router()
 
@@ -661,6 +662,14 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         return
+    # чистим прошлые экраны, чтобы в чате не плодились сообщения
+    await cleanup_previous_screen(
+        callback.message.bot,
+        callback.message.chat.id,
+        callback.from_user.id,
+        state=state,
+        exclude_ids={callback.message.message_id},
+    )
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
@@ -685,7 +694,7 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
         disable_notification=True,
     )
     try:
-        await set_user_screen_msg_id(callback.from_user.id, sent.message_id)
+        await remember_screen(callback.from_user.id, sent.message_id, state=state)
     except Exception:
         pass
     try:
