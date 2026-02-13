@@ -34,12 +34,22 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 # --- Глобальный блокировщик на время обновления (не для админов/модераторов) ---
 @router.message()
 async def _update_guard_message(message: Message):
-    await should_block_update(message)
+    """
+    Глобальная проверка режима обновления. Если блокировки нет — не перехватываем событие.
+    В любом случае пробрасываем дальше через SkipHandler.
+    """
+    try:
+        await should_block_update(message)
+    finally:
+        raise SkipHandler
 
 
 @router.callback_query()
 async def _update_guard_callback(callback: CallbackQuery):
-    await should_block_update(callback)
+    try:
+        await should_block_update(callback)
+    finally:
+        raise SkipHandler
 
 
 def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
