@@ -2978,8 +2978,9 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             title=title,
         )
 
-        # Премиум-бонус: +1 кредит за публикацию
+        # За каждую новую публикацию: +1 кредит (≈2 показа), премиум сохраняет свой бонус (+1 сверх этого)
         try:
+            await add_credits(int(user_id), 1)
             if is_premium_user:
                 await add_credits(int(user_id), 1)
         except Exception:
