@@ -257,6 +257,27 @@ async def _send_fresh_menu(
         link_preview_options=NO_PREVIEW,
         parse_mode="HTML",
     )
+    # страховка: повторно навешиваем inline, чтобы точно отобразилось
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=sent.message_id,
+            reply_markup=inline_kb,
+        )
+    except Exception:
+        # fallback: создаём новое меню-сообщение с inline
+        try:
+            fallback = await bot.send_message(
+                chat_id=chat_id,
+                text=menu_text,
+                reply_markup=inline_kb,
+                disable_notification=True,
+                link_preview_options=NO_PREVIEW,
+                parse_mode="HTML",
+            )
+            sent = fallback
+        except Exception:
+            pass
     # Отдельно выставляем reply‑клавиатуру скрытым «пингуем»
     try:
         helper = await bot.send_message(
