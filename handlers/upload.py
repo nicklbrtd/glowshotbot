@@ -3122,6 +3122,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         )
         await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
         final_msg_id = sent_msg_id
+        final_msg_obj = None  # edit_message_caption не возвращает Message, будем использовать event
     except Exception:
         sent_photo = await bot.send_photo(
             chat_id=chat_id,
@@ -3132,6 +3133,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         )
         await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
         final_msg_id = sent_photo.message_id
+        final_msg_obj = sent_photo
     await state.clear()
     # Сохраняем контекст навигации после очистки мастера
     await state.update_data(
@@ -3142,4 +3144,25 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         myphoto_photo_msg_id=final_msg_id,
         myphoto_locked_ids=[],
     )
+    # После успешной загрузки сразу открываем раздел "Моя фотография"
+    try:
+        if isinstance(event, CallbackQuery):
+            await my_photo_menu(event, state)
+        else:
+            # Сообщение в роли callback, чтобы переиспользовать существующий хендлер
+            msg_obj = final_msg_obj or event
+
+            class _MsgAsCallback:
+                def __init__(self, message):
+                    self.message = message
+                    self.from_user = message.from_user
+                    self.bot = message.bot
+                    self.data = "myphoto:open"
+
+                async def answer(self, *args, **kwargs):
+                    return None
+
+            await my_photo_menu(_MsgAsCallback(msg_obj), state)
+    except Exception:
+        pass
     return
