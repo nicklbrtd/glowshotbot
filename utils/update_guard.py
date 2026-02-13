@@ -9,6 +9,9 @@ UPDATE_DEFAULT_TEXT = (
     "Просим прощения за неудобства, мы оповестим, когда обновление закончится!"
 )
 
+# Команды, которые блокируются при включённом режиме обновления
+BLOCKED_COMMANDS = {"/ref", "/help", "/feedback"}
+
 
 async def _is_staff(user: dict | None) -> bool:
     if not user:
@@ -19,7 +22,7 @@ async def _is_staff(user: dict | None) -> bool:
 async def should_block(event_obj) -> bool:
     """
     Возвращает True, если нужно прервать обработку из-за режима обновления.
-    Показывает уведомление только один раз на версию.
+    Ничего не отправляем пользователю (уведомление — отдельной рассылкой).
     """
     tg_id = getattr(getattr(event_obj, "from_user", None), "id", None)
     if tg_id is None:
@@ -39,22 +42,11 @@ async def should_block(event_obj) -> bool:
     if isinstance(event_obj, types.CallbackQuery) and (event_obj.data or "").startswith("auth:"):
         return False
 
-    # Один раз на версию
-    notice_ver = int(state.get("update_notice_ver") or 0)
-    seen_ver = await db.get_user_update_notice_ver(tg_id)
-    if seen_ver < notice_ver:
-        text = state.get("update_notice_text") or UPDATE_DEFAULT_TEXT
-        try:
-            if isinstance(event_obj, types.Message):
-                await event_obj.answer(text, disable_notification=True)
-            elif isinstance(event_obj, types.CallbackQuery):
-                await event_obj.message.answer(text, disable_notification=True)
-        except Exception:
-            pass
-        try:
-            await db.set_user_update_notice_ver(tg_id, notice_ver)
-        except Exception:
-            pass
+    # Блокируем команды /ref /help /feedback
+    if isinstance(event_obj, types.Message) and event_obj.text:
+        cmd = event_obj.text.strip().split()[0].lower()
+        if cmd in BLOCKED_COMMANDS:
+            raise SkipHandler
 
     # Блокируем дальнейшую обработку
     raise SkipHandler
