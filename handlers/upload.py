@@ -79,6 +79,84 @@ def _shorten_alert(text: str, limit: int = 180) -> str:
     return text[: max(0, limit - len(suffix))].rstrip() + suffix
 
 
+async def _accept_image_for_upload(message: Message, state: FSMContext, source: str = "photo") -> None:
+    """
+    Унифицированная обработка входящего изображения (photo или document).
+    Для document скачиваем и пересылаем как photo, чтобы итоговый file_id был фоткой.
+    """
+    data = await state.get_data()
+    upload_msg_id = data.get("upload_msg_id")
+    upload_chat_id = data.get("upload_chat_id")
+
+    if not upload_msg_id or not upload_chat_id:
+        await state.clear()
+        await message.answer(
+            "Сессия загрузки фотографии сбилась.\n\n"
+            "Зайди в раздел «Моя фотография» и попробуй ещё раз.",
+            disable_notification=True,
+        )
+        return
+
+    # Получаем байты и file_id
+    photo_bytes = None
+    file_id_to_save = None
+    try:
+        if source == "photo":
+            file_id_to_save = message.photo[-1].file_id
+        else:
+            buf = await message.bot.download(message.document)
+            photo_bytes = buf.read()
+    except Exception:
+        photo_bytes = None
+
+    # Удаляем сообщение пользователя, чтобы чат оставался чистым
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Если пришёл документ — пересылаем как фото для единообразия
+    sent_photo = None
+    if photo_bytes is not None:
+        sent_photo = await message.bot.send_photo(
+            chat_id=upload_chat_id,
+            photo=BufferedInputFile(photo_bytes, filename="upload.jpg"),
+            caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
+            reply_markup=build_upload_wizard_kb(back_to="photo"),
+            disable_notification=True,
+        )
+        file_id_to_save = sent_photo.photo[-1].file_id if sent_photo and sent_photo.photo else file_id_to_save
+    else:
+        # Заменяем старое служебное сообщение на новое с фотографией
+        try:
+            await message.bot.delete_message(chat_id=upload_chat_id, message_id=upload_msg_id)
+        except Exception:
+            pass
+        sent_photo = await message.bot.send_photo(
+            chat_id=upload_chat_id,
+            photo=file_id_to_save,
+            caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
+            reply_markup=build_upload_wizard_kb(back_to="photo"),
+            disable_notification=True,
+        )
+
+    if sent_photo is None:
+        await message.bot.send_message(
+            chat_id=upload_chat_id,
+            text="Не удалось принять изображение, попробуй ещё раз как фото.",
+            disable_notification=True,
+        )
+        return
+
+    await state.update_data(
+        file_id=file_id_to_save,
+        upload_msg_id=sent_photo.message_id,
+        upload_chat_id=upload_chat_id,
+        upload_is_photo=True,
+    )
+    await state.set_state(MyPhotoStates.waiting_title)
+
+
 async def _get_daily_top_photos_v2(day_key: str, limit: int = 10) -> list[dict]:
     """Read daily top photos from results_v2 cache and return full photo dicts."""
     try:
@@ -2032,59 +2110,18 @@ async def myphoto_choose_category(callback: CallbackQuery, state: FSMContext):
 
 @router.message(MyPhotoStates.waiting_photo, F.photo)
 async def myphoto_got_photo(message: Message, state: FSMContext):
-    """Получили фотографию от пользователя в мастере загрузки.
+    await _accept_image_for_upload(message, state, source="photo")
 
-    На этом шаге начинаем показывать саму фотографию и собираем над ней текст. Дальше
-    будем редактировать подпись (caption) этого сообщения.
-    """
 
-    data = await state.get_data()
-    upload_msg_id = data.get("upload_msg_id")
-    upload_chat_id = data.get("upload_chat_id")
-
-    if not upload_msg_id or not upload_chat_id:
-        await state.clear()
-        await message.answer(
-            "Сессия загрузки фотографии сбилась.\n\n"
-            "Зайди в раздел «Моя фотография» и попробуй ещё раз.",
-            disable_notification=True,
-        )
+@router.message(MyPhotoStates.waiting_photo, F.document)
+async def myphoto_got_document(message: Message, state: FSMContext):
+    # Принимаем документы с изображениями (jpeg/png/heic/tiff и т.д.) и сразу конвертируем в фото
+    mime = (message.document.mime_type or "").lower() if message.document else ""
+    filename = (message.document.file_name or "").lower() if message.document else ""
+    if not (mime.startswith("image/") or filename.endswith((".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".webp"))):
+        await myphoto_waiting_photo_wrong(message, state)
         return
-
-    file_id = message.photo[-1].file_id
-
-    # Удаляем сообщение пользователя с фото, чтобы всё оставалось в одном диалоге от бота
-    await message.delete()
-
-    # Формируем первичный черновик подписи
-    draft_text = "Фотография получена ✅"
-
-    # Заменяем старое служебное сообщение на новое с фотографией
-    try:
-        await message.bot.delete_message(chat_id=upload_chat_id, message_id=upload_msg_id)
-    except Exception:
-        pass
-
-    sent_photo = await message.bot.send_photo(
-        chat_id=upload_chat_id,
-        photo=file_id,
-        caption=(
-            f"{draft_text}\n\n"
-            "Теперь напиши название этой работы.\n"
-            "<b>Поменять название после загрузки нельзя.</b>\n\n"
-        ),
-        reply_markup=build_upload_wizard_kb(back_to="photo"),
-        disable_notification=True,
-    )
-
-    await state.update_data(
-        file_id=file_id,
-        upload_msg_id=sent_photo.message_id,
-        upload_chat_id=upload_chat_id,
-        upload_is_photo=True,
-    )
-
-    await state.set_state(MyPhotoStates.waiting_title)
+    await _accept_image_for_upload(message, state, source="document")
 
 
 @router.message(MyPhotoStates.waiting_photo)
@@ -2116,16 +2153,7 @@ async def myphoto_waiting_photo_wrong(message: Message, state: FSMContext):
             return
         except Exception:
             pass
-
-    try:
-        await message.bot.send_message(
-            chat_id=message.chat.id,
-            text=hint,
-            parse_mode="HTML",
-            disable_notification=True,
-        )
-    except Exception:
-        pass
+    # если не получилось отредактировать — просто игнорируем, чтобы не плодить сообщения
 
 
 @router.message(MyPhotoStates.waiting_title, F.text)

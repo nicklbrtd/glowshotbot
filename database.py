@@ -409,6 +409,7 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
             screen_msg_id BIGINT,
             banner_msg_id BIGINT,
             rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE,
+            update_notice_seen_ver INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         """
@@ -422,6 +423,9 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
     await conn.execute(
         "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE;"
     )
+    await conn.execute(
+        "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS update_notice_seen_ver INTEGER NOT NULL DEFAULT 0;"
+    )
 
 
 # -------------------- App settings (tech mode) --------------------
@@ -433,6 +437,9 @@ async def _ensure_app_settings_table(conn: asyncpg.Connection) -> None:
             id INTEGER PRIMARY KEY,
             tech_enabled INTEGER NOT NULL DEFAULT 0,
             tech_start_at TEXT,
+            update_enabled INTEGER NOT NULL DEFAULT 0,
+            update_notice_ver INTEGER NOT NULL DEFAULT 0,
+            update_notice_text TEXT,
             updated_at TEXT NOT NULL
         );
         """
@@ -444,6 +451,15 @@ async def _ensure_app_settings_table(conn: asyncpg.Connection) -> None:
         ON CONFLICT (id) DO NOTHING
         """,
         get_moscow_now_iso(),
+    )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS update_enabled INTEGER NOT NULL DEFAULT 0;"
+    )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS update_notice_ver INTEGER NOT NULL DEFAULT 0;"
+    )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS update_notice_text TEXT;"
     )
 
 
@@ -474,7 +490,7 @@ async def get_user_ui_state(tg_id: int) -> dict:
         await _ensure_ui_state_table(conn)
         row = await conn.fetchrow(
             """
-            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_tutorial_seen
+            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_tutorial_seen, update_notice_seen_ver
             FROM user_ui_state
             WHERE tg_id=$1
             """,
@@ -487,6 +503,7 @@ async def get_user_ui_state(tg_id: int) -> dict:
                 "screen_msg_id": None,
                 "banner_msg_id": None,
                 "rate_tutorial_seen": False,
+                "update_notice_seen_ver": 0,
             }
         return dict(row)
 
@@ -600,6 +617,100 @@ async def set_tech_mode_state(*, enabled: bool, start_at: str | None) -> None:
             """,
             1 if enabled else 0,
             start_at,
+            get_moscow_now_iso(),
+        )
+
+# -------------------- Update mode (обновление) --------------------
+
+async def get_update_mode_state() -> dict:
+    """
+    Return update mode state:
+    {
+      update_enabled: bool,
+      update_notice_ver: int,
+      update_notice_text: str | None
+    }
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_app_settings_table(conn)
+        row = await conn.fetchrow(
+            "SELECT update_enabled, update_notice_ver, update_notice_text FROM app_settings WHERE id=1"
+        )
+        if not row:
+            return {"update_enabled": False, "update_notice_ver": 0, "update_notice_text": None}
+        return {
+            "update_enabled": bool(row.get("update_enabled")),
+            "update_notice_ver": int(row.get("update_notice_ver") or 0),
+            "update_notice_text": row.get("update_notice_text"),
+        }
+
+
+async def set_update_mode_state(
+    *,
+    enabled: bool,
+    notice_text: str | None = None,
+    bump_version: bool = False,
+) -> None:
+    """
+    Enable/disable update mode. If bump_version=True, increments notice version to resend one-time message.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_app_settings_table(conn)
+        if bump_version:
+            await conn.execute(
+                """
+                UPDATE app_settings
+                SET update_enabled=$1,
+                    update_notice_ver=COALESCE(update_notice_ver,0)+1,
+                    update_notice_text=COALESCE($2, update_notice_text),
+                    updated_at=$3
+                WHERE id=1
+                """,
+                1 if enabled else 0,
+                notice_text,
+                get_moscow_now_iso(),
+            )
+        else:
+            await conn.execute(
+                """
+                UPDATE app_settings
+                SET update_enabled=$1,
+                    update_notice_text=COALESCE($2, update_notice_text),
+                    updated_at=$3
+                WHERE id=1
+                """,
+                1 if enabled else 0,
+                notice_text,
+                get_moscow_now_iso(),
+            )
+
+
+async def get_user_update_notice_ver(tg_id: int) -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        row = await conn.fetchrow(
+            "SELECT update_notice_seen_ver FROM user_ui_state WHERE tg_id=$1",
+            int(tg_id),
+        )
+        return int(row.get("update_notice_seen_ver")) if row else 0
+
+
+async def set_user_update_notice_ver(tg_id: int, version: int) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, update_notice_seen_ver, updated_at)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (tg_id)
+            DO UPDATE SET update_notice_seen_ver=$2, updated_at=$3
+            """,
+            int(tg_id),
+            int(version),
             get_moscow_now_iso(),
         )
 
@@ -1743,7 +1854,7 @@ async def close_db() -> None:
 
 
 async def ensure_schema() -> None:
-    """Создаёт таблицы под текущие хендлеры (если их нет)."""
+    """саздает таблици под текущи хендлери."""
     p = _assert_pool()
     async with p.acquire() as conn:
         await conn.execute(

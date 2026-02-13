@@ -8,7 +8,12 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 
 from utils.time import get_moscow_now
-from database import get_tech_mode_state, set_tech_mode_state
+from database import (
+    get_tech_mode_state,
+    set_tech_mode_state,
+    get_update_mode_state,
+    set_update_mode_state,
+)
 
 from .common import _ensure_admin, edit_or_answer
 
@@ -51,15 +56,20 @@ def _fmt_tech_state(state: dict) -> str:
     return "включен"
 
 
-def _kb_settings(state: dict):
+def _kb_settings(state: dict, update_state: dict):
     kb = InlineKeyboardBuilder()
     enabled = bool(state.get("tech_enabled"))
     if enabled:
         kb.button(text="🔴 Выключить тех.режим", callback_data="admin:settings:tech:off")
     else:
         kb.button(text="🟢 Включить тех.режим", callback_data="admin:settings:tech:on")
+    upd_enabled = bool(update_state.get("update_enabled"))
+    if upd_enabled:
+        kb.button(text="🟠 Выключить обновление", callback_data="admin:settings:update:off")
+    else:
+        kb.button(text="🟢 Включить обновление", callback_data="admin:settings:update:on")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(1)
+    kb.adjust(1, 1, 1)
     return kb.as_markup()
 
 
@@ -70,6 +80,7 @@ async def admin_settings_open(callback: CallbackQuery, state: FSMContext):
         return
 
     tech_state = await get_tech_mode_state()
+    update_state = await get_update_mode_state()
     countdown = _tech_countdown_minutes(tech_state)
     extra = ""
     if countdown is not None and countdown > 0:
@@ -78,8 +89,15 @@ async def admin_settings_open(callback: CallbackQuery, state: FSMContext):
         "⚙️ <b>Настройки</b>\n\n"
         f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
         f"{extra}"
+        f"Обновление: <b>{'включено' if update_state.get('update_enabled') else 'выключено'}</b>\n"
     )
-    await edit_or_answer(callback.message, state, prefix="admin_settings", text=text, reply_markup=_kb_settings(tech_state))
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_settings",
+        text=text,
+        reply_markup=_kb_settings(tech_state, update_state),
+    )
     await callback.answer()
 
 
@@ -102,7 +120,15 @@ async def admin_settings_tech_on(callback: CallbackQuery, state: FSMContext):
         f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
         f"{extra}"
     )
-    await edit_or_answer(callback.message, state, prefix="admin_settings", text=text, reply_markup=_kb_settings(tech_state))
+    upd_state = await get_update_mode_state()
+    text += f"Обновление: <b>{'включено' if upd_state.get('update_enabled') else 'выключено'}</b>\n"
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_settings",
+        text=text,
+        reply_markup=_kb_settings(tech_state, upd_state),
+    )
     await callback.answer("Через 5 минут начнутся тех работы!", show_alert=True)
 
 
@@ -123,5 +149,61 @@ async def admin_settings_tech_off(callback: CallbackQuery, state: FSMContext):
         f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
         f"{extra}"
     )
-    await edit_or_answer(callback.message, state, prefix="admin_settings", text=text, reply_markup=_kb_settings(tech_state))
+    upd_state = await get_update_mode_state()
+    text += f"Обновление: <b>{'включено' if upd_state.get('update_enabled') else 'выключено'}</b>\n"
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_settings",
+        text=text,
+        reply_markup=_kb_settings(tech_state, upd_state),
+    )
     await callback.answer("Тех.режим выключен")
+
+
+@router.callback_query(F.data == "admin:settings:update:on")
+async def admin_settings_update_on(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await set_update_mode_state(enabled=True, notice_text=None, bump_version=True)
+    tech_state = await get_tech_mode_state()
+    update_state = await get_update_mode_state()
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
+        f"Обновление: <b>включено</b>\n"
+    )
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_settings",
+        text=text,
+        reply_markup=_kb_settings(tech_state, update_state),
+    )
+    await callback.answer("Режим обновления включён. Пользователи увидят уведомление один раз.", show_alert=True)
+
+
+@router.callback_query(F.data == "admin:settings:update:off")
+async def admin_settings_update_off(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_admin(callback)
+    if user is None:
+        return
+
+    await set_update_mode_state(enabled=False, notice_text=None, bump_version=False)
+    tech_state = await get_tech_mode_state()
+    update_state = await get_update_mode_state()
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"Тех.режим: <b>{_fmt_tech_state(tech_state)}</b>\n"
+        f"Обновление: <b>выключено</b>\n"
+    )
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_settings",
+        text=text,
+        reply_markup=_kb_settings(tech_state, update_state),
+    )
+    await callback.answer("Режим обновления выключен", show_alert=False)

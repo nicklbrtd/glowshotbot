@@ -24,10 +24,23 @@ from handlers.premium import maybe_send_premium_expiry_warning
 from config import MASTER_ADMIN_ID
 from utils.time import get_moscow_now, get_moscow_today, is_happy_hour
 from utils.banner import ensure_giraffe_banner
+from utils.update_guard import should_block as should_block_update, send_notice_once
 
 router = Router()
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+
+# --- Глобальный блокировщик на время обновления (не для админов/модераторов) ---
+@router.message()
+async def _update_guard_message(message: Message):
+    await should_block_update(message)
+
+
+@router.callback_query()
+async def _update_guard_callback(callback: CallbackQuery):
+    await should_block_update(callback)
+
 
 def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
     """Return "ru" or "en".
@@ -900,6 +913,11 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
         )
+        # при включённом режиме обновления показываем уведомление один раз, но не блокируем
+        try:
+            await send_notice_once(message)
+        except Exception:
+            pass
 
         # Напоминание о скором окончании премиума (за 2 дня)
         try:
