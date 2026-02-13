@@ -122,31 +122,6 @@ async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> N
         pass
 
 
-def _rules_text() -> str:
-    return (
-        "ℹ️ Как это работает:\n"
-        "• Фото активно 72 часа и сразу в оценке\n"
-        "• 1 оценка = +1 credit\n"
-        "• 1 credit = 2 показа (15:00–16:00 — 4)\n"
-        "• Итоги дня — спустя 72ч после конца дня\n"
-        "• Архив видишь ты, портфолио можно открыть"
-    )
-
-
-def _menu_inline_kb(lang: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="ℹ️ Как это работает", callback_data="menu:info")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-def _menu_info_inline_kb(lang: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data="menu:info:back")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
 async def _send_fresh_menu(
     *,
     bot,
@@ -246,38 +221,14 @@ async def _send_fresh_menu(
         is_moderator=is_moderator,
         is_premium=is_premium,
     )
-    inline_kb = _menu_inline_kb(lang)
-
-    # Сообщение меню с inline‑кнопками
+    # Сообщение меню без дополнительных inline‑кнопок
     sent = await bot.send_message(
         chat_id=chat_id,
         text=menu_text,
-        reply_markup=inline_kb,
         disable_notification=True,
         link_preview_options=NO_PREVIEW,
         parse_mode="HTML",
     )
-    # страховка: повторно навешиваем inline, чтобы точно отобразилось
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=sent.message_id,
-            reply_markup=inline_kb,
-        )
-    except Exception:
-        # fallback: создаём новое меню-сообщение с inline
-        try:
-            fallback = await bot.send_message(
-                chat_id=chat_id,
-                text=menu_text,
-                reply_markup=inline_kb,
-                disable_notification=True,
-                link_preview_options=NO_PREVIEW,
-                parse_mode="HTML",
-            )
-            sent = fallback
-        except Exception:
-            pass
     # Отдельно выставляем reply‑клавиатуру скрытым «пингуем»
     try:
         helper = await bot.send_message(
@@ -338,7 +289,6 @@ def _main_menu_button_key(text: str | None) -> str | None:
         "profile": {t("kb.main.profile", "ru"), t("kb.main.profile", "en")},
         "results": {t("kb.main.results", "ru"), t("kb.main.results", "en")},
         "menu": {t("kb.back_to_menu", "ru"), t("kb.back_to_menu", "en")},
-        "info": {"ℹ️ Как это работает", "ℹ️ How it works"},
     }
     for key, variants in mapping.items():
         if s in variants:
@@ -649,7 +599,7 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     """
     Переводим нажатия reply‑кнопок в действия:
     - удаляем сообщение пользователя;
-    - убираем старое меню;
+    - по переходу в другие разделы убираем главное меню;
     - вызываем нужный раздел или возвращаем меню.
     """
     key = _main_menu_button_key(message.text)
@@ -658,7 +608,9 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     if getattr(message.chat, "type", None) not in ("private",):
         return
 
-    # Инлайн-кнопка “Как это работает” теперь; если пришло как текст — игнор
+    # Инлайн-кнопки с правилами больше нет; текстовую кнопку игнорируем
+    data = await state.get_data()
+    current_menu_id = data.get("menu_msg_id")
 
     # Блокируем доступ к разделам, если имя не указано
     try:
@@ -709,6 +661,16 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
         return
 
     pseudo_cb = _MessageAsCallback(message)
+    # При переходе в разделы — удаляем текущее меню, чтобы не мешало
+    if key != "menu" and current_menu_id:
+        await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
+        data["menu_msg_id"] = None
+        try:
+            await db.set_user_menu_msg_id(message.from_user.id, None)
+        except Exception:
+            pass
+        await state.set_data(data)
+
     if key == "menu":
         await _send_fresh_menu(
             bot=message.bot,
@@ -731,11 +693,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
-
-    data = await state.get_data()
-    prev_menu_id = data.get("menu_msg_id")
-    if prev_menu_id:
-        await _delete_message_safely(message.bot, message.chat.id, prev_menu_id)
 
 
 @router.message(CommandStart())
@@ -1017,84 +974,8 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         state=state,
         lang_hint=getattr(callback.from_user, "language_code", None),
     )
-
-
-@router.callback_query(F.data == "menu:info")
-async def menu_info(callback: CallbackQuery, state: FSMContext):
-    user = await db.get_user_by_tg_id(callback.from_user.id)
-    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
-    try:
-        await callback.message.edit_text(
-            _rules_text(),
-            reply_markup=_menu_info_inline_kb(lang),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        pass
-    await callback.answer()
-
-
-@router.callback_query(F.data == "menu:info:back")
-async def menu_info_back(callback: CallbackQuery, state: FSMContext):
-    user = await db.get_user_by_tg_id(callback.from_user.id)
-    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
-    is_admin = _get_flag(user, "is_admin")
-    is_moderator = _get_flag(user, "is_moderator")
-    is_premium = await db.is_user_premium_active(callback.from_user.id)
-    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium, lang=lang)
-    inline_kb = _menu_inline_kb(lang)
-    main_kb = await _build_dynamic_main_menu(
-        user=user,
-        lang=lang,
-        is_admin=is_admin,
-        is_moderator=is_moderator,
-        is_premium=is_premium,
-    )
-    try:
-        await callback.message.edit_text(
-            menu_text,
-            reply_markup=inline_kb,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        try:
-            await callback.message.edit_reply_markup(reply_markup=inline_kb)
-        except Exception:
-            pass
-    # восстановим reply-клавиатуру скрытым сообщением
-    try:
-        helper = await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text="⌨️",
-            reply_markup=main_kb,
-            disable_notification=True,
-        )
-        try:
-            await helper.delete()
-        except Exception:
-            pass
-    except Exception:
-        pass
-    await callback.answer()
-    data = await state.get_data()
-    menu_msg_id = data.get("menu_msg_id")
-
-    # ...затем удаляем старое сообщение раздела
+    # удаляем старый экран, чтобы не висел рядом с меню
     try:
         await callback.message.delete()
     except Exception:
         pass
-
-    # удаляем висевшее сообщение с фото "моя фотография" (если было)
-    if photo_msg_id:
-        try:
-            if photo_msg_id != menu_msg_id:
-                await callback.message.bot.delete_message(chat_id=chat_id, message_id=photo_msg_id)
-        except Exception:
-            pass
-        data["myphoto_photo_msg_id"] = None
-
-    data["menu_msg_id"] = menu_msg_id
-    await state.set_data(data)
