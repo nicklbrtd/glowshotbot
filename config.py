@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from datetime import time
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -61,6 +62,29 @@ RATE_TUTORIAL_PHOTO_FILE_ID = os.getenv(
 # ===== Rating feed tuning =====
 RATE_POPULAR_MIN_RATINGS = int(os.getenv("RATE_POPULAR_MIN_RATINGS", "10"))
 RATE_LOW_RATINGS_MAX = int(os.getenv("RATE_LOW_RATINGS_MAX", "2"))
+BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
+
+
+def _parse_time(raw: str | None, default: str) -> time:
+    val = (raw or default).strip()
+    parts = val.split(":")
+    try:
+        h = int(parts[0]) if parts and parts[0] else 0
+        m = int(parts[1]) if len(parts) > 1 else 0
+        return time(hour=max(0, min(23, h)), minute=max(0, min(59, m)))
+    except Exception:
+        return _parse_time(default, default) if raw != default else time(15, 0)
+
+
+HAPPY_HOUR_START = _parse_time(os.getenv("HAPPY_HOUR_START"), "15:00")
+HAPPY_HOUR_END = _parse_time(os.getenv("HAPPY_HOUR_END"), "16:00")
+CREDIT_SHOWS_BASE = int(os.getenv("CREDIT_SHOWS_BASE", "2"))
+CREDIT_SHOWS_HAPPY = int(os.getenv("CREDIT_SHOWS_HAPPY", "4"))
+MIN_VOTES_FOR_TOP = int(os.getenv("MIN_VOTES_FOR_TOP", "7"))
+ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY = int(os.getenv("ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY", "5"))
+PORTFOLIO_TOP_N = int(os.getenv("PORTFOLIO_TOP_N", "9"))
+TAIL_PROBABILITY = float(os.getenv("TAIL_PROBABILITY", "0.05"))
+MIN_VOTES_FOR_NORMAL_FEED = int(os.getenv("MIN_VOTES_FOR_NORMAL_FEED", "5"))
 
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)

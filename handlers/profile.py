@@ -46,6 +46,10 @@ from database import (
     set_all_user_photos_ratings_enabled,
     set_user_allow_ratings_by_tg_id,
     set_user_screen_msg_id,
+    get_user_stats,
+    set_public_portfolio,
+    is_public_portfolio_enabled,
+    get_archived_photos_for_user,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -53,9 +57,17 @@ from utils.antispam import should_throttle
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT, rank_progress_bar
-from utils.time import get_moscow_now
+from utils.time import get_moscow_now, is_happy_hour
 
 router = Router()
+CREDITS_RULES_SHORT = (
+    "⚡ Как это работает:\n"
+    "• Фото участвует 72 часа\n"
+    "• 1 оценка = +1 credit\n"
+    "• 1 credit = 2 показа (15:00–16:00 — 4)\n"
+    "• Итоги дня выходят после 72 часов\n"
+    "• Архив виден только тебе, портфолио можно открыть"
+)
 
 
 # Helper to get language from user dict
@@ -133,6 +145,14 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     if 2 <= v <= 4:
         return few
     return many
+
+
+def _credits_line(stats: dict | None) -> str:
+    credits = int((stats or {}).get("credits") or 0)
+    tokens = int((stats or {}).get("show_tokens") or 0)
+    mult = 4 if is_happy_hour() else 2
+    approx = credits * mult + tokens
+    return f"💳 Credits: {credits} (≈ {approx} показов)"
 
 
 def _pick_rated_verb(user: dict | None, lang: str) -> str:
@@ -262,6 +282,11 @@ async def build_profile_view(user: dict):
         safe_tg_id_int = int(tg_id) if tg_id is not None else None
     except Exception:
         safe_tg_id_int = None
+
+    try:
+        stats = await get_user_stats(int(user_id))
+    except Exception:
+        stats = {}
 
     rater_ids_for_given: list[int] = []
     for rid in (safe_user_id_int, safe_tg_id_int):
@@ -531,6 +556,7 @@ async def build_profile_view(user: dict):
         t("profile.rank", lang, rank=rank_display),
         t("profile.gender_line", lang, gender=gender_icon),
         f"🧾 Код автора: <code>{html.escape(str(author_code), quote=False)}</code>",
+        _credits_line(stats),
     ]
 
     # Локация (опционально + можно скрыть)
@@ -601,6 +627,12 @@ async def build_profile_view(user: dict):
     stats_body = "\n".join([html.escape(line, quote=False) for line in stats_lines])
     text_lines.append(t("profile.section.stats", lang))
     text_lines.append(f"<blockquote expandable>{stats_body}</blockquote>")
+
+    # Портфолио/архив (короткий статус)
+    portfolio_enabled = bool((stats or {}).get("public_portfolio"))
+    portfolio_line = "Портфолио: включено (топ-9 архивных фото)" if portfolio_enabled else "Портфолио: выключено"
+    text_lines.append(portfolio_line)
+    text_lines.append(CREDITS_RULES_SHORT)
 
     # Premium
     text_lines.extend([
@@ -1781,6 +1813,7 @@ def _kb_profile_settings(
     *,
     ads_enabled: bool | None = None,
     is_premium: bool = False,
+    portfolio_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t("settings.btn.notifications", lang), callback_data="profile:settings:notifications")
@@ -1788,11 +1821,13 @@ def _kb_profile_settings(
     if is_premium:
         ads_state = " ✅" if ads_enabled else " ❌"
         kb.button(text=f"Реклама{ads_state}", callback_data="profile:settings:toggle:ads")
+    port_state = "🌐 Портфолио: ON" if portfolio_enabled else "🌐 Портфолио: OFF"
+    kb.button(text=port_state, callback_data="profile:settings:toggle:portfolio")
     kb.button(text=t("common.back", lang), callback_data="menu:profile")
     if is_premium:
-        kb.adjust(2, 1, 1, 1)
+        kb.adjust(2, 1, 1, 1, 1)
     else:
-        kb.adjust(2, 1, 1)
+        kb.adjust(2, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -1803,6 +1838,7 @@ def _render_profile_settings(
     *,
     ads_enabled: bool | None = None,
     is_premium: bool = False,
+    portfolio_enabled: bool = False,
 ) -> str:
     def _lang_label(code: str) -> str:
         if code.startswith("ru"):
@@ -1817,12 +1853,15 @@ def _render_profile_settings(
     else:
         ads_line = "\nРеклама отключается в Premium."
 
+    portfolio_line = "🌐 Портфолио: включено (топ-9 архива)" if portfolio_enabled else "🌐 Портфолио: выключено"
+
     return (
         f"{t('settings.title', lang)}\n\n"
         f"🌐 {t('settings.lang.line', lang, value=lang_label)}\n"
         f"{t('settings.lang.hint', lang, value=lang_label)}\n\n"
         f"🔔 {t('settings.notifications.hint', lang)}"
-        f"{ads_line}"
+        f"{ads_line}\n\n"
+        f"{portfolio_line}"
     )
 
 
@@ -1900,6 +1939,8 @@ async def profile_settings_toggle_ads(callback: CallbackQuery):
     streak_status = await get_profile_streak_status(tg_id)
     ads_enabled = new_state
     lang = _get_lang(user)
+    stats = await get_user_stats(int(user.get("id")))
+    portfolio_enabled = bool(stats.get("public_portfolio")) if stats else False
 
     text = _render_profile_settings(
         notify,
@@ -1907,6 +1948,7 @@ async def profile_settings_toggle_ads(callback: CallbackQuery):
         lang,
         ads_enabled=ads_enabled,
         is_premium=premium_active,
+        portfolio_enabled=portfolio_enabled,
     )
     kb = _kb_profile_settings(
         notify,
@@ -1914,6 +1956,7 @@ async def profile_settings_toggle_ads(callback: CallbackQuery):
         lang,
         ads_enabled=ads_enabled,
         is_premium=premium_active,
+        portfolio_enabled=portfolio_enabled,
     )
 
     try:
@@ -1940,6 +1983,8 @@ async def profile_settings_open(callback: CallbackQuery):
     premium_active = await is_user_premium_active(tg_id)
     if ads_enabled is None:
         ads_enabled = not premium_active
+    stats = await get_user_stats(int(user.get("id")))
+    portfolio_enabled = bool(stats.get("public_portfolio")) if stats else False
 
     lang = _get_lang(user)
     text = _render_profile_settings(
@@ -1948,6 +1993,7 @@ async def profile_settings_open(callback: CallbackQuery):
         lang,
         ads_enabled=ads_enabled,
         is_premium=premium_active,
+        portfolio_enabled=portfolio_enabled,
     )
     kb = _kb_profile_settings(
         notify,
@@ -1955,6 +2001,7 @@ async def profile_settings_open(callback: CallbackQuery):
         lang,
         ads_enabled=ads_enabled,
         is_premium=premium_active,
+        portfolio_enabled=portfolio_enabled,
     )
 
     try:
@@ -2006,6 +2053,10 @@ async def profile_settings_toggle_lang(callback: CallbackQuery):
     lang = _get_lang(user)
     notify = await get_notify_settings_by_tg_id(tg_id)
     streak_status = await get_profile_streak_status(tg_id)
+    ads_enabled = await get_ads_enabled_by_tg_id(tg_id)
+    premium_active = await is_user_premium_active(tg_id)
+    stats = await get_user_stats(int(user.get("id"))) if user else {}
+    portfolio_enabled = bool((stats or {}).get("public_portfolio"))
 
     try:
         await callback.message.edit_text(
@@ -2013,11 +2064,17 @@ async def profile_settings_toggle_lang(callback: CallbackQuery):
                 notify,
                 streak_status,
                 lang,
+                ads_enabled=ads_enabled,
+                is_premium=premium_active,
+                portfolio_enabled=portfolio_enabled,
             ),
             reply_markup=_kb_profile_settings(
                 notify,
                 streak_status,
                 lang,
+                ads_enabled=ads_enabled,
+                is_premium=premium_active,
+                portfolio_enabled=portfolio_enabled,
             ),
             parse_mode="HTML",
         )
@@ -2118,6 +2175,45 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
             raise
 
     await callback.answer(t("settings.toast.ok", lang))
+
+
+@router.callback_query(F.data == "profile:settings:toggle:portfolio")
+async def profile_settings_toggle_portfolio(callback: CallbackQuery):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе.", show_alert=True)
+        return
+    stats = await get_user_stats(int(user.get("id")))
+    current = bool((stats or {}).get("public_portfolio"))
+    await set_public_portfolio(int(user.get("id")), not current)
+
+    notify = await get_notify_settings_by_tg_id(callback.from_user.id)
+    streak_status = await get_profile_streak_status(callback.from_user.id)
+    ads_enabled = await get_ads_enabled_by_tg_id(callback.from_user.id)
+    premium_active = await is_user_premium_active(callback.from_user.id)
+    lang = _get_lang(user)
+
+    text = _render_profile_settings(
+        notify,
+        streak_status,
+        lang,
+        ads_enabled=ads_enabled,
+        is_premium=premium_active,
+        portfolio_enabled=not current,
+    )
+    kb = _kb_profile_settings(
+        notify,
+        streak_status,
+        lang,
+        ads_enabled=ads_enabled,
+        is_premium=premium_active,
+        portfolio_enabled=not current,
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Статус портфолио обновлён.")
 
 
 @router.callback_query(F.data == "profile:delete")

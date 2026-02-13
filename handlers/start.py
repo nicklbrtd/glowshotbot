@@ -22,7 +22,7 @@ from handlers.profile import profile_menu
 from handlers.results import results_menu
 from handlers.premium import maybe_send_premium_expiry_warning
 from config import MASTER_ADMIN_ID
-from utils.time import get_moscow_now, get_moscow_today
+from utils.time import get_moscow_now, get_moscow_today, is_happy_hour
 from utils.banner import ensure_giraffe_banner
 
 router = Router()
@@ -120,6 +120,17 @@ async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> N
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
+
+
+def _rules_text() -> str:
+    return (
+        "ℹ️ Как это работает:\n"
+        "• Фото активно 72 часа и сразу в оценке\n"
+        "• 1 оценка = +1 credit\n"
+        "• 1 credit = 2 показа (15:00–16:00 — 4)\n"
+        "• Итоги дня — спустя 72ч после конца дня\n"
+        "• Архив видишь ты, портфолио можно открыть"
+    )
 
 
 async def _send_fresh_menu(
@@ -276,6 +287,7 @@ def _main_menu_button_key(text: str | None) -> str | None:
         "profile": {t("kb.main.profile", "ru"), t("kb.main.profile", "en")},
         "results": {t("kb.main.results", "ru"), t("kb.main.results", "en")},
         "menu": {t("kb.back_to_menu", "ru"), t("kb.back_to_menu", "en")},
+        "info": {"ℹ️ Как это работает", "ℹ️ How it works"},
     }
     for key, variants in mapping.items():
         if s in variants:
@@ -420,6 +432,21 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
             photos = []
 
     lines: list[str] = []
+
+    credits_line = None
+    if user and user.get("id"):
+        try:
+            stats = await db.get_user_stats(int(user["id"]))
+            credits = int(stats.get("credits") or 0)
+            tokens = int(stats.get("show_tokens") or 0)
+            mult = 4 if is_happy_hour() else 2
+            approx = credits * mult + tokens
+            credits_line = f"💳 Credits: {credits} (≈ {approx} показов)"
+        except Exception:
+            credits_line = None
+
+    if credits_line:
+        lines.append(credits_line)
 
     # Сценарий 1: нет фото
     if not photos:
@@ -578,6 +605,13 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     if key is None:
         raise SkipHandler
     if getattr(message.chat, "type", None) not in ("private",):
+        return
+
+    if key == "info":
+        try:
+            await message.answer(_rules_text(), disable_notification=True)
+        except Exception:
+            pass
         return
 
     # Блокируем доступ к разделам, если имя не указано

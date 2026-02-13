@@ -4,12 +4,22 @@ import json
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 import asyncpg
 from asyncpg.exceptions import UniqueViolationError
 
-from utils.time import get_moscow_now, get_moscow_today, get_moscow_now_iso
+from utils.time import (
+    get_moscow_now,
+    get_moscow_today,
+    get_moscow_now_iso,
+    get_bot_now,
+    get_bot_now_iso,
+    get_bot_today,
+    today_key,
+    end_of_day,
+    is_happy_hour,
+)
 from utils.watermark import generate_author_code
 
 import traceback
@@ -105,11 +115,14 @@ def _assert_pool() -> asyncpg.Pool:
 
 def _today_key() -> str:
     """Day key in Moscow timezone, stored as ISO date string (YYYY-MM-DD)."""
-    d = get_moscow_today()
     try:
-        return d.isoformat()
+        return today_key()
     except Exception:
-        return str(d)
+        d = get_moscow_today()
+        try:
+            return d.isoformat()
+        except Exception:
+            return str(d)
 
 
 def _week_key() -> str:
@@ -120,6 +133,153 @@ def _week_key() -> str:
         return monday.isoformat()
     except Exception:
         return str(monday)
+
+
+# ---------------------------------------------------------------------------
+# Credits / stats helpers
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_user_stats_row(conn: asyncpg.Connection, user_id: int) -> dict:
+    """Get or create user_stats row, resetting day counters if last_active_at is another day."""
+    now_dt = get_bot_now()
+    today = now_dt.date()
+    row = await conn.fetchrow(
+        """
+        INSERT INTO user_stats (user_id, credits, show_tokens, last_active_at, votes_given_today, votes_given_happyhour_today, public_portfolio)
+        VALUES ($1, 0, 0, $2, 0, 0, FALSE)
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING *
+        """,
+        int(user_id),
+        now_dt,
+    )
+    if row is None:
+        row = await conn.fetchrow("SELECT * FROM user_stats WHERE user_id=$1", int(user_id))
+
+    if row is None:
+        return {
+            "user_id": int(user_id),
+            "credits": 0,
+            "show_tokens": 0,
+            "votes_given_today": 0,
+            "votes_given_happyhour_today": 0,
+            "public_portfolio": False,
+            "last_active_at": now_dt,
+        }
+
+    # reset daily counters when day changes
+    last_active = row.get("last_active_at")
+    if last_active is None or getattr(last_active, "date", lambda: today)() != today:
+        row = await conn.fetchrow(
+            """
+            UPDATE user_stats
+            SET votes_given_today=0,
+                votes_given_happyhour_today=0,
+                last_active_at=$2
+            WHERE user_id=$1
+            RETURNING *
+            """,
+            int(user_id),
+            now_dt,
+        )
+    return dict(row) if row else {}
+
+
+async def get_user_stats(user_id: int) -> dict:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        return await _ensure_user_stats_row(conn, int(user_id))
+
+
+def _happy_hour_multiplier(now: datetime | None = None) -> int:
+    return 4 if is_happy_hour(now) else 2
+
+
+async def add_credits_on_vote(
+    voter_id: int,
+    *,
+    delta: int = 1,
+    now: datetime | None = None,
+) -> dict:
+    """Increment credits for voter and their daily counters. Returns updated stats."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        stats = await _ensure_user_stats_row(conn, int(voter_id))
+        now_dt = now or get_bot_now()
+        is_hh = is_happy_hour(now_dt)
+        stats = await conn.fetchrow(
+            """
+            UPDATE user_stats
+            SET credits = credits + $2,
+                last_active_at = $3,
+                votes_given_today = votes_given_today + 1,
+                votes_given_happyhour_today = votes_given_happyhour_today + CASE WHEN $4 THEN 1 ELSE 0 END
+            WHERE user_id=$1
+            RETURNING *
+            """,
+            int(voter_id),
+            int(delta),
+            now_dt,
+            is_hh,
+        )
+    return dict(stats) if stats else {}
+
+
+async def add_credits(user_id: int, amount: int = 1) -> dict:
+    """Public helper to add credits (e.g., bonus for premium upload)."""
+    return await add_credits_on_vote(int(user_id), delta=int(amount), now=get_bot_now())
+
+
+async def consume_credits_on_show(author_user_id: int, *, now: datetime | None = None) -> bool:
+    """
+    Spend author's credits into show tokens and consume one token per show.
+
+    Logic:
+      - show_tokens is an intermediate balance of ready-to-spend show impressions.
+      - If tokens are zero, convert 1 credit into X tokens (HH multiplier).
+      - If after conversion tokens are still zero -> return False (no inventory).
+      - One photo show consumes exactly 1 token.
+    """
+    p = _assert_pool()
+    now_dt = now or get_bot_now()
+    multiplier = _happy_hour_multiplier(now_dt)
+    async with p.acquire() as conn:
+        stats = await _ensure_user_stats_row(conn, int(author_user_id))
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT credits, show_tokens FROM user_stats WHERE user_id=$1 FOR UPDATE",
+                int(author_user_id),
+            )
+            if not row:
+                return False
+            credits = int(row["credits"] or 0)
+            tokens = int(row["show_tokens"] or 0)
+            if tokens <= 0 and credits > 0:
+                credits -= 1
+                tokens += multiplier
+            if tokens <= 0:
+                await conn.execute(
+                    "UPDATE user_stats SET credits=$2, show_tokens=$3, last_active_at=$4 WHERE user_id=$1",
+                    int(author_user_id),
+                    credits,
+                    tokens,
+                    now_dt,
+                )
+                return False
+            tokens -= 1
+            await conn.execute(
+                "UPDATE user_stats SET credits=$2, show_tokens=$3, last_active_at=$4 WHERE user_id=$1",
+                int(author_user_id),
+                credits,
+                tokens,
+                now_dt,
+            )
+            return True
+
+
+async def happy_hour_multiplier(now: datetime | None = None) -> int:
+    return _happy_hour_multiplier(now)
 # -------------------- Notifications settings (likes/comments) --------------------
 
 async def _ensure_notify_tables(conn: asyncpg.Connection) -> None:
@@ -1644,6 +1804,15 @@ async def ensure_schema() -> None:
               device_info TEXT,
               tag TEXT,
               day_key TEXT,
+              submit_day DATE,
+              expires_at TIMESTAMPTZ,
+              status TEXT NOT NULL DEFAULT 'active',
+              votes_count INTEGER NOT NULL DEFAULT 0,
+              sum_score INTEGER NOT NULL DEFAULT 0,
+              avg_score NUMERIC(6,3) NOT NULL DEFAULT 0,
+              views_count INTEGER NOT NULL DEFAULT 0,
+              daily_views_budget INTEGER NOT NULL DEFAULT 0,
+              tg_file_id TEXT,
               moderation_status TEXT NOT NULL DEFAULT 'active',
               ratings_enabled INTEGER NOT NULL DEFAULT 1,
               is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -1662,6 +1831,20 @@ async def ensure_schema() -> None:
               value INTEGER NOT NULL,
               created_at TEXT NOT NULL,
               UNIQUE(photo_id, user_id)
+            );
+            """
+        )
+
+        # new votes table (parallel to legacy ratings for new flows)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS votes (
+              id BIGSERIAL PRIMARY KEY,
+              photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              voter_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              score INTEGER NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              UNIQUE(photo_id, voter_id)
             );
             """
         )
@@ -1830,6 +2013,74 @@ async def ensure_schema() -> None:
 
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS user_stats (
+              user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+              credits INTEGER NOT NULL DEFAULT 0,
+              show_tokens INTEGER NOT NULL DEFAULT 0,
+              last_active_at TIMESTAMPTZ,
+              votes_given_today INTEGER NOT NULL DEFAULT 0,
+              votes_given_happyhour_today INTEGER NOT NULL DEFAULT 0,
+              public_portfolio BOOLEAN NOT NULL DEFAULT FALSE
+            );
+            """
+        )
+        await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS show_tokens INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS migration_notified BOOLEAN NOT NULL DEFAULT FALSE;")
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_author_votes (
+              day DATE NOT NULL,
+              voter_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              author_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              cnt INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY(day, voter_id, author_id)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS photo_views (
+              photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              viewer_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              PRIMARY KEY (photo_id, viewer_id)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS result_ranks (
+              photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              submit_day DATE NOT NULL,
+              final_rank INTEGER NOT NULL,
+              finalized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              PRIMARY KEY (photo_id, submit_day)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_queue (
+              id BIGSERIAL PRIMARY KEY,
+              user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              type TEXT NOT NULL,
+              payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+              run_after TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        await conn.execute("ALTER TABLE notification_queue ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE notification_queue ADD COLUMN IF NOT EXISTS last_error TEXT;")
+
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS rating_suspicious (
               user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
               day_key TEXT NOT NULL,
@@ -1860,6 +2111,61 @@ async def ensure_schema() -> None:
               user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
               kind TEXT NOT NULL,
               created_at TEXT NOT NULL
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS duels (
+              id BIGSERIAL PRIMARY KEY,
+              photo_a_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              photo_b_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              starts_at TIMESTAMPTZ NOT NULL,
+              ends_at TIMESTAMPTZ NOT NULL,
+              status TEXT NOT NULL DEFAULT 'scheduled',
+              reward_credits INTEGER NOT NULL DEFAULT 0,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS duel_votes (
+              duel_id BIGINT NOT NULL REFERENCES duels(id) ON DELETE CASCADE,
+              voter_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              choice TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              PRIMARY KEY (duel_id, voter_id)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS collabs (
+              id BIGSERIAL PRIMARY KEY,
+              photo_a_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              photo_b_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+              author_a_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              author_b_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              starts_at TIMESTAMPTZ NOT NULL,
+              ends_at TIMESTAMPTZ NOT NULL,
+              status TEXT NOT NULL DEFAULT 'scheduled',
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS collab_votes (
+              collab_id BIGINT NOT NULL REFERENCES collabs(id) ON DELETE CASCADE,
+              voter_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              score INTEGER NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              PRIMARY KEY (collab_id, voter_id)
             );
             """
         )
@@ -2027,6 +2333,16 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_public TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS file_id_support TEXT;")
         await conn.execute("ALTER TABLE rating_feed_state ADD COLUMN IF NOT EXISTS last_author_id BIGINT;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS submit_day DATE;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS votes_count INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS sum_score INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS avg_score NUMERIC(6,3) NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS views_count INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS daily_views_budget INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS tg_file_id TEXT;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS deleted_reason TEXT;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -2054,6 +2370,17 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_owner ON photo_share_links(owner_tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_share_links_active ON photo_share_links(is_active);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_tag ON photos(tag);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_submit_day ON photos(submit_day);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status_new ON photos(status);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_expires_at ON photos(expires_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status_expires ON photos(status, expires_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_submit_status ON photos(submit_day, status);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_photo_created ON votes(photo_id, created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_created ON votes(voter_id, created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_views_viewer ON photo_views(viewer_id, created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_notification_queue_status_run ON notification_queue(status, run_after);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_author_votes_voter_day ON daily_author_votes(voter_id, day);")
 
         # ======== CREATE UNIQUE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_order_id ON payments(provider, order_id);")
@@ -3816,12 +4143,18 @@ async def create_today_photo(
     device_info: str | None = None,
     ratings_enabled: bool | None = None,
 ) -> int:
-    """Создать новую фотографию пользователя на текущий день (по Москве).
-    Никакого авто-удаления. day_key — только ключ дня для лимитов/итогов.
+    """Создать новую фотографию пользователя на текущий день.
+
+    Заполняем:
+      - submit_day (date) для итогов/партий,
+      - expires_at = end_of_day(today)+72h,
+      - status='active',
+      - базовые счетчики (votes/avg/views) через DEFAULT.
     """
     p = _assert_pool()
-    now_iso = get_moscow_now_iso()
-    day_key = _today_key()
+    now_iso = get_bot_now_iso()
+    today = get_bot_today()
+    expires_at = end_of_day(get_bot_today()) + timedelta(hours=72)
 
     # Если описания нет, явно сохраняем метку "нет"
     if description is not None:
@@ -3854,12 +4187,15 @@ async def create_today_photo(
                 device_type,
                 device_info,
                 day_key,
+                submit_day,
+                expires_at,
+                status,
                 moderation_status,
                 ratings_enabled,
                 is_deleted,
                 created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,0,$12)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active','active',$13,0,$14)
             RETURNING id
             """,
             int(user_id),
@@ -3871,7 +4207,9 @@ async def create_today_photo(
             category,
             device_type,
             device_info,
-            day_key,
+            today,
+            today,
+            expires_at,
             1 if enabled else 0,
             now_iso,
         )
@@ -3905,23 +4243,117 @@ async def get_today_photos_for_user(user_id: int, limit: int = 50) -> list[dict]
     return [dict(r) for r in rows]
 
 
-async def get_active_photos_for_user(user_id: int, limit: int = 50) -> list[dict]:
+async def is_today_slot_locked(user_id: int) -> bool:
+    """Слот дня занят, если уже есть активное фото или пользователь сам удалил фото сегодня."""
+    p = _assert_pool()
+    day = _today_key()
+    async with p.acquire() as conn:
+        v = await conn.fetchval(
+            """
+            SELECT 1
+            FROM photos
+            WHERE user_id=$1
+              AND day_key=$2
+              AND (
+                    status='active'
+                 OR deleted_reason='user'
+              )
+            LIMIT 1
+            """,
+            int(user_id),
+            day,
+        )
+    return bool(v)
+
+
+async def get_active_photos_for_user(user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
     p = _assert_pool()
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM photos
-            WHERE user_id=$1 AND is_deleted=0
+            WHERE user_id=$1 AND is_deleted=0 AND status='active'
             ORDER BY created_at DESC, id DESC
-            LIMIT $2
+            LIMIT $2 OFFSET $3
             """,
-            int(user_id), int(limit)
+            int(user_id), int(limit), int(offset)
         )
     return [dict(r) for r in rows]
 
 
 async def get_latest_photos_for_user(user_id: int, limit: int = 2) -> list[dict]:
     return await get_active_photos_for_user(user_id, limit=limit)
+
+
+async def get_archived_photos_for_user(user_id: int, *, limit: int = 50, offset: int = 0, min_votes: int = 0) -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM photos
+            WHERE user_id=$1
+              AND is_deleted=0
+              AND status='archived'
+              AND votes_count >= $3
+            ORDER BY avg_score DESC, votes_count DESC, created_at DESC
+            LIMIT $2 OFFSET $4
+            """,
+            int(user_id),
+            int(limit),
+            int(min_votes),
+            int(offset),
+        )
+    return [dict(r) for r in rows]
+
+
+async def set_public_portfolio(user_id: int, enabled: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        await conn.execute(
+            "UPDATE user_stats SET public_portfolio=$2 WHERE user_id=$1",
+            int(user_id),
+            bool(enabled),
+        )
+
+
+async def is_public_portfolio_enabled(user_id: int) -> bool:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT public_portfolio FROM user_stats WHERE user_id=$1",
+            int(user_id),
+        )
+    return bool(val)
+
+
+async def get_public_portfolio_photos(user_id: int, *, limit: int = 9, min_votes: int = 7) -> list[dict]:
+    """Top-N архивных фото для публичного портфолио, если включено."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        enabled = await conn.fetchval(
+            "SELECT public_portfolio FROM user_stats WHERE user_id=$1",
+            int(user_id),
+        )
+        if not enabled:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM photos
+            WHERE user_id=$1
+              AND is_deleted=0
+              AND status='archived'
+              AND votes_count >= $3
+            ORDER BY avg_score DESC, votes_count DESC, created_at DESC
+            LIMIT $2
+            """,
+            int(user_id),
+            int(limit),
+            int(min_votes),
+        )
+    return [dict(r) for r in rows]
 
 
 async def get_photo_by_id(photo_id: int) -> dict | None:
@@ -4031,8 +4463,30 @@ async def toggle_photo_ratings_enabled(photo_id: int, user_id: int) -> bool | No
 async def mark_photo_deleted(photo_id: int) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
-        await conn.execute("UPDATE photos SET is_deleted=1, deleted_at=$1 WHERE id=$2",
-                           get_moscow_now_iso(), int(photo_id))
+        await conn.execute(
+            "UPDATE photos SET is_deleted=1, status='deleted', deleted_reason=COALESCE(deleted_reason,'system'), deleted_at=$1 WHERE id=$2",
+            get_bot_now_iso(),
+            int(photo_id),
+        )
+
+
+async def mark_photo_deleted_by_user(photo_id: int, user_id: int) -> None:
+    """Мягкое удаление пользователем — блокирует слот дня."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE photos
+            SET is_deleted=1,
+                status='deleted',
+                deleted_reason='user',
+                deleted_at=$3
+            WHERE id=$1 AND user_id=$2
+            """,
+            int(photo_id),
+            int(user_id),
+            get_bot_now_iso(),
+        )
 
 
 async def hard_delete_photo(photo_id: int) -> None:
@@ -4081,6 +4535,143 @@ async def get_photo_author_tg_id(photo_id: int) -> int | None:
 
 # -------------------- rating flow --------------------
 
+async def _abuse_vote_limit_exceeded(conn: asyncpg.Connection, voter_id: int, author_id: int, day: str) -> bool:
+    """Return True if voter already превысил лимит голосов по автору за день, O(1) через daily_author_votes."""
+    try:
+        from config import ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY as LIMIT
+    except Exception:
+        LIMIT = 5
+    if int(LIMIT) <= 0:
+        return False
+    row = await conn.fetchrow(
+        "SELECT cnt FROM daily_author_votes WHERE day=$1 AND voter_id=$2 AND author_id=$3 FOR UPDATE",
+        day,
+        int(voter_id),
+        int(author_id),
+    )
+    if row is None:
+        await conn.execute(
+            "INSERT INTO daily_author_votes (day, voter_id, author_id, cnt) VALUES ($1,$2,$3,1)",
+            day,
+            int(voter_id),
+            int(author_id),
+        )
+        return False
+    cnt = int(row["cnt"] or 0)
+    if cnt >= int(LIMIT):
+        return True
+    await conn.execute(
+        "UPDATE daily_author_votes SET cnt = cnt + 1 WHERE day=$1 AND voter_id=$2 AND author_id=$3",
+        day,
+        int(voter_id),
+        int(author_id),
+    )
+    return False
+
+
+async def next_photo_for_viewer(viewer_user_id: int) -> dict | None:
+    """
+    Smart выдача:
+      - не показываем свои фото и уже оценённые/просмотренные;
+      - фото активно (status=active, не истёк expires_at);
+      - предпочитаем авторов с кредитами/токенами; иначе «хвост» редких показов.
+      - защита от гонок: FOR UPDATE SKIP LOCKED + списание токена в той же транзакции.
+    """
+    p = _assert_pool()
+    now = get_bot_now()
+    async def _pick(require_credit: bool, *, spend_token: bool, max_votes: int | None = None) -> dict | None:
+        async with p.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    WITH cand AS (
+                        SELECT p.id
+                        FROM photos p
+                        LEFT JOIN user_stats us ON us.user_id = p.user_id
+                        WHERE p.is_deleted = 0
+                          AND COALESCE(p.status,'active') = 'active'
+                          AND p.moderation_status IN ('active','good')
+                          AND COALESCE(p.ratings_enabled,1)=1
+                          AND (p.expires_at IS NULL OR p.expires_at > NOW())
+                          AND p.user_id <> $1
+                          AND NOT EXISTS (SELECT 1 FROM ratings r WHERE r.photo_id=p.id AND r.user_id=$1)
+                          AND NOT EXISTS (SELECT 1 FROM votes v WHERE v.photo_id=p.id AND v.voter_id=$1)
+                          AND NOT EXISTS (SELECT 1 FROM photo_views pv WHERE pv.photo_id=p.id AND pv.viewer_id=$1)
+                          AND ($2::bool = FALSE OR COALESCE(us.credits,0)+COALESCE(us.show_tokens,0) > 0)
+                          AND ($3::int IS NULL OR COALESCE(p.votes_count,0) <= $3)
+                        ORDER BY COALESCE(p.votes_count,0) ASC, p.created_at DESC
+                        LIMIT 50
+                    )
+                    SELECT p.* FROM photos p
+                    JOIN cand c ON c.id = p.id
+                    ORDER BY COALESCE(p.votes_count,0) ASC, p.created_at DESC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                    """,
+                    int(viewer_user_id),
+                    bool(require_credit),
+                    None if max_votes is None else int(max_votes),
+                )
+                if not row:
+                    return None
+                photo = dict(row)
+                author_id = int(photo["user_id"])
+
+                await _ensure_user_stats_row(conn, author_id)
+                stats_row = await conn.fetchrow(
+                    "SELECT credits, show_tokens FROM user_stats WHERE user_id=$1 FOR UPDATE",
+                    int(author_id),
+                )
+                credits = int((stats_row or {}).get("credits") or 0)
+                tokens = int((stats_row or {}).get("show_tokens") or 0)
+                if require_credit and credits <= 0 and tokens <= 0:
+                    return None
+
+                multiplier = _happy_hour_multiplier(now)
+                new_credits = credits
+                new_tokens = tokens
+                if spend_token and new_tokens <= 0 and new_credits > 0:
+                    new_credits -= 1
+                    new_tokens += multiplier
+
+                res = await conn.execute(
+                    """
+                    INSERT INTO photo_views (photo_id, viewer_id, created_at)
+                    VALUES ($1,$2,$3)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    int(photo["id"]),
+                    int(viewer_user_id),
+                    now,
+                )
+                if not res.endswith(" 1"):
+                    return None
+
+                if spend_token:
+                    new_tokens = max(0, new_tokens - 1)
+                    await conn.execute(
+                        "UPDATE user_stats SET credits=$2, show_tokens=$3, last_active_at=$4 WHERE user_id=$1",
+                        int(author_id),
+                        new_credits,
+                        new_tokens,
+                        now,
+                    )
+                await conn.execute(
+                    "UPDATE photos SET views_count = views_count + 1 WHERE id=$1",
+                    int(photo["id"]),
+                )
+                return photo
+
+    photo = await _pick(True, spend_token=True)
+    if photo:
+        return photo
+    # tail без списания кредитов с вероятностью
+    from config import MIN_VOTES_FOR_NORMAL_FEED, TAIL_PROBABILITY
+    if random.random() <= float(TAIL_PROBABILITY):
+        return await _pick(False, spend_token=False, max_votes=int(MIN_VOTES_FOR_NORMAL_FEED))
+    return await _pick(False, spend_token=True)
+
+
 async def get_random_photo_for_rating_rateable(
     viewer_user_id: int,
     *,
@@ -4101,6 +4692,7 @@ async def get_random_photo_for_rating_rateable(
             JOIN users u ON u.id=p.user_id
             WHERE p.is_deleted=0
               AND p.moderation_status IN ('active','good')
+              AND COALESCE(p.status,'active')='active'
               AND COALESCE(p.ratings_enabled, 1)=1
               AND p.user_id <> $1
               AND ($2::int IS NULL OR p.user_id <> $2)
@@ -4146,6 +4738,7 @@ async def get_popular_photo_for_rating(
                 LEFT JOIN ratings r ON r.photo_id=p.id
                 WHERE p.is_deleted=0
                   AND p.moderation_status IN ('active','good')
+                  AND COALESCE(p.status,'active')='active'
                   AND COALESCE(p.ratings_enabled, 1)=1
                   AND p.user_id <> $1
                   AND ($6::int IS NULL OR p.user_id <> $6)
@@ -4199,6 +4792,7 @@ async def _get_rateable_photo_by_ratings_count(
                 LEFT JOIN ratings r ON r.photo_id=p.id
                 WHERE p.is_deleted=0
                   AND p.moderation_status IN ('active','good')
+                  AND COALESCE(p.status,'active')='active'
                   AND COALESCE(p.ratings_enabled, 1)=1
                   AND p.user_id <> $1
                   AND ($4::int IS NULL OR p.user_id <> $4)
@@ -4313,6 +4907,7 @@ async def get_random_photo_for_rating_viewonly(
             JOIN users u ON u.id=p.user_id
             WHERE p.is_deleted=0
               AND p.moderation_status IN ('active','good')
+              AND COALESCE(p.status,'active')='active'
               AND COALESCE(p.ratings_enabled, 1)=0
               AND p.user_id <> $1
               AND ($2::int IS NULL OR p.user_id <> $2)
@@ -4337,6 +4932,14 @@ async def get_random_photo_for_rating(viewer_user_id: int) -> dict | None:
     - иначе чередование: свежее / низкое / среднее / популярное.
     - если подходящих нет в целевой группе, ищем в соседних, затем в любых.
     """
+    # New smart feed (credits / no repeats). Best-effort; fallback на старую схему при ошибках.
+    try:
+        smart = await next_photo_for_viewer(int(viewer_user_id))
+        if smart:
+            return smart
+    except Exception:
+        pass
+
     state = await get_rating_feed_state(int(viewer_user_id))
     seq = int(state.get("seq") or 0)
     last_author_id = state.get("last_author_id")
@@ -4500,6 +5103,28 @@ async def mark_viewonly_seen(user_id: int, photo_id: int) -> None:
         )
 
 
+async def record_photo_view(photo_id: int, viewer_id: int) -> None:
+    """Запомнить показ фото конкретному пользователю и инкрементировать счётчик просмотров."""
+    p = _assert_pool()
+    now = get_bot_now_iso()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO photo_views (photo_id, viewer_id, created_at)
+                VALUES ($1,$2,$3)
+                ON CONFLICT (photo_id, viewer_id) DO NOTHING
+                """,
+                int(photo_id),
+                int(viewer_id),
+                now,
+            )
+            await conn.execute(
+                "UPDATE photos SET views_count = views_count + 1 WHERE id=$1",
+                int(photo_id),
+            )
+
+
 async def has_viewonly_seen(user_id: int, photo_id: int) -> bool:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -4511,47 +5136,324 @@ async def has_viewonly_seen(user_id: int, photo_id: int) -> bool:
     return bool(v)
 
 
-async def add_rating(user_id: int, photo_id: int, value: int) -> None:
-    p = _assert_pool()
-    now = get_moscow_now_iso()
-    async with p.acquire() as conn:
-        photo_row = await conn.fetchrow(
-            "SELECT ratings_enabled, is_deleted, moderation_status FROM photos WHERE id=$1",
-            int(photo_id),
-        )
-        status = str(photo_row.get("moderation_status") or "").lower()
-        if (
-            not photo_row
-            or int(photo_row.get("is_deleted") or 0) != 0
-            or status not in ("active", "good")
-            or not bool(photo_row.get("ratings_enabled", 1))
-        ):
-            return
+# -------------------- parties / recap / notifications --------------------
 
+
+async def enqueue_notification(user_id: int, n_type: str, payload: dict, *, run_after: datetime | None = None) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO ratings (photo_id, user_id, value, created_at)
-            VALUES ($1,$2,$3,$4)
-            ON CONFLICT (photo_id, user_id)
-            DO UPDATE SET value=EXCLUDED.value, created_at=EXCLUDED.created_at
+            INSERT INTO notification_queue (user_id, type, payload, run_after, status)
+            VALUES ($1,$2,$3,$4,'pending')
             """,
-            int(photo_id), int(user_id), int(value), now
+            int(user_id),
+            str(n_type),
+            json.dumps(payload or {}),
+            run_after or get_bot_now(),
         )
 
-        # Invalidate author's rank cache (their photo got a new rating)
-        try:
-            owner_user_id = await conn.fetchval(
-                "SELECT user_id FROM photos WHERE id=$1 LIMIT 1",
+
+async def fetch_pending_notifications(limit: int = 50) -> list[dict]:
+    """Берём pending задачи пачкой, помечая их sending (SKIP LOCKED)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH cte AS (
+                SELECT *
+                FROM notification_queue
+                WHERE status='pending' AND run_after <= NOW()
+                ORDER BY run_after ASC, id ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE notification_queue n
+            SET status='sending',
+                attempts = attempts + 1,
+                updated_at = NOW()
+            FROM cte
+            WHERE n.id = cte.id
+            RETURNING n.*;
+            """,
+            int(limit),
+        )
+    return [dict(r) for r in rows]
+
+
+async def mark_notification_done(
+    notification_id: int,
+    status: str = "sent",
+    *,
+    error: str | None = None,
+    backoff_seconds: int | None = None,
+) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        if status == "failed" and backoff_seconds:
+            await conn.execute(
+                """
+                UPDATE notification_queue
+                SET status='pending',
+                    run_after = NOW() + $3 * INTERVAL '1 second',
+                    last_error = $2,
+                    updated_at = NOW()
+                WHERE id=$1
+                """,
+                int(notification_id),
+                error,
+                int(backoff_seconds),
+            )
+        else:
+            await conn.execute(
+                """
+                UPDATE notification_queue
+                SET status=$2,
+                    last_error=$3,
+                    updated_at=NOW()
+                WHERE id=$1
+                """,
+                int(notification_id),
+                status,
+                error,
+            )
+
+
+async def finalize_party(submit_day: date | None = None, *, min_votes: int = 7, limit: int = 500) -> list[dict]:
+    """
+    Закрываем партии:
+      - если submit_day задан, закрываем её, но только если истёкла;
+      - иначе закрываем все истёкшие (expires_at <= now) активные фото пачкой.
+    """
+    p = _assert_pool()
+    results: list[dict] = []
+    now = get_bot_now()
+    rank_by_day: dict[str, int] = {}
+    async with p.acquire() as conn:
+        while True:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    SELECT *
+                    FROM photos
+                    WHERE is_deleted=0
+                      AND COALESCE(status,'active')='active'
+                      AND (expires_at <= NOW())
+                      AND ($1::date IS NULL OR submit_day=$1::date)
+                    ORDER BY submit_day NULLS LAST, avg_score DESC, votes_count DESC, created_at ASC
+                    LIMIT $2
+                    """,
+                    submit_day,
+                    int(limit),
+                )
+                if not rows:
+                    break
+                batch_results: list[dict] = []
+                for r in rows:
+                    sd = r.get("submit_day")
+                    if sd is None:
+                        try:
+                            created = datetime.fromisoformat(str(r.get("created_at")))
+                            sd = created.date()
+                        except Exception:
+                            sd = now.date()
+                    day_key = str(sd)
+                    rank_by_day.setdefault(day_key, 0)
+                    rank_by_day[day_key] += 1
+                    rank = rank_by_day[day_key]
+
+                    photo_id = int(r["id"])
+                    await conn.execute(
+                        """
+                        INSERT INTO result_ranks (photo_id, submit_day, final_rank, finalized_at)
+                        VALUES ($1,$2,$3,NOW())
+                        ON CONFLICT (photo_id, submit_day)
+                        DO UPDATE SET final_rank=EXCLUDED.final_rank, finalized_at=EXCLUDED.finalized_at
+                        """,
+                        photo_id,
+                        sd,
+                        rank,
+                    )
+                    await conn.execute(
+                        "UPDATE photos SET status='archived' WHERE id=$1",
+                        photo_id,
+                    )
+                    batch_results.append(dict(r) | {"final_rank": rank, "submit_day": sd})
+
+                results.extend(batch_results)
+
+                # уведомления авторам с лёгким джиттером
+                for res in batch_results:
+                    author_id = int(res["user_id"])
+                    jitter = random.randint(0, 900)
+                    await enqueue_notification(
+                        author_id,
+                        "final_rank",
+                        {
+                            "photo_id": int(res["id"]),
+                            "final_rank": int(res["final_rank"]),
+                            "submit_day": str(res.get("submit_day")),
+                            "votes_count": int(res.get("votes_count") or 0),
+                            "avg_score": float(res.get("avg_score") or 0),
+                        },
+                        run_after=now + timedelta(seconds=jitter),
+                    )
+            if len(rows) < limit:
+                break
+    return results
+
+
+async def daily_recap(submit_day: date, *, min_votes: int = 7, top_n: int = 3) -> dict:
+    """Формирует суточную сводку: топ-N и персональные авторам активных фото."""
+    p = _assert_pool()
+    top_list: list[dict] = []
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM photos
+            WHERE submit_day=$1::date
+              AND is_deleted=0
+              AND COALESCE(status,'active')='active'
+              AND (expires_at IS NULL OR expires_at > NOW())
+              AND votes_count >= $2
+            ORDER BY avg_score DESC, votes_count DESC, created_at ASC
+            LIMIT $3
+            """,
+            submit_day,
+            int(min_votes),
+            int(top_n),
+        )
+        top_list = [dict(r) for r in rows]
+
+        for r in top_list:
+            await enqueue_notification(
+                int(r["user_id"]),
+                "daily_recap_top",
+                {
+                    "photo_id": int(r["id"]),
+                    "submit_day": str(submit_day),
+                    "avg_score": float(r.get("avg_score") or 0),
+                    "votes_count": int(r.get("votes_count") or 0),
+                    "rank_hint": top_list.index(r) + 1,
+                },
+            )
+
+        # персональные сводки авторам всех активных фото дня
+        all_rows = await conn.fetch(
+            """
+            SELECT * FROM photos
+            WHERE submit_day=$1::date
+              AND is_deleted=0
+              AND COALESCE(status,'active')='active'
+              AND (expires_at IS NULL OR expires_at > NOW())
+            """,
+            submit_day,
+        )
+        for r in all_rows:
+            await enqueue_notification(
+                int(r["user_id"]),
+                "daily_recap_personal",
+                {
+                    "photo_id": int(r["id"]),
+                    "submit_day": str(submit_day),
+                    "avg_score": float(r.get("avg_score") or 0),
+                    "votes_count": int(r.get("votes_count") or 0),
+                    "expires_at": str(r.get("expires_at")),
+                },
+            )
+
+    return {"top": top_list}
+
+
+async def add_rating(user_id: int, photo_id: int, value: int) -> None:
+    p = _assert_pool()
+    now_dt = get_bot_now()
+    now_iso = get_bot_now_iso()
+    today = today_key()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            photo_row = await conn.fetchrow(
+                "SELECT id, user_id, ratings_enabled, is_deleted, moderation_status, votes_count, sum_score FROM photos WHERE id=$1 FOR UPDATE",
                 int(photo_id),
             )
-            if owner_user_id is not None:
+            if not photo_row:
+                return
+            status = str(photo_row.get("moderation_status") or "").lower()
+            if (
+                int(photo_row.get("is_deleted") or 0) != 0
+                or status not in ("active", "good")
+                or not bool(photo_row.get("ratings_enabled", 1))
+            ):
+                return
+
+            author_id = int(photo_row["user_id"])
+            if await _abuse_vote_limit_exceeded(conn, int(user_id), author_id, today):
+                return
+
+            prev_score = await conn.fetchval(
+                "SELECT score FROM votes WHERE photo_id=$1 AND voter_id=$2",
+                int(photo_id),
+                int(user_id),
+            )
+            if prev_score is not None:
+                return  # уникальность голоса
+
+            await conn.execute(
+                """
+                INSERT INTO ratings (photo_id, user_id, value, created_at)
+                VALUES ($1,$2,$3,$4)
+                ON CONFLICT (photo_id, user_id)
+                DO UPDATE SET value=EXCLUDED.value, created_at=EXCLUDED.created_at
+                """,
+                int(photo_id), int(user_id), int(value), now_iso
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO votes (photo_id, voter_id, score, created_at)
+                VALUES ($1,$2,$3,$4)
+                ON CONFLICT (photo_id, voter_id)
+                DO UPDATE SET score=EXCLUDED.score, created_at=EXCLUDED.created_at
+                """,
+                int(photo_id), int(user_id), int(value), now_dt
+            )
+
+            votes_count = int(photo_row.get("votes_count") or 0)
+            sum_score = int(photo_row.get("sum_score") or 0)
+
+            votes_count += 1
+            sum_score += int(value)
+
+            avg_score = float(sum_score) / votes_count if votes_count > 0 else 0.0
+
+            await conn.execute(
+                """
+                UPDATE photos
+                SET votes_count=$2, sum_score=$3, avg_score=$4
+                WHERE id=$1
+                """,
+                int(photo_id),
+                votes_count,
+                sum_score,
+                avg_score,
+            )
+
+            # Invalidate author's rank cache (their photo got a new rating)
+            try:
                 await conn.execute(
-                    "UPDATE users SET rank_updated_at=NULL, updated_at=$1 WHERE id=$2",
-                    now,
-                    int(owner_user_id),
+                    "UPDATE users SET rank_updated_at=NULL, updated_at=$2 WHERE id=$1",
+                    int(author_id),
+                    now_iso,
                 )
-        except Exception:
-            pass
+            except Exception:
+                pass
+
+            # credits to voter
+            if int(value) > 0:
+                try:
+                    await add_credits_on_vote(int(user_id), now=now_dt)
+                except Exception:
+                    pass
 
 
 async def set_super_rating(user_id: int, photo_id: int) -> bool:
@@ -5127,7 +6029,10 @@ async def count_photos_by_user(user_id: int) -> int:
 async def count_active_photos_by_user(user_id: int) -> int:
     p = _assert_pool()
     async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM photos WHERE user_id=$1 AND is_deleted=0", int(user_id))
+        v = await conn.fetchval(
+            "SELECT COUNT(*) FROM photos WHERE user_id=$1 AND is_deleted=0 AND status='active'",
+            int(user_id),
+        )
     return int(v or 0)
 
 

@@ -23,6 +23,7 @@ from database import (
     get_today_photo_for_user,
     create_today_photo,
     mark_photo_deleted,
+    mark_photo_deleted_by_user,
     get_photo_by_id,
     update_photo_editable_fields,
     toggle_photo_ratings_enabled,
@@ -47,6 +48,9 @@ from database import (
     get_weekly_idea_requests,
     increment_weekly_idea_requests,
     set_user_screen_msg_id,
+    get_user_stats,
+    add_credits,
+    is_today_slot_locked,
 )
 
 from database_results import (
@@ -1855,21 +1859,52 @@ async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
 
 # ---- upload limits helpers ----
 
-def _user_photo_limits(is_premium_user: bool, is_admin: bool) -> tuple[int, int]:
+def _user_photo_limits(user: dict, stats: dict, *, is_admin: bool) -> tuple[int, int]:
     """
-    Возвращает (max_active, daily_limit) для пользователя.
-    Админ: до 2 активных, но попыток загрузки в день не ограничиваем (ставим очень большое число).
+    Возвращает (max_active, daily_limit) с учётом ролей и активности:
+      - normal: max_active=3, 1/день (без доп.слота)
+      - author: max_active=4, +1 дневной слот при >=10 оценок или >=6 в HH
+      - premium: max_active=4, +1 слот при >=7 оценок или >=4 в HH
+    Админ: max_active=10, дневной лимит неограничен.
     """
     if is_admin:
-        return 2, 10**9
-    if is_premium_user:
-        return 2, 3  # две активных, до трёх загрузок в день (можно заменять)
-    return 1, 1
+        return 10, 10**9
+
+    is_premium = bool(user.get("is_premium"))
+    is_author = bool(user.get("is_author"))
+    votes_today = int(stats.get("votes_given_today") or 0)
+    votes_hh = int(stats.get("votes_given_happyhour_today") or 0)
+
+    extra = False
+    if is_author:
+        extra = votes_today >= 10 or votes_hh >= 6
+    elif is_premium:
+        extra = votes_today >= 7 or votes_hh >= 4
+
+    base = 1
+    daily_limit = base + (1 if extra else 0)
+    max_active = 3
+    if is_author:
+        max_active = 4
+    if is_premium:
+        max_active = 4
+    max_active = max(max_active, daily_limit)
+    return max_active, daily_limit
 
 
 async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool) -> tuple[bool, str | None]:
-    max_active, daily_limit = _user_photo_limits(is_premium_user, is_admin)
+    stats = {}
+    try:
+        stats = await get_user_stats(int(user["id"]))
+    except Exception:
+        stats = {}
+    max_active, daily_limit = _user_photo_limits(user, stats, is_admin=is_admin)
     user_id = int(user["id"])
+
+    # слот дня блокируется, если сегодня уже было фото, удалённое пользователем
+    if not is_admin:
+        if await is_today_slot_locked(user_id):
+            return False, "Сегодня ты уже выкладывал(а) фото. Новое можно будет завтра."
 
     active_count = 0
     try:
@@ -1921,21 +1956,27 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
 
     is_admin = is_admin_user(user)
 
-    max_active, daily_limit = _user_photo_limits(is_premium_user, is_admin)
+    try:
+        stats = await get_user_stats(int(user_id))
+    except Exception:
+        stats = {}
+
+    max_active, daily_limit = _user_photo_limits(user, stats, is_admin=is_admin)
     active_count = len(active_photos)
+
+    if not is_admin and await is_today_slot_locked(user_id):
+        await callback.answer(
+            "Сегодня ты уже выкладывал(а) фото. Новое можно будет завтра.",
+            show_alert=True,
+        )
+        return
 
     # Проверка лимита активных фото
     if not is_admin and active_count >= max_active:
-        if is_premium_user:
-            await callback.answer(
-                "У тебя уже 2 активные фотографии. Удали одну, чтобы загрузить новую.",
-                show_alert=True,
-            )
-        else:
-            await callback.answer(
-                "Вторая фотография доступна в GlowShot Premium 💎.\n\nОформи подписку, чтобы добавить ещё одну.",
-                show_alert=True,
-            )
+        await callback.answer(
+            "Лимит активных фото достигнут. Подожди, пока часть уйдёт в архив, или удали одно из текущих.",
+            show_alert=True,
+        )
         return
 
     # Проверка дневных попыток
@@ -2285,7 +2326,7 @@ async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Фотография уже удалена.", show_alert=True)
         return
 
-    await mark_photo_deleted(photo_id)
+    await mark_photo_deleted_by_user(photo_id, int(user["id"]))
     await _clear_photo_message_id(state)
 
     # Удаляем старое сообщение с фотографией, чтобы не мелькала старая картинка
@@ -2959,6 +3000,13 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             file_id_original=file_id,
             title=title,
         )
+
+        # Премиум-бонус: +1 кредит за публикацию
+        try:
+            if is_premium_user:
+                await add_credits(int(user_id), 1)
+        except Exception:
+            pass
 
         # 🔥 streak: successful upload counts as activity
         try:
