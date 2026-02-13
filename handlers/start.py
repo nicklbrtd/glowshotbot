@@ -24,7 +24,7 @@ from handlers.premium import maybe_send_premium_expiry_warning
 from config import MASTER_ADMIN_ID
 from utils.time import get_moscow_now, get_moscow_today, is_happy_hour
 from utils.banner import ensure_giraffe_banner
-from utils.update_guard import should_block as should_block_update, send_notice_once
+from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
 
 router = Router()
 
@@ -842,6 +842,17 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
                     await db.save_pending_referral(message.from_user.id, ref_code)
                 except Exception:
                     pass
+
+        # Если включён режим обновления — сразу предупреждаем новым пользователям одним сообщением
+        try:
+            upd_state = await db.get_update_mode_state()
+            if upd_state.get("update_enabled"):
+                await message.answer(
+                    upd_state.get("update_notice_text") or UPDATE_DEFAULT_TEXT,
+                    disable_notification=True,
+                )
+        except Exception:
+            pass
 
         # Приветственный экран для новых пользователей
         welcome_text = (
