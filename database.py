@@ -4267,6 +4267,7 @@ async def create_today_photo(
     p = _assert_pool()
     now_iso = get_bot_now_iso()
     today = get_bot_today()
+    day_key = str(today)
     expires_at = end_of_day(get_bot_today()) + timedelta(hours=72)
 
     # Если описания нет, явно сохраняем метку "нет"
@@ -4297,11 +4298,11 @@ async def create_today_photo(
                 title,
                 description,
                 category,
-                device_type,
-                device_info,
-                day_key,
-                submit_day,
-                expires_at,
+            device_type,
+            device_info,
+            day_key,
+            submit_day,
+            expires_at,
                 status,
                 moderation_status,
                 ratings_enabled,
@@ -4320,7 +4321,7 @@ async def create_today_photo(
             category,
             device_type,
             device_info,
-            today,
+            day_key,
             today,
             expires_at,
             1 if enabled else 0,

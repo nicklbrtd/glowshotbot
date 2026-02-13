@@ -97,48 +97,67 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
         )
         return
 
-    # Получаем байты и file_id
     photo_bytes = None
     file_id_to_save = None
-    try:
-        if source == "photo":
-            file_id_to_save = message.photo[-1].file_id
-        else:
+    converted = False
+    if source == "photo":
+        file_id_to_save = message.photo[-1].file_id
+    else:
+        try:
             buf = await message.bot.download(message.document)
-            photo_bytes = buf.read()
+            raw_bytes = buf.read()
+            # Конвертируем документ в JPEG, чтобы Telegram принял как фото
+            try:
+                img = Image.open(io.BytesIO(raw_bytes))
+                img = img.convert("RGB")
+                out = io.BytesIO()
+                img.save(out, format="JPEG", quality=95, subsampling=0, optimize=True)
+                photo_bytes = out.getvalue()
+                converted = True
+            except Exception:
+                # если не смогли конвертировать — используем как есть, может пройти
+                photo_bytes = raw_bytes
+        except Exception:
+            photo_bytes = None
+
+    # Если пришёл документ — пересылаем как фото для единообразия
+    sent_photo = None
+    try:
+        if photo_bytes is not None:
+            sent_photo = await message.bot.send_photo(
+                chat_id=upload_chat_id,
+                photo=BufferedInputFile(photo_bytes, filename="upload.jpg"),
+                caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
+                reply_markup=build_upload_wizard_kb(back_to="photo"),
+                disable_notification=True,
+            )
+            file_id_to_save = sent_photo.photo[-1].file_id if sent_photo and sent_photo.photo else file_id_to_save
+        else:
+            # Заменяем старое служебное сообщение на новое с фотографией
+            try:
+                await message.bot.delete_message(chat_id=upload_chat_id, message_id=upload_msg_id)
+            except Exception:
+                pass
+            sent_photo = await message.bot.send_photo(
+                chat_id=upload_chat_id,
+                photo=file_id_to_save,
+                caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
+                reply_markup=build_upload_wizard_kb(back_to="photo"),
+                disable_notification=True,
+            )
     except Exception:
-        photo_bytes = None
+        # Сообщаем об ошибке конвертации/отправки и не трогаем состояние
+        await message.answer(
+            "Не удалось принять файл. Попробуй отправить как фото или другой формат (jpeg/png).",
+            disable_notification=True,
+        )
+        return
 
     # Удаляем сообщение пользователя, чтобы чат оставался чистым
     try:
         await message.delete()
     except Exception:
         pass
-
-    # Если пришёл документ — пересылаем как фото для единообразия
-    sent_photo = None
-    if photo_bytes is not None:
-        sent_photo = await message.bot.send_photo(
-            chat_id=upload_chat_id,
-            photo=BufferedInputFile(photo_bytes, filename="upload.jpg"),
-            caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
-            reply_markup=build_upload_wizard_kb(back_to="photo"),
-            disable_notification=True,
-        )
-        file_id_to_save = sent_photo.photo[-1].file_id if sent_photo and sent_photo.photo else file_id_to_save
-    else:
-        # Заменяем старое служебное сообщение на новое с фотографией
-        try:
-            await message.bot.delete_message(chat_id=upload_chat_id, message_id=upload_msg_id)
-        except Exception:
-            pass
-        sent_photo = await message.bot.send_photo(
-            chat_id=upload_chat_id,
-            photo=file_id_to_save,
-            caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
-            reply_markup=build_upload_wizard_kb(back_to="photo"),
-            disable_notification=True,
-        )
 
     if sent_photo is None:
         await message.bot.send_message(
