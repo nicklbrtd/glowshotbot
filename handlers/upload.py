@@ -2944,75 +2944,10 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     except Exception:
         author_code = "GS-UNKNOWN"
 
-    # Скачиваем оригинал и наносим водяной знак
-    try:
-        tg_file = await bot.get_file(file_id)
-        buff = io.BytesIO()
-        await bot.download_file(tg_file.file_path, destination=buff)
-        img_bytes = buff.getvalue()
-        ok_quality, quality_msg = _is_photo_quality_ok(img_bytes)
-        if not ok_quality:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"Фотография отклонена:\n{quality_msg}\n\nЗагрузи файл с более высоким качеством.",
-                disable_notification=True,
-            )
-            await state.clear()
-            return
-
-        wm_bytes = apply_text_watermark(img_bytes, f"GlowShot • {author_code}")
-    except Exception as e:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="Не удалось обработать фотографию. Попробуй загрузить ещё раз.",
-            disable_notification=True,
-        )
-        print("WATERMARK ERROR:", repr(e))
-        await state.clear()
-        return
-
-    # Отправляем ватермаркнутую версию, чтобы получить публичный file_id, стараясь переиспользовать текущее сообщение
-    media = InputMediaPhoto(media=BufferedInputFile(wm_bytes, filename="glowshot_wm.jpg"), caption="Готовим карточку…")
-    sent_msg_id: int | None = None
-    file_id_public: str | None = None
-    if upload_msg_id and chat_id:
-        try:
-            res = await bot.edit_message_media(
-                chat_id=chat_id,
-                message_id=upload_msg_id,
-                media=media,
-            )
-            # aiogram возвращает Message при успехе
-            if isinstance(res, Message):
-                file_id_public = res.photo[-1].file_id if res.photo else None
-                sent_msg_id = res.message_id
-            else:
-                sent_msg_id = upload_msg_id
-        except Exception:
-            sent_msg_id = None
-
-    if file_id_public is None:
-        try:
-            sent_draft = await bot.send_photo(
-                chat_id=chat_id,
-                photo=BufferedInputFile(wm_bytes, filename="glowshot_wm.jpg"),
-                caption="Готовим карточку…",
-                disable_notification=True,
-            )
-            file_id_public = sent_draft.photo[-1].file_id
-            sent_msg_id = sent_draft.message_id
-        except Exception as e:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Не удалось загрузить обработанную фотографию. Попробуй ещё раз.",
-                disable_notification=True,
-            )
-            print("WATERMARK SEND ERROR:", repr(e))
-            await state.clear()
-            return
-
-    if not sent_msg_id:
-        sent_msg_id = upload_msg_id or 0
+    # Временный быстрый путь: не обрабатываем фото, сразу используем оригинальный file_id
+    # TODO: вернуть водяной знак и проверку качества (GlowShot • {author_code}, 2026 All rights Reserved)
+    file_id_public = file_id
+    sent_msg_id: int | None = upload_msg_id or None
 
     # Сохраняем фото в БД, handle unique violation
     try:
@@ -3114,15 +3049,18 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     final_msg_id: int | None = None
 
     try:
-        await bot.edit_message_caption(
-            chat_id=chat_id,
-            message_id=sent_msg_id,
-            caption=caption,
-            reply_markup=kb,
-        )
-        await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
-        final_msg_id = sent_msg_id
-        final_msg_obj = None  # edit_message_caption не возвращает Message, будем использовать event
+        if sent_msg_id:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=sent_msg_id,
+                caption=caption,
+                reply_markup=kb,
+            )
+            await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
+            final_msg_id = sent_msg_id
+            final_msg_obj = None  # edit_message_caption не возвращает Message, будем использовать event
+        else:
+            raise ValueError("no message to edit")
     except Exception:
         sent_photo = await bot.send_photo(
             chat_id=chat_id,
