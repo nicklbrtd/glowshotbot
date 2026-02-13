@@ -33,7 +33,6 @@ def build_main_menu(
     keyboard = [
         [KeyboardButton(text=myphoto_text), KeyboardButton(text=rate_text)],
         [KeyboardButton(text=t("kb.main.results", lang)), KeyboardButton(text=t("kb.main.profile", lang))],
-        [KeyboardButton(text="ℹ️ Как это работает")],
     ]
 
     return ReplyKeyboardMarkup(

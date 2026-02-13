@@ -60,14 +60,6 @@ from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATE
 from utils.time import get_moscow_now, is_happy_hour
 
 router = Router()
-CREDITS_RULES_SHORT = (
-    "⚡ Как это работает:\n"
-    "• Фото участвует 72 часа\n"
-    "• 1 оценка = +1 credit\n"
-    "• 1 credit = 2 показа (15:00–16:00 — 4)\n"
-    "• Итоги дня выходят после 72 часов\n"
-    "• Архив виден только тебе, портфолио можно открыть"
-)
 
 
 # Helper to get language from user dict
@@ -632,7 +624,6 @@ async def build_profile_view(user: dict):
     portfolio_enabled = bool((stats or {}).get("public_portfolio"))
     portfolio_line = "Портфолио: включено (топ-9 архивных фото)" if portfolio_enabled else "Портфолио: выключено"
     text_lines.append(portfolio_line)
-    text_lines.append(CREDITS_RULES_SHORT)
 
     # Premium
     text_lines.extend([
