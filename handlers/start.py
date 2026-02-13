@@ -164,7 +164,6 @@ async def _send_fresh_menu(
     data = await state.get_data()
     prev_menu_id = data.get("menu_msg_id")
     prev_rate_kb_id = data.get("rate_kb_msg_id")
-    prev_helper_id = data.get("menu_kb_helper_id")
     prev_screen_id = None
     prev_banner_id = None
     try:
@@ -173,8 +172,6 @@ async def _send_fresh_menu(
             prev_menu_id = ui_state.get("menu_msg_id")
         if prev_rate_kb_id is None:
             prev_rate_kb_id = ui_state.get("rate_kb_msg_id")
-        if prev_helper_id is None:
-            prev_helper_id = ui_state.get("menu_kb_helper_id") if ui_state else None
         prev_screen_id = ui_state.get("screen_msg_id")
         prev_banner_id = ui_state.get("banner_msg_id")
     except Exception:
@@ -247,31 +244,19 @@ async def _send_fresh_menu(
         is_moderator=is_moderator,
         is_premium=is_premium,
     )
-    # Сообщение меню без дополнительных inline‑кнопок
+    # Сообщение меню без дополнительных inline‑кнопок, с reply‑клавиатурой сразу
     sent = await bot.send_message(
         chat_id=chat_id,
         text=menu_text,
+        reply_markup=main_kb,
         disable_notification=True,
         link_preview_options=NO_PREVIEW,
         parse_mode="HTML",
     )
     # Отдельно выставляем reply‑клавиатуру скрытым «пингуем»
-    helper_id = None
-    try:
-        helper = await bot.send_message(
-            chat_id=chat_id,
-            text="⌨️ Главное меню обновлено. Клавиатура ниже.",
-            reply_markup=main_kb,
-            disable_notification=True,
-        )
-        helper_id = helper.message_id
-    except Exception:
-        helper_id = None
-
     data["menu_msg_id"] = sent.message_id
     data["rate_kb_msg_id"] = None
     data["rate_kb_mode"] = "none"
-    data["menu_kb_helper_id"] = helper_id
     await state.set_data(data)
     try:
         await db.set_user_menu_msg_id(user_id, sent.message_id)
@@ -287,8 +272,6 @@ async def _send_fresh_menu(
             await db.set_user_rate_kb_msg_id(user_id, None)
         except Exception:
             pass
-    if prev_helper_id and prev_helper_id != helper_id:
-        await _delete_message_safely(bot, chat_id, prev_helper_id)
     if prev_screen_id and prev_screen_id not in (sent.message_id, prev_menu_id, prev_rate_kb_id):
         await _delete_message_safely(bot, chat_id, prev_screen_id)
 
