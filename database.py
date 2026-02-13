@@ -503,9 +503,13 @@ async def get_user_ui_state(tg_id: int) -> dict:
                 "screen_msg_id": None,
                 "banner_msg_id": None,
                 "rate_tutorial_seen": False,
+                "menu_kb_helper_id": None,
                 "update_notice_seen_ver": 0,
             }
-        return dict(row)
+        d = dict(row)
+        d.setdefault("menu_kb_helper_id", None)
+        d.setdefault("update_notice_seen_ver", 0)
+        return d
 
 
 async def set_user_menu_msg_id(tg_id: int, menu_msg_id: int | None) -> None:
