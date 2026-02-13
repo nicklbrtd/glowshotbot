@@ -35,14 +35,21 @@ jobs:
 
           # Важно: runner работает без интерактивного TTY, поэтому sudo должен быть без пароля.
           # `-n` заставит sudo НЕ спрашивать пароль и упасть сразу, если прав нет.
+          echo "➡️ Останавливаю все возможные старые инстансы (на всякий)..."
+          # Если когда-то был старый сервис glowshot — стопаем его, чтобы не было double polling.
+          sudo -n /bin/systemctl stop glowshot.service || true
+          sudo -n /bin/systemctl disable glowshot.service || true
+
+          # Убиваем случайные ручные запуски (screen/tmux/nohup и т.п.).
+          # Это не тронет glowshot-support, т.к. у него другой файл.
+          sudo -n /usr/bin/pkill -f "/home/nick/glowshotbot/bot.py" || true
+
           echo "➡️ Перезапускаю сервисы..."
           sudo -n /bin/systemctl restart glowshot-bot
           sudo -n /bin/systemctl restart glowshot-support
           sudo -n /bin/systemctl restart tbank-webhook
 
-          echo "➡️ Проверяю статус..."
-          sudo -n /bin/systemctl --no-pager --full status glowshot-bot || true
-          sudo -n /bin/systemctl --no-pager --full status glowshot-support || true
-          sudo -n /bin/systemctl --no-pager --full status tbank-webhook || true
+          echo "➡️ Проверяю, что запущен ровно один bot.py..."
+          sudo -n /bin/ps aux | /bin/grep -E "/home/nick/glowshotbot/(bot\\.py|support_bot\\.py)" | /bin/grep -v grep || true
 
           echo "🎉 Деплой успешно завершён!"
