@@ -248,20 +248,27 @@ async def _send_fresh_menu(
     )
     inline_kb = _menu_inline_kb(lang)
 
+    # Сообщение меню с inline‑кнопками
     sent = await bot.send_message(
         chat_id=chat_id,
         text=menu_text,
-        reply_markup=main_kb,
+        reply_markup=inline_kb,
         disable_notification=True,
         link_preview_options=NO_PREVIEW,
         parse_mode="HTML",
     )
+    # Отдельно выставляем reply‑клавиатуру скрытым «пингуем»
     try:
-        await bot.edit_message_reply_markup(
+        helper = await bot.send_message(
             chat_id=chat_id,
-            message_id=sent.message_id,
-            reply_markup=inline_kb,
+            text="⌨️",
+            reply_markup=main_kb,
+            disable_notification=True,
         )
+        try:
+            await helper.delete()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -989,6 +996,67 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         state=state,
         lang_hint=getattr(callback.from_user, "language_code", None),
     )
+
+
+@router.callback_query(F.data == "menu:info")
+async def menu_info(callback: CallbackQuery, state: FSMContext):
+    user = await db.get_user_by_tg_id(callback.from_user.id)
+    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
+    try:
+        await callback.message.edit_text(
+            _rules_text(),
+            reply_markup=_menu_info_inline_kb(lang),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:info:back")
+async def menu_info_back(callback: CallbackQuery, state: FSMContext):
+    user = await db.get_user_by_tg_id(callback.from_user.id)
+    lang = _pick_lang(user, getattr(callback.from_user, "language_code", None))
+    is_admin = _get_flag(user, "is_admin")
+    is_moderator = _get_flag(user, "is_moderator")
+    is_premium = await db.is_user_premium_active(callback.from_user.id)
+    menu_text = await build_menu_text(tg_id=callback.from_user.id, user=user, is_premium=is_premium, lang=lang)
+    inline_kb = _menu_inline_kb(lang)
+    main_kb = await _build_dynamic_main_menu(
+        user=user,
+        lang=lang,
+        is_admin=is_admin,
+        is_moderator=is_moderator,
+        is_premium=is_premium,
+    )
+    try:
+        await callback.message.edit_text(
+            menu_text,
+            reply_markup=inline_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=inline_kb)
+        except Exception:
+            pass
+    # восстановим reply-клавиатуру скрытым сообщением
+    try:
+        helper = await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text="⌨️",
+            reply_markup=main_kb,
+            disable_notification=True,
+        )
+        try:
+            await helper.delete()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    await callback.answer()
     data = await state.get_data()
     menu_msg_id = data.get("menu_msg_id")
 
