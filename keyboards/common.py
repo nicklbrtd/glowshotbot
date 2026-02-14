@@ -6,7 +6,6 @@ from utils.i18n import t
 # Unified navigation labels (GlowShot 2.1 UX)
 BACK = "⬅️ Назад"
 HOME = "🏠 В меню"
-MY_ARCHIVE = "📚 Мой архив"
 RESULTS = "🏆 Итоги"
 RESULTS_ARCHIVE = "📅 Архив итогов"
 
@@ -57,8 +56,7 @@ def build_main_menu(
 
     keyboard = [
         [KeyboardButton(text=myphoto_text), KeyboardButton(text=rate_text)],
-        [KeyboardButton(text=t("kb.main.results", lang)), KeyboardButton(text=MY_ARCHIVE)],
-        [KeyboardButton(text=t("kb.main.profile", lang))],
+        [KeyboardButton(text=t("kb.main.results", lang)), KeyboardButton(text=t("kb.main.profile", lang))],
     ]
 
     return ReplyKeyboardMarkup(
@@ -74,10 +72,8 @@ def build_main_menu(
 
 def build_back_to_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text=BACK, callback_data="menu:back"),
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-    )
+    kb.button(text=HOME, callback_data="menu:back")
+    kb.adjust(1)
     return kb.as_markup()
 
 

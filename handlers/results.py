@@ -13,7 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import io
 from PIL import Image, ImageDraw, ImageFont  # type: ignore[import]
 
-from keyboards.common import BACK, HOME, RESULTS, RESULTS_ARCHIVE, build_back_to_menu_kb
+from keyboards.common import HOME, RESULTS, RESULTS_ARCHIVE, build_back_to_menu_kb
 from utils.i18n import t
 from utils.banner import ensure_giraffe_banner
 from utils.time import get_moscow_now, get_moscow_today
@@ -102,10 +102,13 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{RESULTS} (последние)", callback_data="results:latest")],
+            [InlineKeyboardButton(text=RESULTS, callback_data="results:latest")],
             [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
             [
-                InlineKeyboardButton(text=BACK, callback_data="menu:back"),
+                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+                InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
+            ],
+            [
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ],
         ]
@@ -116,7 +119,6 @@ def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=BACK, callback_data="results:menu"),
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ],
         ]
@@ -128,7 +130,10 @@ def _build_latest_results_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
             [
-                InlineKeyboardButton(text=BACK, callback_data="results:menu"),
+                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+                InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
+            ],
+            [
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ],
         ]
@@ -152,10 +157,12 @@ def _build_results_archive_kb(
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"results:archive:{page+1}"))
     if nav_row:
         kb.row(*nav_row)
+    kb.row(InlineKeyboardButton(text=RESULTS, callback_data="results:latest"))
     kb.row(
-        InlineKeyboardButton(text=BACK, callback_data="results:latest"),
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+        InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
     )
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
     return kb.as_markup()
 
 
@@ -193,7 +200,7 @@ def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb.button(text="📃 Топ 10", callback_data="results:alltime:top10")
     kb.button(text="📍 Где я?", callback_data="results:alltime:me")
     kb.button(text="👑 Зал славы", callback_data="results:hof")
-    kb.button(text=BACK, callback_data="results:menu")
+    kb.button(text=RESULTS, callback_data="results:latest")
     kb.button(text=HOME, callback_data="menu:back")
     kb.adjust(1, 1, 1, 2)
     return kb.as_markup()
@@ -209,7 +216,7 @@ def build_alltime_paged_kb(mode: str, page: int, max_page: int, lang: str = "ru"
     if buttons:
         kb.adjust(len(buttons))
     kb.row(
-        InlineKeyboardButton(text=BACK, callback_data="results:alltime"),
+        InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
     )
     return kb.as_markup()
@@ -225,7 +232,7 @@ def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboar
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text=BACK, callback_data="results:menu"),
+                    InlineKeyboardButton(text=RESULTS, callback_data="results:latest"),
                     InlineKeyboardButton(text=HOME, callback_data="menu:back"),
                 ],
                 [
@@ -240,7 +247,7 @@ def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboar
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text=BACK, callback_data=f"results:day:{day_key}:{prev_step}"),
+                    InlineKeyboardButton(text="⬅️", callback_data=f"results:day:{day_key}:{prev_step}"),
                     InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:{next_step}"),
                 ],
                 [
@@ -252,7 +259,7 @@ def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboar
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=BACK, callback_data=f"results:day:{day_key}:3"),
+                InlineKeyboardButton(text=RESULTS, callback_data="results:latest"),
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ]
         ]
@@ -1144,7 +1151,7 @@ async def results_latest(callback: CallbackQuery):
     latest = await get_latest_daily_results_cache()
     if not latest:
         text = (
-            "🏆 <b>Итоги (последние опубликованные)</b>\n\n"
+            "🏆 <b>Итоги</b>\n\n"
             "Пока нет опубликованных итогов.\n"
             "Итоги выходят ежедневно в 08:00 МСК за позавчера."
         )
@@ -1157,7 +1164,7 @@ async def results_latest(callback: CallbackQuery):
     merged_payload.setdefault("submit_day", latest.get("submit_day"))
     merged_payload.setdefault("participants_count", latest.get("participants_count"))
     merged_payload.setdefault("top_threshold", latest.get("top_threshold"))
-    text = _render_cached_daily_results(merged_payload, title_prefix="Итоги (последние опубликованные)")
+    text = _render_cached_daily_results(merged_payload, title_prefix="Итоги")
     await _show_text(callback, text, _build_latest_results_kb())
     await callback.answer()
 
@@ -1220,8 +1227,12 @@ async def results_archive_day(callback: CallbackQuery):
     if not cache:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
+                [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data=f"results:archive:{page}")],
                 [
-                    InlineKeyboardButton(text=BACK, callback_data=f"results:archive:{page}"),
+                    InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+                    InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
+                ],
+                [
                     InlineKeyboardButton(text=HOME, callback_data="menu:back"),
                 ]
             ]
@@ -1240,7 +1251,10 @@ async def results_archive_day(callback: CallbackQuery):
         inline_keyboard=[
             [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data=f"results:archive:{page}")],
             [
-                InlineKeyboardButton(text=BACK, callback_data=f"results:archive:{page}"),
+                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+                InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
+            ],
+            [
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ],
         ]

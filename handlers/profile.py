@@ -631,20 +631,24 @@ async def build_profile_view(user: dict):
     text = "\n".join(text_lines)
 
     kb = InlineKeyboardBuilder()
-    if user.get("is_author"):
-        kb.button(text=t("profile.btn.author_menu", lang), callback_data="author:menu")
-    else:
-        kb.button(text=t("profile.btn.be_author", lang), callback_data="profile:be_author")
-    kb.button(text=t("profile.btn.awards", lang), callback_data="profile:awards")
-    kb.button(text="📚 Мой архив", callback_data="myphoto:archive:0")
-    kb.button(text=t("profile.btn.edit", lang), callback_data="profile:edit")
-    kb.button(text=t("profile.btn.settings", lang), callback_data="profile:settings")
-    kb.button(text=t("profile.btn.streak", lang), callback_data="profile:streak")
-
+    author_button = t("profile.btn.author_menu", lang) if user.get("is_author") else t("profile.btn.be_author", lang)
+    author_cb = "author:menu" if user.get("is_author") else "profile:be_author"
     premium_button_text = t("profile.btn.premium.my", lang) if premium_active else "💎 Оформить"
-    kb.button(text=t("profile.btn.menu", lang), callback_data="menu:back")
-    kb.button(text=premium_button_text, callback_data="profile:premium")
-    kb.adjust(1, 2, 2, 2, 2)
+
+    kb.row(InlineKeyboardButton(text=author_button, callback_data=author_cb))
+    kb.row(
+        InlineKeyboardButton(text=t("profile.btn.awards", lang), callback_data="profile:awards"),
+        InlineKeyboardButton(text=t("profile.btn.streak", lang), callback_data="profile:streak"),
+    )
+    kb.row(
+        InlineKeyboardButton(text=t("profile.btn.edit", lang), callback_data="profile:edit"),
+        InlineKeyboardButton(text=t("profile.btn.settings", lang), callback_data="profile:settings"),
+    )
+    kb.row(InlineKeyboardButton(text="📚 Мой архив", callback_data="myphoto:archive:0"))
+    kb.row(
+        InlineKeyboardButton(text=t("profile.btn.menu", lang), callback_data="menu:back"),
+        InlineKeyboardButton(text=premium_button_text, callback_data="profile:premium"),
+    )
     return text, kb.as_markup()
 
 
@@ -951,7 +955,7 @@ def _build_country_kb(user: dict) -> InlineKeyboardMarkup:
     kb.button(text="✍️ Изменить", callback_data="profile:country:change")
     kb.button(text="🗑 Удалить", callback_data="profile:country:delete")
     kb.button(text=("🙈 Скрыть" if show_country else "👁 Показать"), callback_data="profile:country:toggle")
-    kb.button(text="⬅️ Назад", callback_data="profile:edit")
+    kb.button(text="↩️ К профилю", callback_data="profile:edit")
     kb.adjust(2, 2)
     return kb.as_markup()
 
@@ -1104,7 +1108,7 @@ async def profile_edit_country(callback: CallbackQuery, state: FSMContext):
         "🌍 <b>Страна</b>\n\n"
         "Страна определяется автоматически по городу.\n"
         "Чтобы изменить страну — просто измени город 🏙✨",
-        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        reply_markup=build_back_kb(callback_data="profile:edit", text="↩️ К профилю"),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1116,7 +1120,7 @@ async def profile_country_change(callback: CallbackQuery, state: FSMContext):
         "🌍 <b>Страна</b>\n\n"
         "Страна определяется автоматически по городу.\n"
         "Чтобы изменить страну — просто измени город 🏙✨",
-        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        reply_markup=build_back_kb(callback_data="profile:edit", text="↩️ К профилю"),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1128,7 +1132,7 @@ async def profile_country_delete(callback: CallbackQuery):
         "🌍 <b>Страна</b>\n\n"
         "Страна определяется автоматически по городу.\n"
         "Чтобы изменить страну — просто измени город 🏙✨",
-        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        reply_markup=build_back_kb(callback_data="profile:edit", text="↩️ К профилю"),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1140,7 +1144,7 @@ async def profile_country_toggle(callback: CallbackQuery):
         "🌍 <b>Страна</b>\n\n"
         "Страна определяется автоматически по городу.\n"
         "Чтобы изменить страну — просто измени город 🏙✨",
-        reply_markup=build_back_kb(callback_data="profile:edit", text="⬅️ Назад"),
+        reply_markup=build_back_kb(callback_data="profile:edit", text="↩️ К профилю"),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1623,7 +1627,7 @@ async def profile_awards_menu(callback: CallbackQuery):
             "здесь будут появляться твои трофеи."
         )
         kb = InlineKeyboardBuilder()
-        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.button(text="↩️ К профилю", callback_data="menu:profile")
         kb.adjust(2, 2, 1, 1)
         await callback.message.edit_text(
             text,
@@ -1656,7 +1660,7 @@ async def profile_awards_menu(callback: CallbackQuery):
         # Фильтры доступны даже если наград этого типа нет — можно переключиться
         kb.button(text="От Создателя", callback_data="profile:awards:creator:1")
         kb.button(text="От других", callback_data="profile:awards:others:1")
-        kb.button(text="⬅️ Назад", callback_data="menu:profile")
+        kb.button(text="↩️ К профилю", callback_data="menu:profile")
         kb.adjust(2, 1)
         await callback.message.edit_text(
             text,
@@ -1758,7 +1762,7 @@ async def profile_awards_menu(callback: CallbackQuery):
 
         if has_prev:
             kb.button(
-                text="⬅️ Назад",
+                text="↩️ К профилю",
                 callback_data=f"profile:awards:{filter_type}:{page - 1}",
             )
         if has_next:

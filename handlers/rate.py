@@ -1294,13 +1294,13 @@ def build_rate_keyboard(
 
     rows.append(
         [
-            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
             InlineKeyboardButton(
                 text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
                 callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
             ),
         ]
     )
+    rows.append([InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1333,13 +1333,13 @@ def build_view_only_keyboard(
 
     rows.append(
         [
-            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
             InlineKeyboardButton(
                 text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
                 callback_data=f"rate:more:{photo_id}:{0 if show_details else 1}",
             ),
         ]
     )
+    rows.append([InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1875,7 +1875,7 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             buttons_row,
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")],
         ]
     )
 
@@ -2011,7 +2011,7 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
             callback_data=f"rate:report_reason:{reason}:{photo_id}",
         )
     builder.adjust(2)
-    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back"))
+    builder.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
     kb = builder.as_markup()
 
     await callback.message.edit_caption(
@@ -2191,7 +2191,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     message_id=rate_msg_id,
                     text=prefix,
                     reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                        inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
                     ),
                     parse_mode="HTML",
                 )
@@ -2228,7 +2228,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                         message_id=rate_msg_id,
                         text=prefix,
                         reply_markup=InlineKeyboardMarkup(
-                            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                            inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
                         ),
                         parse_mode="HTML",
                     )
@@ -2264,7 +2264,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
 
     if not saved:
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+            inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
         )
         err_txt = "Не удалось сохранить комментарий. Попробуй ещё раз чуть позже."
         if save_error is not None:
@@ -2348,7 +2348,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     message_id=rate_msg_id,
                     text=prefix,
                     reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                        inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
                     ),
                     parse_mode="HTML",
                 )
@@ -2478,7 +2478,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             )
         else:
             kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+                inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
             )
             try:
                 await message.bot.edit_message_text(
@@ -2538,7 +2538,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
             pass
 
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="rate:back")]]
+            inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
         )
         try:
             await message.bot.edit_message_caption(
