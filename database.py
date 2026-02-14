@@ -3979,9 +3979,6 @@ async def log_bot_error(
 ) -> None:
     """Сохраняет ошибку бота в таблицу bot_error_logs для админки."""
     p = _assert_pool()
-    # В разных БД колонка created_at может быть TEXT или TIMESTAMP.
-    # Передаём datetime, чтобы подошло под TIMESTAMP, а в TEXT каст прошло автоматически.
-    now = get_moscow_now()
 
     # Ограничим размеры, чтобы не убить базу огромным traceback
     def _cut(s: str | None, n: int) -> str | None:
@@ -4003,7 +4000,7 @@ async def log_bot_error(
               traceback_text,
               created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
             """,
             int(chat_id) if chat_id is not None else None,
             int(tg_user_id) if tg_user_id is not None else None,
@@ -4012,7 +4009,6 @@ async def log_bot_error(
             _cut(error_type, 200),
             _cut(error_text, 2000),
             _cut(traceback_text, 20000),
-            now,
         )
 
 
@@ -6664,16 +6660,14 @@ async def log_activity_event(
     if not user or not user.get("id"):
         return
     p = _assert_pool()
-    now_iso = get_moscow_now_iso()
     async with p.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO activity_events (user_id, kind, created_at)
-            VALUES ($1, $2, $3)
+            VALUES ($1, $2, NOW())
             """,
             int(user["id"]),
             str(kind or "any"),
-            now_iso,
         )
 
 
@@ -6860,15 +6854,20 @@ async def get_total_activity_events_last_days(days: int = 7) -> int:
 
 def _coerce_datetime(value: object) -> datetime:
     if isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(str(value))
-    except Exception:
-        # fallback: try parsing date-only
+        dt = value
+    else:
         try:
-            return datetime.fromisoformat(str(value) + "T00:00:00")
+            dt = datetime.fromisoformat(str(value))
         except Exception:
-            raise
+            # fallback: try parsing date-only
+            try:
+                dt = datetime.fromisoformat(str(value) + "T00:00:00")
+            except Exception:
+                raise
+    # Queries below cast params to timestamp (without timezone), so pass naive datetime.
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
 
 
 async def get_activity_counts_by_hour(start_iso: object, end_iso: object) -> list[dict]:

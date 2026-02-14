@@ -177,11 +177,11 @@ async def _render_logs_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
     else:
         for r in rows:
             rid = r.get("id")
-            created_at = _fmt_dt_safe(r.get("created_at"))
-            error_type = r.get("error_type") or "Error"
-            handler = r.get("handler") or "—"
+            created_at = html.escape(_fmt_dt_safe(r.get("created_at")))
+            error_type = html.escape(str(r.get("error_type") or "Error"))
+            handler = html.escape(str(r.get("handler") or "—"))
             tg_user_id = r.get("tg_user_id")
-            update_type = r.get("update_type") or "—"
+            update_type = html.escape(str(r.get("update_type") or "—"))
 
             lines.append(
                 f"<b>#{rid}</b> · {created_at}\n"
@@ -432,15 +432,15 @@ async def admin_logs_view(callback: CallbackQuery):
         await callback.answer()
         return
 
-    created_at = _fmt_dt_safe(row.get("created_at"))
-    error_type = row.get("error_type") or "Error"
-    handler = row.get("handler") or "—"
-    update_type = row.get("update_type") or "—"
+    created_at = html.escape(_fmt_dt_safe(row.get("created_at")))
+    error_type = html.escape(str(row.get("error_type") or "Error"))
+    handler = html.escape(str(row.get("handler") or "—"))
+    update_type = html.escape(str(row.get("update_type") or "—"))
     chat_id = row.get("chat_id")
     tg_user_id = row.get("tg_user_id")
 
-    error_text = _cut_text(row.get("error_text"), 1200)
-    tb = _cut_text(row.get("traceback_text"), _MAX_TG_TEXT)
+    error_text = html.escape(_cut_text(row.get("error_text"), 1200))
+    tb = html.escape(_cut_text(row.get("traceback_text"), _MAX_TG_TEXT))
 
     text = (
         "🧾 <b>Детали ошибки</b>\n\n"

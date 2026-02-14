@@ -138,6 +138,8 @@ def _normalize_bucket(value: object, *, by: str) -> datetime | None:
             dt = value
         else:
             dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
         if by == "hour":
             return dt.replace(minute=0, second=0, microsecond=0)
         return dt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -271,7 +273,7 @@ async def admin_activity_day(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    now = get_moscow_now()
+    now = get_moscow_now().replace(tzinfo=None)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
 
@@ -318,7 +320,7 @@ async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    now = get_moscow_now()
+    now = get_moscow_now().replace(tzinfo=None)
     end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     start = end - timedelta(days=7)
 
@@ -365,7 +367,7 @@ async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    now = get_moscow_now()
+    now = get_moscow_now().replace(tzinfo=None)
     end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     start = end - timedelta(days=30)
 
