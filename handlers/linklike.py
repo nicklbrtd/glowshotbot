@@ -25,6 +25,7 @@ from database import (
     get_link_ratings_count_for_photo,
     get_ratings_count_for_photo,
     is_user_premium_active,
+    try_award_referral,
 )
 from utils.registration_guard import require_user_name
 from handlers.upload import _tag_label, _device_emoji
@@ -685,6 +686,34 @@ async def lr_set(callback: CallbackQuery):
 
     if not ok:
         return
+
+    # Referral award: only once, only when user already satisfies registration/vote conditions.
+    try:
+        rewarded, referrer_tg_id, referee_tg_id = await try_award_referral(int(callback.from_user.id))
+    except Exception:
+        rewarded = False
+        referrer_tg_id = None
+        referee_tg_id = None
+
+    if rewarded:
+        if referrer_tg_id:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=referrer_tg_id,
+                    text="🎉 Твой друг активировал рефералку: +2 credits и 3 часа Premium",
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
+        if referee_tg_id:
+            try:
+                await callback.message.bot.send_message(
+                    chat_id=referee_tg_id,
+                    text="🎁 Бонус за приглашение получен: +2 credits и 3 часа Premium",
+                    disable_notification=True,
+                )
+            except Exception:
+                pass
 
     # После успешной оценки:
     # - если это пакетная ссылка (несколько фото), сразу показываем следующую неоценённую;

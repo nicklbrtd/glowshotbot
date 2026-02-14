@@ -41,7 +41,7 @@ from database import (
     get_daily_skip_info,
     update_daily_skip_info,
     get_awards_for_user,
-    link_and_reward_referral_if_needed,
+    try_award_referral,
     log_bot_error,
     streak_record_action_by_tg_id,
     get_notify_settings_by_tg_id,
@@ -2774,7 +2774,7 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
 
     # Сохраняем обычную оценку 10
-    await add_rating(user["id"], photo_id, value)
+    vote_saved = await add_rating(user["id"], photo_id, value)
     # И помечаем её как супер-оценку (+5 баллов в статистике)
     await set_super_rating(user["id"], photo_id)
     # streak: rating counts as daily activity
@@ -2796,43 +2796,34 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
     # Рефералька: проверяем, не пора ли выдать бонусы
-    try:
-        rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
-    except Exception:
-        rewarded = False
-        referrer_tg_id = None
-        referee_tg_id = None
+    rewarded = False
+    referrer_tg_id = None
+    referee_tg_id = None
+    if vote_saved:
+        try:
+            rewarded, referrer_tg_id, referee_tg_id = await try_award_referral(user["tg_id"])
+        except Exception:
+            rewarded = False
+            referrer_tg_id = None
+            referee_tg_id = None
 
     if rewarded:
-        # Пуш тому, кто дал ссылку
         if referrer_tg_id:
             try:
                 await callback.message.bot.send_message(
                     chat_id=referrer_tg_id,
-                    text=(
-                        "🤝 <b>Друг выполнил условия реферальной программы!</b>\n\n"
-                        "Тебе начислено <b>2 дня GlowShot Премиум</b> за приглашение.\n"
-                        "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
-                    ),
-                    reply_markup=build_referral_thanks_keyboard(),
-                    parse_mode="HTML",
+                    text="🎉 Твой друг активировал рефералку: +2 credits и 3 часа Premium",
+                    disable_notification=True,
                 )
             except Exception:
                 pass
 
-        # Пуш другу
         if referee_tg_id:
             try:
                 await callback.message.bot.send_message(
                     chat_id=referee_tg_id,
-                    text=(
-                        "🎉 <b>Ты выполнил условия реферальной программы!</b>\n\n"
-                        "За регистрацию и участие в оценке фотографий тебе начислено "
-                        "<b>2 дня GlowShot Премиум</b>.\n"
-                        "Продолжай выкладывать свои кадры и оценивать работы других 💎"
-                    ),
-                    reply_markup=build_referral_thanks_keyboard(),
-                    parse_mode="HTML",
+                    text="🎁 Бонус за приглашение получен: +2 credits и 3 часа Premium",
+                    disable_notification=True,
                 )
             except Exception:
                 pass
@@ -2961,7 +2952,7 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                             pass
 
     # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
-    await add_rating(user["id"], photo_id, value)
+    vote_saved = await add_rating(user["id"], photo_id, value)
     # streak: rating counts as daily activity
     try:
         await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
@@ -2980,43 +2971,34 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
     # Рефералка: проверяем, не пора ли выдать бонусы
-    try:
-        rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
-    except Exception:
-        rewarded = False
-        referrer_tg_id = None
-        referee_tg_id = None
+    rewarded = False
+    referrer_tg_id = None
+    referee_tg_id = None
+    if vote_saved:
+        try:
+            rewarded, referrer_tg_id, referee_tg_id = await try_award_referral(user["tg_id"])
+        except Exception:
+            rewarded = False
+            referrer_tg_id = None
+            referee_tg_id = None
 
     if rewarded:
-        # Пуш тому, кто дал ссылку
         if referrer_tg_id:
             try:
                 await callback.message.bot.send_message(
                     chat_id=referrer_tg_id,
-                    text=(
-                        "🤝 <b>Друг выполнил условия реферальной программы!</b>\n\n"
-                        "Тебе начислено <b>2 дня GlowShot Премиум</b> за приглашение.\n"
-                        "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
-                    ),
-                    reply_markup=build_referral_thanks_keyboard(),
-                    parse_mode="HTML",
+                    text="🎉 Твой друг активировал рефералку: +2 credits и 3 часа Premium",
+                    disable_notification=True,
                 )
             except Exception:
                 pass
 
-        # Пуш другу
         if referee_tg_id:
             try:
                 await callback.message.bot.send_message(
                     chat_id=referee_tg_id,
-                    text=(
-                        "🎉 <b>Ты выполнил условия реферальной программы!</b>\n\n"
-                        "За регистрацию и участие в оценке фотографий тебе начислено "
-                        "<b>2 дня GlowShot Премиум</b>.\n"
-                        "Продолжай выкладывать свои кадры и оценивать работы других 💎"
-                    ),
-                    reply_markup=build_referral_thanks_keyboard(),
-                    parse_mode="HTML",
+                    text="🎁 Бонус за приглашение получен: +2 credits и 3 часа Premium",
+                    disable_notification=True,
                 )
             except Exception:
                 pass
@@ -3237,7 +3219,7 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
                     except Exception:
                         pass
 
-    await add_rating(user["id"], int(photo_id), value)
+    vote_saved = await add_rating(user["id"], int(photo_id), value)
     try:
         await streak_record_action_by_tg_id(int(message.from_user.id), "rate")
     except Exception:
@@ -3255,25 +3237,24 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     except Exception:
         pass
 
-    try:
-        rewarded, referrer_tg_id, referee_tg_id = await link_and_reward_referral_if_needed(user["tg_id"])
-    except Exception:
-        rewarded = False
-        referrer_tg_id = None
-        referee_tg_id = None
+    rewarded = False
+    referrer_tg_id = None
+    referee_tg_id = None
+    if vote_saved:
+        try:
+            rewarded, referrer_tg_id, referee_tg_id = await try_award_referral(user["tg_id"])
+        except Exception:
+            rewarded = False
+            referrer_tg_id = None
+            referee_tg_id = None
 
     if rewarded:
         if referrer_tg_id:
             try:
                 await message.bot.send_message(
                     chat_id=referrer_tg_id,
-                    text=(
-                        "🤝 <b>Друг выполнил условия реферальной программы!</b>\n\n"
-                        "Тебе начислено <b>2 дня GlowShot Премиум</b> за приглашение.\n"
-                        "Спасибо, что приводишь к нам людей, которым интересна фотография 📸"
-                    ),
-                    reply_markup=build_referral_thanks_keyboard(),
-                    parse_mode="HTML",
+                    text="🎉 Твой друг активировал рефералку: +2 credits и 3 часа Premium",
+                    disable_notification=True,
                 )
             except Exception:
                 pass
@@ -3282,14 +3263,8 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
             try:
                 await message.bot.send_message(
                     chat_id=referee_tg_id,
-                    text=(
-                        "🎉 <b>Ты выполнил условия реферальной программы!</b>\n\n"
-                        "За регистрацию и участие в оценке фотографий тебе начислено "
-                        "<b>2 дня GlowShot Премиум</b>.\n"
-                        "Продолжай выкладывать свои кадры и оценивать работы других 💎"
-                    ),
-                    reply_markup=build_referral_thanks_keyboard(),
-                    parse_mode="HTML",
+                    text="🎁 Бонус за приглашение получен: +2 credits и 3 часа Premium",
+                    disable_notification=True,
                 )
             except Exception:
                 pass

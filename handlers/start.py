@@ -836,21 +836,20 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
         except Exception:
             user = None
 
+    # /start ref_CODE: фиксируем только связь invited->inviter (без начисления).
+    if payload and payload.startswith("ref_"):
+        ref_code = payload[4:].strip()
+        if ref_code:
+            try:
+                await db.bind_referral_to_invited_tg_id(message.from_user.id, ref_code)
+            except Exception:
+                pass
+
     lang = _pick_lang(user, getattr(message.from_user, "language_code", None))
 
     if user is None:
         # Если был soft-delete, сбрасываем состояние на всякий случай
         await state.clear()
-
-        # Если человек зашёл по реферальной ссылке вида /start ref_CODE — сохраняем pending
-        # Но не даём реферальный бонус, если аккаунт уже существовал (даже если сейчас удалён).
-        if payload and payload.startswith("ref_") and not user_any:
-            ref_code = payload[4:].strip()
-            if ref_code:
-                try:
-                    await db.save_pending_referral(message.from_user.id, ref_code)
-                except Exception:
-                    pass
 
         # Если включён режим обновления — сразу предупреждаем новым пользователям одним сообщением
         try:

@@ -2070,6 +2070,20 @@ async def ensure_schema() -> None:
 
         await conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+              id BIGSERIAL PRIMARY KEY,
+              invited_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              inviter_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              rewarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              reward_type TEXT NOT NULL DEFAULT 'premium_credits',
+              reward_version TEXT NOT NULL DEFAULT 'v2_3h_2c',
+              UNIQUE(invited_user_id)
+            );
+            """
+        )
+
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS payments (
                 id BIGSERIAL PRIMARY KEY,
                 tg_id BIGINT NOT NULL,
@@ -2525,6 +2539,8 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_daily_grant ON user_stats(last_daily_grant_day, user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_author_votes_voter_day ON daily_author_votes(voter_id, day);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_inviter ON referral_rewards(inviter_user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_rewarded_at ON referral_rewards(rewarded_at DESC);")
 
         # ======== CREATE UNIQUE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_order_id ON payments(provider, order_id);")
@@ -3549,74 +3565,317 @@ async def save_pending_referral(new_user_tg_id: int, referral_code: str | None) 
         )
 
 
+async def bind_referral_to_invited_tg_id(invited_tg_id: int, referral_code: str | None) -> bool:
+    """Bind invited tg_id to inviter by referral code once. No rewards here."""
+    code = (referral_code or "").strip()
+    if not code:
+        return False
+
+    invited = await ensure_user_minimal_row(int(invited_tg_id))
+    if not invited:
+        return False
+    invited_user_id = int(invited["id"])
+
+    p = _assert_pool()
+    now = get_moscow_now_iso()
+    async with p.acquire() as conn:
+        inviter = await conn.fetchrow(
+            """
+            SELECT id, tg_id
+            FROM users
+            WHERE referral_code=$1
+              AND is_deleted=0
+            LIMIT 1
+            """,
+            code,
+        )
+        if not inviter:
+            return False
+
+        inviter_user_id = int(inviter["id"])
+        inviter_tg_id = int(inviter["tg_id"])
+        if inviter_user_id == invited_user_id or inviter_tg_id == int(invited_tg_id):
+            return False
+
+        inserted = await conn.execute(
+            """
+            INSERT INTO referrals (inviter_user_id, invited_user_id, created_at, qualified, qualified_at)
+            VALUES ($1, $2, $3, 0, NULL)
+            ON CONFLICT (invited_user_id) DO NOTHING
+            """,
+            inviter_user_id,
+            invited_user_id,
+            now,
+        )
+        await conn.execute(
+            "DELETE FROM pending_referrals WHERE new_user_tg_id=$1",
+            int(invited_tg_id),
+        )
+    return inserted.endswith("1")
+
+
 async def get_referral_stats_for_user(user_tg_id: int) -> dict:
     u = await get_user_by_tg_id(user_tg_id)
     if not u:
         return {"invited_qualified": 0}
     p = _assert_pool()
     async with p.acquire() as conn:
-        v = await conn.fetchval("SELECT COUNT(*) FROM referrals WHERE inviter_user_id=$1 AND qualified=1",
-                                int(u["id"]))
+        v = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM referral_rewards
+            WHERE inviter_user_id=$1
+            """,
+            int(u["id"]),
+        )
     return {"invited_qualified": int(v or 0)}
 
 
-async def link_and_reward_referral_if_needed(invited_tg_id: int):
+async def _link_referral_from_pending_if_needed(
+    conn: asyncpg.Connection,
+    *,
+    invited_tg_id: int,
+    invited_user_id: int,
+    now_iso: str,
+) -> None:
+    pending = await conn.fetchrow(
+        "SELECT referral_code FROM pending_referrals WHERE new_user_tg_id=$1",
+        int(invited_tg_id),
+    )
+    if not pending:
+        return
+
+    code = str(pending.get("referral_code") or "").strip()
+    if not code:
+        return
+
+    inviter = await conn.fetchrow(
+        """
+        SELECT id, tg_id
+        FROM users
+        WHERE referral_code=$1
+          AND is_deleted=0
+        LIMIT 1
+        """,
+        code,
+    )
+    if not inviter:
+        return
+
+    inviter_user_id = int(inviter["id"])
+    inviter_tg_id = int(inviter["tg_id"])
+    if inviter_user_id == int(invited_user_id) or inviter_tg_id == int(invited_tg_id):
+        return
+
+    await conn.execute(
+        """
+        INSERT INTO referrals (inviter_user_id, invited_user_id, created_at, qualified, qualified_at)
+        VALUES ($1, $2, $3, 0, NULL)
+        ON CONFLICT (invited_user_id) DO NOTHING
+        """,
+        inviter_user_id,
+        int(invited_user_id),
+        now_iso,
+    )
+
+
+async def _add_premium_hours(conn: asyncpg.Connection, user_id: int, hours: int, *, now_dt: datetime) -> None:
+    row = await conn.fetchrow(
+        "SELECT premium_until FROM users WHERE id=$1 FOR UPDATE",
+        int(user_id),
+    )
+    base = now_dt
+    if row and row["premium_until"]:
+        try:
+            current = datetime.fromisoformat(str(row["premium_until"]))
+            base = current if current > now_dt else now_dt
+        except Exception:
+            base = now_dt
+
+    new_until = base + timedelta(hours=int(hours))
+    await conn.execute(
+        """
+        UPDATE users
+        SET is_premium=1,
+            premium_until=$2,
+            updated_at=$3
+        WHERE id=$1
+        """,
+        int(user_id),
+        new_until.isoformat(),
+        now_dt.isoformat(),
+    )
+
+
+async def _apply_referral_reward_to_user(
+    conn: asyncpg.Connection,
+    *,
+    user_id: int,
+    credits: int,
+    premium_hours: int,
+    now_dt: datetime,
+) -> None:
+    await _ensure_user_stats_row(conn, int(user_id))
+    await conn.execute(
+        """
+        UPDATE user_stats
+        SET credits = credits + $2,
+            last_active_at = $3
+        WHERE user_id=$1
+        """,
+        int(user_id),
+        int(credits),
+        now_dt,
+    )
+    await _add_premium_hours(conn, int(user_id), int(premium_hours), now_dt=now_dt)
+
+
+async def try_award_referral(invited_tg_id: int) -> tuple[bool, int | None, int | None]:
+    """Try to award referral bonus for invited user. Idempotent."""
     p = _assert_pool()
+    now_dt = get_bot_now()
+    now_iso = now_dt.isoformat()
 
     async with p.acquire() as conn:
-        invited = await conn.fetchrow(
-            "SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0",
-            int(invited_tg_id),
-        )
-        if not invited:
-            return False, None, None
+        async with conn.transaction():
+            invited = await conn.fetchrow(
+                """
+                SELECT id, tg_id, name
+                FROM users
+                WHERE tg_id=$1
+                  AND is_deleted=0
+                LIMIT 1
+                """,
+                int(invited_tg_id),
+            )
+            if not invited:
+                return False, None, None
 
-        invited_user_id = int(invited["id"])
+            invited_user_id = int(invited["id"])
+            invited_name = str(invited.get("name") or "").strip()
+            if not invited_name:
+                return False, None, None
 
-        exists = await conn.fetchval(
-            "SELECT 1 FROM referrals WHERE invited_user_id=$1",
-            invited_user_id
-        )
-        if exists:
-            return False, None, None
+            has_vote = await conn.fetchval(
+                """
+                SELECT 1
+                FROM votes
+                WHERE voter_id=$1
+                LIMIT 1
+                """,
+                invited_user_id,
+            )
+            if not has_vote:
+                has_vote = await conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM ratings
+                    WHERE user_id=$1
+                    LIMIT 1
+                    """,
+                    invited_user_id,
+                )
+            if not has_vote:
+                return False, None, None
 
-        pending = await conn.fetchrow(
-            "SELECT referral_code FROM pending_referrals WHERE new_user_tg_id=$1",
-            int(invited_tg_id),
-        )
-        if not pending:
-            return False, None, None
+            referral = await conn.fetchrow(
+                """
+                SELECT inviter_user_id
+                FROM referrals
+                WHERE invited_user_id=$1
+                FOR UPDATE
+                """,
+                invited_user_id,
+            )
+            if not referral:
+                await _link_referral_from_pending_if_needed(
+                    conn,
+                    invited_tg_id=int(invited_tg_id),
+                    invited_user_id=invited_user_id,
+                    now_iso=now_iso,
+                )
+                referral = await conn.fetchrow(
+                    """
+                    SELECT inviter_user_id
+                    FROM referrals
+                    WHERE invited_user_id=$1
+                    FOR UPDATE
+                    """,
+                    invited_user_id,
+                )
+            if not referral:
+                return False, None, None
 
-        inviter = await conn.fetchrow(
-            "SELECT id, tg_id FROM users WHERE referral_code=$1 AND is_deleted=0",
-            pending["referral_code"]
-        )
-        if not inviter:
-            return False, None, None
+            inviter_user_id = int(referral["inviter_user_id"])
+            if inviter_user_id == invited_user_id:
+                return False, None, None
 
-        inviter_user_id = int(inviter["id"])
-        inviter_tg_id = int(inviter["tg_id"])
-        now = get_moscow_now_iso()
+            inviter = await conn.fetchrow(
+                """
+                SELECT id, tg_id
+                FROM users
+                WHERE id=$1
+                  AND is_deleted=0
+                FOR UPDATE
+                """,
+                inviter_user_id,
+            )
+            if not inviter:
+                return False, None, None
+            inviter_tg_id = int(inviter["tg_id"])
+            if inviter_tg_id == int(invited_tg_id):
+                return False, None, None
 
-        await conn.execute(
-            """
-            INSERT INTO referrals (inviter_user_id, invited_user_id, qualified, qualified_at, created_at)
-            VALUES ($1, $2, 1, $3, $3)
-            """,
-            inviter_user_id,
-            invited_user_id,
-            now
-        )
+            reward_row = await conn.fetchrow(
+                """
+                INSERT INTO referral_rewards (invited_user_id, inviter_user_id, rewarded_at, reward_type, reward_version)
+                VALUES ($1, $2, $3, 'premium_credits', 'v2_3h_2c')
+                ON CONFLICT (invited_user_id) DO NOTHING
+                RETURNING id
+                """,
+                invited_user_id,
+                inviter_user_id,
+                now_dt,
+            )
+            if not reward_row:
+                return False, None, None
 
-        await conn.execute(
-            "DELETE FROM pending_referrals WHERE new_user_tg_id=$1",
-            int(invited_tg_id)
-        )
+            await _apply_referral_reward_to_user(
+                conn,
+                user_id=invited_user_id,
+                credits=2,
+                premium_hours=3,
+                now_dt=now_dt,
+            )
+            await _apply_referral_reward_to_user(
+                conn,
+                user_id=inviter_user_id,
+                credits=2,
+                premium_hours=3,
+                now_dt=now_dt,
+            )
 
-        await _add_premium_days(conn, inviter_user_id, days=1)
-        await _add_premium_days(conn, invited_user_id, days=1)
+            await conn.execute(
+                """
+                UPDATE referrals
+                SET qualified=1,
+                    qualified_at=$2
+                WHERE invited_user_id=$1
+                """,
+                invited_user_id,
+                now_iso,
+            )
+            await conn.execute(
+                "DELETE FROM pending_referrals WHERE new_user_tg_id=$1",
+                int(invited_tg_id),
+            )
 
-        return True, inviter_tg_id, invited_tg_id
+            return True, inviter_tg_id, int(invited_tg_id)
+
+
+async def link_and_reward_referral_if_needed(invited_tg_id: int):
+    """Backward-compatible alias for old handlers."""
+    return await try_award_referral(int(invited_tg_id))
 
 async def _add_premium_days(conn, user_id: int, days: int) -> None:
     row = await conn.fetchrow(
@@ -5821,7 +6080,7 @@ async def daily_recap(submit_day: date, *, min_votes: int = 7, top_n: int = 3) -
     return {"top": top_list}
 
 
-async def add_rating(user_id: int, photo_id: int, value: int) -> None:
+async def add_rating(user_id: int, photo_id: int, value: int) -> bool:
     p = _assert_pool()
     now_dt = get_bot_now()
     now_iso = get_bot_now_iso()
@@ -5833,18 +6092,18 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
                 int(photo_id),
             )
             if not photo_row:
-                return
+                return False
             status = str(photo_row.get("moderation_status") or "").lower()
             if (
                 int(photo_row.get("is_deleted") or 0) != 0
                 or status not in ("active", "good")
                 or not bool(photo_row.get("ratings_enabled", 1))
             ):
-                return
+                return False
 
             author_id = int(photo_row["user_id"])
             if await _abuse_vote_limit_exceeded(conn, int(user_id), author_id, today):
-                return
+                return False
 
             prev_score = await conn.fetchval(
                 "SELECT score FROM votes WHERE photo_id=$1 AND voter_id=$2",
@@ -5852,7 +6111,7 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
                 int(user_id),
             )
             if prev_score is not None:
-                return  # уникальность голоса
+                return False  # уникальность голоса
 
             await conn.execute(
                 """
@@ -5910,6 +6169,7 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> None:
                     await add_credits_on_vote(int(user_id), now=now_dt)
                 except Exception:
                     pass
+    return True
 
 
 async def set_super_rating(user_id: int, photo_id: int) -> bool:
