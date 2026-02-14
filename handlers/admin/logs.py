@@ -257,6 +257,7 @@ async def _render_systemd_logs() -> tuple[str, InlineKeyboardMarkup]:
 # ==== ВХОД В РАЗДЕЛ ==========================================
 # =============================================================
 
+@router.callback_query(F.data == "admin:logs:page:1")
 @router.callback_query(F.data == "admin:logs")
 async def admin_logs_open(callback: CallbackQuery):
     admin_user = await _ensure_admin(callback)

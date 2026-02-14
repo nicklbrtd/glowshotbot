@@ -271,26 +271,13 @@ async def admin_activity_day(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
+    now = get_moscow_now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+
+    rows: list[dict] = []
     try:
-        now = get_moscow_now()
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-
         rows = await get_activity_counts_by_hour(start, end)
-        by_hour: dict[datetime, int] = {}
-        for r in rows:
-            dt = _normalize_bucket(r.get("bucket"), by="hour")
-            if dt is not None:
-                by_hour[dt] = int(r.get("cnt") or 0)
-        counts: list[int] = []
-        labels: list[str] = []
-        for h in range(24):
-            dt = start + timedelta(hours=h)
-            counts.append(by_hour.get(dt, 0))
-            labels.append(f"{h:02d}")
-
-        title = f"День: {start.strftime('%d.%m.%Y')} (по часам)"
-        await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels, kind="hour")
     except Exception as e:
         try:
             await log_bot_error(
@@ -305,6 +292,21 @@ async def admin_activity_day(callback: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
+    by_hour: dict[datetime, int] = {}
+    for r in rows:
+        dt = _normalize_bucket(r.get("bucket"), by="hour")
+        if dt is not None:
+            by_hour[dt] = int(r.get("cnt") or 0)
+    counts: list[int] = []
+    labels: list[str] = []
+    for h in range(24):
+        dt = start + timedelta(hours=h)
+        counts.append(by_hour.get(dt, 0))
+        labels.append(f"{h:02d}")
+
+    title = f"День: {start.strftime('%d.%m.%Y')} (по часам)"
+    await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels, kind="hour")
+
 
 @router.callback_query(F.data == "admin:activity:week")
 async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
@@ -316,26 +318,13 @@ async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
+    now = get_moscow_now()
+    end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    start = end - timedelta(days=7)
+
+    rows: list[dict] = []
     try:
-        now = get_moscow_now()
-        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        start = end - timedelta(days=7)
-
         rows = await get_activity_counts_by_day(start, end)
-        by_day: dict[datetime, int] = {}
-        for r in rows:
-            dt = _normalize_bucket(r.get("bucket"), by="day")
-            if dt is not None:
-                by_day[dt] = int(r.get("cnt") or 0)
-        counts: list[int] = []
-        labels: list[str] = []
-        for i in range(7):
-            dt = start + timedelta(days=i)
-            counts.append(by_day.get(dt, 0))
-            labels.append(dt.strftime("%d.%m"))
-
-        title = f"Неделя: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
-        await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels, kind="day")
     except Exception as e:
         try:
             await log_bot_error(
@@ -350,6 +339,21 @@ async def admin_activity_week(callback: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
+    by_day: dict[datetime, int] = {}
+    for r in rows:
+        dt = _normalize_bucket(r.get("bucket"), by="day")
+        if dt is not None:
+            by_day[dt] = int(r.get("cnt") or 0)
+    counts: list[int] = []
+    labels: list[str] = []
+    for i in range(7):
+        dt = start + timedelta(days=i)
+        counts.append(by_day.get(dt, 0))
+        labels.append(dt.strftime("%d.%m"))
+
+    title = f"Неделя: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
+    await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels, kind="day")
+
 
 @router.callback_query(F.data == "admin:activity:month")
 async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
@@ -361,26 +365,13 @@ async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
+    now = get_moscow_now()
+    end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    start = end - timedelta(days=30)
+
+    rows: list[dict] = []
     try:
-        now = get_moscow_now()
-        end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        start = end - timedelta(days=30)
-
         rows = await get_activity_counts_by_day(start, end)
-        by_day: dict[datetime, int] = {}
-        for r in rows:
-            dt = _normalize_bucket(r.get("bucket"), by="day")
-            if dt is not None:
-                by_day[dt] = int(r.get("cnt") or 0)
-        counts: list[int] = []
-        labels: list[str] = []
-        for i in range(30):
-            dt = start + timedelta(days=i)
-            counts.append(by_day.get(dt, 0))
-            labels.append(dt.strftime("%d.%m"))
-
-        title = f"Месяц: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
-        await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels, kind="day")
     except Exception as e:
         try:
             await log_bot_error(
@@ -394,3 +385,18 @@ async def admin_activity_month(callback: CallbackQuery, state: FSMContext):
             )
         except Exception:
             pass
+
+    by_day: dict[datetime, int] = {}
+    for r in rows:
+        dt = _normalize_bucket(r.get("bucket"), by="day")
+        if dt is not None:
+            by_day[dt] = int(r.get("cnt") or 0)
+    counts: list[int] = []
+    labels: list[str] = []
+    for i in range(30):
+        dt = start + timedelta(days=i)
+        counts.append(by_day.get(dt, 0))
+        labels.append(dt.strftime("%d.%m"))
+
+    title = f"Месяц: {start.strftime('%d.%m')}–{(end - timedelta(days=1)).strftime('%d.%m.%Y')}"
+    await _send_activity_chart(callback, state, title=title, counts=counts, labels=labels, kind="day")
