@@ -4578,8 +4578,7 @@ async def mark_photo_deleted(photo_id: int) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
         await conn.execute(
-            "UPDATE photos SET is_deleted=1, status='deleted', deleted_reason=COALESCE(deleted_reason,'system'), deleted_at=$1 WHERE id=$2",
-            get_bot_now_iso(),
+            "UPDATE photos SET is_deleted=1, status='deleted', deleted_reason=COALESCE(deleted_reason,'system'), deleted_at=NOW() WHERE id=$1",
             int(photo_id),
         )
 
@@ -4594,12 +4593,11 @@ async def mark_photo_deleted_by_user(photo_id: int, user_id: int) -> None:
             SET is_deleted=1,
                 status='deleted',
                 deleted_reason='user',
-                deleted_at=$3
+                deleted_at=NOW()
             WHERE id=$1 AND user_id=$2
             """,
             int(photo_id),
             int(user_id),
-            get_bot_now_iso(),
         )
 
 
