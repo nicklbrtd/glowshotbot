@@ -14,6 +14,7 @@ from utils.i18n import t
 from utils.banner import ensure_giraffe_banner
 from utils.registration_guard import require_user_name
 from utils.antispam import should_throttle
+from keyboards.common import BACK, HOME, MY_ARCHIVE, RESULTS, RESULTS_ARCHIVE, build_back_home_kb
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
@@ -33,7 +34,7 @@ from database import (
     is_user_premium_active,
     get_active_photos_for_user,
     get_latest_photos_for_user,
-    count_today_photos_for_user,
+    get_archived_photos_for_user,
     get_comment_counts_for_photo,
     get_photo_ratings_stats,
     count_super_ratings_for_photo,
@@ -49,7 +50,7 @@ from database import (
     increment_weekly_idea_requests,
     get_user_stats,
     add_credits,
-    is_today_slot_locked,
+    check_can_upload_today,
 )
 
 from database_results import (
@@ -77,6 +78,39 @@ def _shorten_alert(text: str, limit: int = 180) -> str:
         return text
     suffix = "…"
     return text[: max(0, limit - len(suffix))].rstrip() + suffix
+
+
+async def _edit_or_replace_text(
+    callback: CallbackQuery,
+    text: str,
+    kb: InlineKeyboardMarkup,
+    *,
+    parse_mode: str = "HTML",
+) -> int | None:
+    """Try edit current screen first; fallback to delete+send (single live screen)."""
+    try:
+        if getattr(callback.message, "photo", None):
+            await callback.message.edit_caption(caption=text, reply_markup=kb, parse_mode=parse_mode)
+        else:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode=parse_mode)
+        return int(callback.message.message_id)
+    except Exception:
+        pass
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    try:
+        sent = await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            parse_mode=parse_mode,
+            disable_notification=True,
+        )
+        return int(sent.message_id)
+    except Exception:
+        return None
 
 
 async def _accept_image_for_upload(message: Message, state: FSMContext, source: str = "photo") -> None:
@@ -451,7 +485,7 @@ def build_upload_intro_kb(
     limit: int | None = None,
     idea_cb: str = "myphoto:idea",
     upload_cb: str = "myphoto:add",
-    back_cb: str = "menu:back",
+    back_cb: str = "myphoto:open",
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     remaining_safe = None
@@ -465,8 +499,9 @@ def build_upload_intro_kb(
         idea_btn_text += f" ({remaining_safe})"
     kb.button(text=idea_btn_text, callback_data=idea_cb)
     kb.button(text="📤 Загрузить", callback_data=upload_cb)
-    kb.button(text="⬅️ Назад", callback_data=back_cb)
-    kb.adjust(1)
+    kb.button(text=BACK, callback_data=back_cb)
+    kb.button(text=HOME, callback_data="menu:back")
+    kb.adjust(1, 1, 2)
     return kb.as_markup()
 
 
@@ -584,9 +619,15 @@ def build_my_photo_keyboard(
             InlineKeyboardButton(text=t("myphoto.btn.delete", lang), callback_data=f"myphoto:delete:{photo_id}"),
         ])
 
+    rows.append(
+        [
+            InlineKeyboardButton(text=MY_ARCHIVE, callback_data="myphoto:archive:0"),
+            InlineKeyboardButton(text=RESULTS, callback_data="results:menu"),
+        ]
+    )
+
     # Добавить / навигация
     nav_row: list[InlineKeyboardButton] = []
-    nav_row.append(InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"))
     if can_add_more:
         nav_row.append(InlineKeyboardButton(text=t("myphoto.btn.add", lang), callback_data="myphoto:add_intro:extra"))
     elif nav_prev or nav_next:
@@ -594,7 +635,15 @@ def build_my_photo_keyboard(
             nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
         if nav_next:
             nav_row.append(InlineKeyboardButton(text="➡️", callback_data="myphoto:nav:next"))
-    rows.append(nav_row)
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text=BACK, callback_data="myphoto:open"),
+            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        ]
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -617,12 +666,18 @@ def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb.row(InlineKeyboardButton(text="⭐️ Оценки", callback_data=f"myphoto:ratings:{photo_id}"))
     kb.row(InlineKeyboardButton(text="📷 Устройство", callback_data=f"myphoto:edit:device:{photo_id}"))
     kb.row(InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 def build_edit_cancel_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:editmenu:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 
@@ -630,7 +685,10 @@ def build_edit_desc_kb(photo_id: int, has_description: bool) -> InlineKeyboardMa
     kb = InlineKeyboardBuilder()
     if has_description:
         kb.row(InlineKeyboardButton(text="🗑 Удалить описание", callback_data=f"myphoto:edit:desc_clear:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:editmenu:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
@@ -639,14 +697,20 @@ def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📱 Смартфон", callback_data=f"myphoto:device:set:{photo_id}:phone"),
         InlineKeyboardButton(text="📸 Камера", callback_data=f"myphoto:device:set:{photo_id}:camera"),
     )
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:editmenu:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 def build_tag_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for tag_key, label in EDIT_TAGS:
         kb.row(InlineKeyboardButton(text=label, callback_data=f"myphoto:tag:set:{photo_id}:{tag_key}"))
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:editmenu:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 
@@ -740,7 +804,8 @@ async def _render_myphoto_edit_menu(
 def build_my_photo_stats_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
     )
     return kb.as_markup()
 
@@ -789,7 +854,7 @@ def _quote(text: str) -> str:
     return f"<blockquote>{_esc_html(text)}</blockquote>"
 
 
-# ===== Upload wizard navigation keyboard (Назад / Отмена) =====
+# ===== Upload wizard navigation keyboard (Назад / В меню / Отмена) =====
 
 def build_upload_wizard_kb(*, back_to: str = "menu") -> InlineKeyboardMarkup:
     """Inline keyboard for upload wizard.
@@ -801,12 +866,13 @@ def build_upload_wizard_kb(*, back_to: str = "menu") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
 
     if back_to == "photo":
-        kb.button(text="⬅️ Назад", callback_data="myphoto:upload_back")
+        kb.button(text=BACK, callback_data="myphoto:upload_back")
     else:
-        kb.button(text="⬅️ Назад", callback_data="myphoto:open")
+        kb.button(text=BACK, callback_data="myphoto:open")
 
+    kb.button(text=HOME, callback_data="menu:back")
     kb.button(text="❌ Отмена", callback_data="myphoto:upload_cancel")
-    kb.adjust(2)
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -1266,9 +1332,6 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         else:
             photo = photos[0]
     locked_ids: list[int] = []
-    if not is_premium_user and len(photos) > 1:
-        # все, кроме первого, считаем премиум-локом
-        locked_ids = [p["id"] for p in photos[1:]]
 
     if photo is None:
         data = await state.get_data()
@@ -1289,6 +1352,38 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
                 photo = candidate
 
     if photo is None:
+        can_upload_today = True
+        denied_reason = None
+        if not is_admin:
+            can_upload_today, denied_reason = await check_can_upload_today(int(user_id))
+        if not can_upload_today:
+            kb_builder = InlineKeyboardBuilder()
+            kb_builder.row(InlineKeyboardButton(text=MY_ARCHIVE, callback_data="myphoto:archive:0"))
+            kb_builder.row(
+                InlineKeyboardButton(text=RESULTS, callback_data="results:menu"),
+                InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0"),
+            )
+            kb_builder.row(
+                InlineKeyboardButton(text=BACK, callback_data="myphoto:open"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            )
+            sent_id = await _edit_or_replace_text(
+                callback,
+                denied_reason or "Сегодня новая публикация недоступна. Завтра можно.",
+                kb_builder.as_markup(),
+            )
+            await state.update_data(
+                myphoto_ids=[],
+                myphoto_current_idx=0,
+                myphoto_last_id=None,
+                myphoto_is_premium=is_premium_user,
+                myphoto_locked_ids=[],
+            )
+            if sent_id is not None:
+                await remember_screen(callback.from_user.id, sent_id, state=state)
+            await callback.answer()
+            return
+
         limit, current, remaining = await _idea_counters(user, is_premium_user)
         kb = build_upload_intro_kb(remaining=remaining, limit=limit)
 
@@ -1304,6 +1399,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             myphoto_current_idx=0,
             myphoto_last_id=None,
             myphoto_is_premium=is_premium_user,
+            myphoto_locked_ids=[],
         )
 
         sent_id = None
@@ -1342,50 +1438,17 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         return
 
     if photo.get("is_deleted"):
+        can_upload_today, denied_reason = await check_can_upload_today(int(user_id))
+        text = denied_reason or "Сегодня новая публикация недоступна. Завтра можно."
         kb = InlineKeyboardBuilder()
-
-        if is_admin:
-            kb.button(text="➕ Добавить фото", callback_data="myphoto:add")
-            text = (
-                "Ты уже выкладывал(а) фото сегодня и удалил(а) его.\n\n"
-                "Как админ ты можешь выложить новый кадр поверх старого."
-            )
-        else:
-            # Premium может удалять/перезаливать без дневного ограничения
-            if is_premium_user:
-                kb.button(text="➕ Добавить фото", callback_data="myphoto:add")
-                text = (
-                    "Ты удалил(а) свою фотографию.\n\n"
-                    "Как Premium пользователь ты можешь загрузить новую сразу."
-                )
-            else:
-                remaining = _format_time_until_next_upload()
-                text = (
-                    "Ты уже выкладывал(а) фото сегодня и удалил(а) его.\n\n"
-                    f"Новый кадр можно будет выложить {remaining}."
-                )
-
-        kb.button(text="⬅️ В меню", callback_data="menu:back")
-        kb.adjust(1)
-
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=kb.as_markup())
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb.as_markup(),
-                disable_notification=True,
-            )
-
+        if is_admin and can_upload_today:
+            kb.row(InlineKeyboardButton(text="➕ Добавить фото", callback_data="myphoto:add"))
+        kb.row(InlineKeyboardButton(text=MY_ARCHIVE, callback_data="myphoto:archive:0"))
+        kb.row(
+            InlineKeyboardButton(text=BACK, callback_data="myphoto:open"),
+            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        )
+        await _edit_or_replace_text(callback, text, kb.as_markup())
         await callback.answer()
         return
 
@@ -1402,7 +1465,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     nav_prev = current_idx > 0
     nav_next = current_idx < len(photo_ids) - 1
     can_add_more = len(photo_ids) < 2
-    locked = photo["id"] in locked_ids
+    locked = False
 
     await _show_my_photo_section(
         chat_id=callback.message.chat.id,
@@ -1531,15 +1594,14 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
     nav_prev = current_idx > 0
     nav_next = current_idx < len(photo_ids) - 1
     can_add_more = len(photo_ids) < 2
-    locked_ids = list(data.get("myphoto_locked_ids") or [])
-    locked = photo["id"] in locked_ids
+    locked = False
 
     await state.update_data(
         myphoto_ids=photo_ids,
         myphoto_current_idx=current_idx,
         myphoto_last_id=photo["id"],
         myphoto_is_premium=is_premium_user,
-        myphoto_locked_ids=locked_ids,
+        myphoto_locked_ids=[],
     )
 
     await _edit_or_replace_my_photo_message(
@@ -1550,8 +1612,76 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
         nav_next=nav_next,
         can_add_more=can_add_more,
         is_premium_user=is_premium_user,
-        locked=locked,
+        locked=False,
     )
+    await callback.answer()
+
+
+_MY_ARCHIVE_PAGE_SIZE = 5
+
+
+def _build_my_archive_kb(page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    nav_row: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:archive:{page-1}"))
+    if has_next:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:archive:{page+1}"))
+    if nav_row:
+        kb.row(*nav_row)
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data="myphoto:open"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    kb.row(
+        InlineKeyboardButton(text=RESULTS, callback_data="results:menu"),
+        InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0"),
+    )
+    return kb.as_markup()
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:archive:(\d+)$"))
+async def myphoto_archive(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+
+    try:
+        page = max(0, int((callback.data or "myphoto:archive:0").split(":")[2]))
+    except Exception:
+        page = 0
+
+    offset = page * _MY_ARCHIVE_PAGE_SIZE
+    rows = await get_archived_photos_for_user(
+        int(user["id"]),
+        limit=_MY_ARCHIVE_PAGE_SIZE + 1,
+        offset=offset,
+    )
+    has_next = len(rows) > _MY_ARCHIVE_PAGE_SIZE
+    items = rows[:_MY_ARCHIVE_PAGE_SIZE]
+    has_prev = page > 0
+
+    lines: list[str] = ["📚 <b>Мой архив</b>", ""]
+    if not items:
+        lines.append("Архив пока пуст.")
+    else:
+        for idx, photo in enumerate(items, start=1 + offset):
+            title = _esc_html(str(photo.get("title") or "Без названия"))
+            submit_day = str(photo.get("submit_day") or photo.get("day_key") or "—")
+            try:
+                avg = f"{float(photo.get('avg_score') or 0):.2f}".rstrip("0").rstrip(".")
+            except Exception:
+                avg = "0"
+            votes = int(photo.get("votes_count") or 0)
+            lines.append(f"{idx}. <b>{title}</b>")
+            lines.append(f"   📅 {submit_day} · 📊 {avg} · 💖 {votes}")
+        lines.append("")
+        lines.append(f"Страница {page + 1}")
+
+    kb = _build_my_archive_kb(page=page, has_prev=has_prev, has_next=has_next)
+    sent_id = await _edit_or_replace_text(callback, "\n".join(lines), kb)
+    if sent_id is not None:
+        await remember_screen(callback.from_user.id, sent_id, state=state)
     await callback.answer()
 
 
@@ -1953,35 +2083,14 @@ async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
 
 def _user_photo_limits(user: dict, stats: dict, *, is_admin: bool) -> tuple[int, int]:
     """
-    Возвращает (max_active, daily_limit) с учётом ролей и активности:
-      - normal: max_active=3, 1/день (без доп.слота)
-      - author: max_active=4, +1 дневной слот при >=10 оценок или >=6 в HH
-      - premium: max_active=4, +1 слот при >=7 оценок или >=4 в HH
-    Админ: max_active=10, дневной лимит неограничен.
+    Возвращает (max_active, daily_limit).
+    GlowShot 2.1: 1 публикация в день для всех ролей.
+    Активных одновременно — до 2 (день загрузки + следующий день).
+    Админ: технический bypass.
     """
     if is_admin:
         return 10, 10**9
-
-    is_premium = bool(user.get("is_premium"))
-    is_author = bool(user.get("is_author"))
-    votes_today = int(stats.get("votes_given_today") or 0)
-    votes_hh = int(stats.get("votes_given_happyhour_today") or 0)
-
-    extra = False
-    if is_author:
-        extra = votes_today >= 10 or votes_hh >= 6
-    elif is_premium:
-        extra = votes_today >= 7 or votes_hh >= 4
-
-    base = 1
-    daily_limit = base + (1 if extra else 0)
-    max_active = 3
-    if is_author:
-        max_active = 4
-    if is_premium:
-        max_active = 4
-    max_active = max(max_active, daily_limit)
-    return max_active, daily_limit
+    return 2, 1
 
 
 async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool) -> tuple[bool, str | None]:
@@ -1990,13 +2099,13 @@ async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool
         stats = await get_user_stats(int(user["id"]))
     except Exception:
         stats = {}
-    max_active, daily_limit = _user_photo_limits(user, stats, is_admin=is_admin)
+    max_active, _daily_limit = _user_photo_limits(user, stats, is_admin=is_admin)
     user_id = int(user["id"])
 
-    # слот дня блокируется, если сегодня уже было фото, удалённое пользователем
     if not is_admin:
-        if await is_today_slot_locked(user_id):
-            return False, "Сегодня ты уже выкладывал(а) фото. Новое можно будет завтра."
+        can_upload, reason = await check_can_upload_today(user_id)
+        if not can_upload:
+            return False, reason or "Сегодня новая публикация недоступна."
 
     active_count = 0
     try:
@@ -2009,15 +2118,6 @@ async def _can_user_upload_now(user: dict, is_premium_user: bool, is_admin: bool
         if is_premium_user and max_active > 1:
             return False, "Удалите одну из текущих фотографий, чтобы загрузить новую."
         return False, "Сначала удалите текущую фотографию."
-
-    today_count = 0
-    try:
-        today_count = await count_today_photos_for_user(user_id, include_deleted=True)
-    except Exception:
-        today_count = 0
-
-    if today_count >= daily_limit:
-        return False, _format_time_until_next_upload()
 
     return True, None
 
@@ -2039,48 +2139,42 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     user_id = user["id"]
     active_photos = await get_active_photos_for_user(user_id)
 
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
     is_admin = is_admin_user(user)
-
-    try:
-        stats = await get_user_stats(int(user_id))
-    except Exception:
-        stats = {}
-
-    max_active, daily_limit = _user_photo_limits(user, stats, is_admin=is_admin)
+    max_active, _daily_limit = _user_photo_limits(user, {}, is_admin=is_admin)
     active_count = len(active_photos)
 
-    if not is_admin and await is_today_slot_locked(user_id):
-        await callback.answer(
-            "Сегодня ты уже выкладывал(а) фото. Новое можно будет завтра.",
-            show_alert=True,
-        )
-        return
+    if not is_admin:
+        can_upload, deny_reason = await check_can_upload_today(int(user_id))
+        if not can_upload:
+            kb = InlineKeyboardBuilder()
+            kb.row(InlineKeyboardButton(text=MY_ARCHIVE, callback_data="myphoto:archive:0"))
+            kb.row(
+                InlineKeyboardButton(text=BACK, callback_data="myphoto:open"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            )
+            await _edit_or_replace_text(
+                callback,
+                deny_reason or "Сегодня новая публикация недоступна. Завтра можно.",
+                kb.as_markup(),
+            )
+            await callback.answer()
+            return
 
     # Проверка лимита активных фото
     if not is_admin and active_count >= max_active:
-        await callback.answer(
-            "Лимит активных фото достигнут. Подожди, пока часть уйдёт в архив, или удали одно из текущих.",
-            show_alert=True,
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text=MY_ARCHIVE, callback_data="myphoto:archive:0"))
+        kb.row(
+            InlineKeyboardButton(text=BACK, callback_data="myphoto:open"),
+            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
         )
+        await _edit_or_replace_text(
+            callback,
+            "Лимит активных фото достигнут. Подожди, пока фото уйдут в архив.",
+            kb.as_markup(),
+        )
+        await callback.answer()
         return
-
-    # Проверка дневных попыток
-    if not is_admin:
-        today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
-        if today_count >= daily_limit:
-            remaining = _format_time_until_next_upload()
-            await callback.answer(
-                f"Лимит загрузок на сегодня исчерпан.\n\nНовый кадр можно будет выложить {remaining}.",
-                show_alert=True,
-            )
-            return
 
     # Админу позволяем перезаливать: если сегодня уже есть активный кадр — мягко удаляем его
     photo = await get_today_photo_for_user(user_id)
@@ -2099,24 +2193,19 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
 
     is_extra = (callback.data or "") == "myphoto:add:extra"
     if is_extra:
-        text = "Загрузка второй фотографии: отправь кадр (1 шт.), который хочешь добавить."
+        text = "Отправь фотографию (1 шт.), которую хочешь добавить."
     else:
         text = "Теперь отправь фотографию (1 шт.), которую хочешь выложить."
     kb = build_upload_wizard_kb(back_to="menu")
 
-    # Всегда отправляем новое сообщение, затем удаляем предыдущее
-    sent = await callback.message.bot.send_message(
-        chat_id=callback.message.chat.id,
-        text=text,
-        reply_markup=kb,
-        disable_notification=True,
+    sent_msg_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
+    if sent_msg_id is None:
+        sent_msg_id = int(callback.message.message_id)
+    await state.update_data(
+        upload_msg_id=sent_msg_id,
+        upload_chat_id=callback.message.chat.id,
+        upload_is_photo=False,
     )
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    # важно: обновим upload_msg_id, иначе дальнейшие шаги будут ссылаться на удалённое сообщение
-    await state.update_data(upload_msg_id=sent.message_id, upload_chat_id=sent.chat.id, upload_is_photo=False)
 
     await callback.answer()
 
@@ -2290,38 +2379,17 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Фотография уже удалена.", show_alert=True)
         return
 
-    # Compute is_premium_user
-    is_admin = is_admin_user(user)
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    warning = ""
-    if not is_admin and not is_premium_user:
-        today_count = await count_today_photos_for_user(user["id"], include_deleted=True)
-        if today_count >= 1:
-            remaining = _format_time_until_next_upload()
-            warning = (
-                f"\n\n⚠️ После удаления ты <b>не сможешь</b> загрузить новую фотографию {remaining}.\n"
-                "Хочешь продолжить?"
-            )
-        else:
-            warning = "\n\nХочешь продолжить?"
-    else:
-        warning = "\n\nХочешь продолжить?"
-
     confirm_text = (
         "🗑 <b>Удалить фотографию?</b>\n\n"
-        "Фотография будет удалена из профиля и больше не будет участвовать в оценках."
-        f"{warning}"
+        "Фотография будет удалена полностью и не будет участвовать в оценках. "
+        "Сегодня у вас больше не будет возможности загрузить фотографию еще раз!\n\n"
+        ""
     )
 
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Да, удалить", callback_data=f"myphoto:delete_confirm:{photo_id}")
-    kb.button(text="❌ Нет", callback_data=f"myphoto:delete_cancel:{photo_id}")
+    kb.button(text=BACK, callback_data=f"myphoto:delete_cancel:{photo_id}")
+    kb.button(text=HOME, callback_data="menu:back")
     kb.adjust(1)
 
     try:
@@ -2438,8 +2506,10 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
 # --- Helper keyboards ---
 def _myphoto_back_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}")
-    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 
@@ -2463,7 +2533,10 @@ def _myphoto_comments_kb(
     if nav_row:
         kb.row(*nav_row)
 
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 
@@ -2649,8 +2722,8 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     if nav:
         kb.row(*nav)
 
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    kb.row(InlineKeyboardButton(text=BACK, callback_data=f"myphoto:back:{photo_id}"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
 
     try:
         if callback.message.photo:
@@ -2967,6 +3040,42 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     # TODO: вернуть водяной знак и проверку качества (GlowShot • {author_code}, 2026 All rights Reserved)
     file_id_public = file_id
     sent_msg_id: int | None = upload_msg_id or None
+    is_admin_actor = False
+    try:
+        actor = await get_user_by_tg_id(int(event.from_user.id))
+        is_admin_actor = bool(actor and actor.get("is_admin"))
+    except Exception:
+        is_admin_actor = False
+
+    if not is_admin_actor:
+        can_upload_now, denied_reason = await check_can_upload_today(int(user_id))
+        if not can_upload_now:
+            deny_text = denied_reason or "Сегодня новая публикация недоступна. Завтра можно."
+            kb = build_back_home_kb("myphoto:open")
+            if sent_msg_id:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=sent_msg_id,
+                        text=deny_text,
+                        reply_markup=kb,
+                    )
+                except Exception:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=deny_text,
+                        reply_markup=kb,
+                        disable_notification=True,
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=deny_text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
+            await state.clear()
+            return
 
     # Сохраняем фото в БД, handle unique violation
     try:
@@ -2978,11 +3087,9 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             title=title,
         )
 
-        # За каждую новую публикацию: +1 кредит (≈2 показа), премиум сохраняет свой бонус (+1 сверх этого)
+        # За каждую публикацию: +2 credits.
         try:
-            await add_credits(int(user_id), 1)
-            if is_premium_user:
-                await add_credits(int(user_id), 1)
+            await add_credits(int(user_id), 2)
         except Exception:
             pass
 
@@ -2995,19 +3102,31 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             pass
 
     except UniqueViolationError:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "Ты уже загружал(а) фотографию сегодня.\n\n"
-                "Если хочешь заменить — удали текущую в разделе «Моя фотография» и попробуй снова."
-            ),
-            disable_notification=True,
-        )
+        text = "Ты уже загружал(а) фотографию сегодня. Новая публикация будет доступна завтра."
+        kb = build_back_home_kb("myphoto:open")
+        if sent_msg_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=sent_msg_id,
+                    text=text,
+                    reply_markup=kb,
+                )
+            except Exception:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
+        else:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=kb,
+                disable_notification=True,
+            )
         await state.clear()
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=sent_msg_id)
-        except Exception:
-            pass
         return
 
     # Get photo object from DB

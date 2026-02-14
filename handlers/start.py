@@ -16,7 +16,7 @@ from aiogram.types import InlineKeyboardMarkup
 import database as db
 from keyboards.common import build_main_menu
 from utils.antispam import should_throttle
-from handlers.upload import my_photo_menu
+from handlers.upload import my_photo_menu, myphoto_archive
 from handlers.rate import rate_root
 from handlers.profile import profile_menu
 from handlers.results import results_menu
@@ -298,6 +298,7 @@ def _main_menu_button_key(text: str | None) -> str | None:
         },
         "profile": {t("kb.main.profile", "ru"), t("kb.main.profile", "en")},
         "results": {t("kb.main.results", "ru"), t("kb.main.results", "en")},
+        "myarchive": {"📚 Мой архив", "📚 My Archive"},
         "menu": {t("kb.back_to_menu", "ru"), t("kb.back_to_menu", "en")},
     }
     for key, variants in mapping.items():
@@ -458,6 +459,15 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
 
     if credits_line:
         lines.append(credits_line)
+    try:
+        latest_results = await db.get_latest_daily_results_cache()
+    except Exception:
+        latest_results = None
+    if latest_results and latest_results.get("submit_day"):
+        lines.append(f"🏆 Итоги доступны: {latest_results.get('submit_day')}")
+    else:
+        lines.append("🏆 Итоги: пока нет опубликованных")
+    lines.append("")
 
     # Сценарий 1: нет фото
     if not photos:
@@ -691,6 +701,9 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
         )
     elif key == "myphoto":
         await my_photo_menu(pseudo_cb, state)
+    elif key == "myarchive":
+        pseudo_cb.data = "myphoto:archive:0"
+        await myphoto_archive(pseudo_cb, state)
     elif key == "rate":
         await rate_root(pseudo_cb, state=state, replace_message=True)
     elif key == "profile":

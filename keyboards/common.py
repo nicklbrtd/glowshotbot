@@ -3,6 +3,31 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.time import get_moscow_now
 from utils.i18n import t
 
+# Unified navigation labels (GlowShot 2.1 UX)
+BACK = "⬅️ Назад"
+HOME = "🏠 В меню"
+MY_ARCHIVE = "📚 Мой архив"
+RESULTS = "🏆 Итоги"
+RESULTS_ARCHIVE = "📅 Архив итогов"
+
+
+def build_back_home_kb(
+    back_callback: str,
+    *,
+    home_callback: str = "menu:back",
+    back_text: str = BACK,
+    home_text: str = HOME,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=back_text, callback_data=back_callback),
+                InlineKeyboardButton(text=home_text, callback_data=home_callback),
+            ]
+        ]
+    )
+
+
 # --- Главное меню ---
 
 
@@ -32,7 +57,8 @@ def build_main_menu(
 
     keyboard = [
         [KeyboardButton(text=myphoto_text), KeyboardButton(text=rate_text)],
-        [KeyboardButton(text=t("kb.main.results", lang)), KeyboardButton(text=t("kb.main.profile", lang))],
+        [KeyboardButton(text=t("kb.main.results", lang)), KeyboardButton(text=MY_ARCHIVE)],
+        [KeyboardButton(text=t("kb.main.profile", lang))],
     ]
 
     return ReplyKeyboardMarkup(
@@ -48,15 +74,19 @@ def build_main_menu(
 
 def build_back_to_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("kb.back_to_menu", lang), callback_data="menu:back")
-    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data="menu:back"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 
 def build_back_kb(callback_data: str, text: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=text or t("kb.back", lang), callback_data=callback_data)
-    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(text=text or BACK, callback_data=callback_data),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 

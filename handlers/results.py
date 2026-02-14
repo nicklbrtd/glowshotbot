@@ -13,7 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import io
 from PIL import Image, ImageDraw, ImageFont  # type: ignore[import]
 
-from keyboards.common import build_back_to_menu_kb
+from keyboards.common import BACK, HOME, RESULTS, RESULTS_ARCHIVE, build_back_to_menu_kb
 from utils.i18n import t
 from utils.banner import ensure_giraffe_banner
 from utils.time import get_moscow_now, get_moscow_today
@@ -38,8 +38,14 @@ from database_results import (
     refresh_alltime_cache_payload,
 )
 
-from services.results_engine import recalc_day_global, get_day_eligibility
-from database import get_user_by_tg_id, set_user_screen_msg_id
+from services.results_engine import recalc_day_global
+from database import (
+    get_user_by_tg_id,
+    set_user_screen_msg_id,
+    get_latest_daily_results_cache,
+    get_daily_results_cache,
+    list_daily_results_days,
+)
 from utils.registration_guard import require_user_name
 
 
@@ -96,14 +102,11 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text=f"{RESULTS} (последние)", callback_data="results:latest")],
+            [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
             [
-                InlineKeyboardButton(text=t("results.btn.day", lang), callback_data="results:day"),
-                InlineKeyboardButton(text=t("results.btn.me", lang), callback_data="results:me"),
-                InlineKeyboardButton(text="🏆 За всё время", callback_data="results:alltime"),
-            ],
-            [InlineKeyboardButton(text="👑 Зал славы", callback_data="results:hof")],
-            [
-                InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+                InlineKeyboardButton(text=BACK, callback_data="menu:back"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ],
         ]
     )
@@ -112,9 +115,77 @@ def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
 def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t("results.btn.back_results", lang), callback_data="results:menu")],
+            [
+                InlineKeyboardButton(text=BACK, callback_data="results:menu"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            ],
         ]
     )
+
+
+def _build_latest_results_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
+            [
+                InlineKeyboardButton(text=BACK, callback_data="results:menu"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            ],
+        ]
+    )
+
+
+def _build_results_archive_kb(
+    *,
+    page: int,
+    has_prev: bool,
+    has_next: bool,
+    day_buttons: list[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for text, cb in day_buttons:
+        kb.row(InlineKeyboardButton(text=text, callback_data=cb))
+    nav_row: list[InlineKeyboardButton] = []
+    if has_prev:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"results:archive:{page-1}"))
+    if has_next:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"results:archive:{page+1}"))
+    if nav_row:
+        kb.row(*nav_row)
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data="results:latest"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def _render_cached_daily_results(payload: dict, *, title_prefix: str) -> str:
+    submit_day = str(payload.get("submit_day") or "—")
+    participants = int(payload.get("participants_count") or 0)
+    threshold = int(payload.get("top_threshold") or 0)
+    top = payload.get("top") or []
+
+    lines: list[str] = [f"🏆 <b>{title_prefix}</b>", ""]
+    lines.append(f"📅 Дата партии: <b>{submit_day}</b>")
+    lines.append(f"👥 Участников: <b>{participants}</b>")
+    lines.append(f"🔔 Уведомления в ЛС: только TOP <b>{threshold}</b>")
+    lines.append("")
+    if not top:
+        lines.append("Топ пока пуст.")
+        return "\n".join(lines)
+
+    for item in top:
+        rank = int(item.get("final_rank") or 0)
+        medal = "🥇" if rank == 1 else ("🥈" if rank == 2 else ("🥉" if rank == 3 else "▪️"))
+        title = html.escape(str(item.get("title") or "Без названия"), quote=False)
+        avg = item.get("avg_score")
+        votes = int(item.get("votes_count") or 0)
+        try:
+            avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            avg_str = "0"
+        lines.append(f"{medal} {rank}. <b>{title}</b> — {avg_str} · 💖 {votes}")
+    return "\n".join(lines)
 
 
 def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
@@ -122,8 +193,9 @@ def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb.button(text="📃 Топ 10", callback_data="results:alltime:top10")
     kb.button(text="📍 Где я?", callback_data="results:alltime:me")
     kb.button(text="👑 Зал славы", callback_data="results:hof")
-    kb.button(text=t("results.btn.back_results", lang), callback_data="results:menu")
-    kb.adjust(1)
+    kb.button(text=BACK, callback_data="results:menu")
+    kb.button(text=HOME, callback_data="menu:back")
+    kb.adjust(1, 1, 1, 2)
     return kb.as_markup()
 
 
@@ -133,9 +205,13 @@ def build_alltime_paged_kb(mode: str, page: int, max_page: int, lang: str = "ru"
         kb.button(text="⬅️", callback_data=f"results:{mode}:{page-1}")
     if page < max_page:
         kb.button(text="➡️", callback_data=f"results:{mode}:{page+1}")
-    kb.button(text=t("results.btn.back_results", lang), callback_data="results:alltime")
     buttons = kb.export()
-    kb.adjust(len(buttons) if buttons else 1)
+    if buttons:
+        kb.adjust(len(buttons))
+    kb.row(
+        InlineKeyboardButton(text=BACK, callback_data="results:alltime"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
     return kb.as_markup()
 
 
@@ -149,7 +225,10 @@ def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboar
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+                    InlineKeyboardButton(text=BACK, callback_data="results:menu"),
+                    InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+                ],
+                [
                     InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:1"),
                 ]
             ]
@@ -161,30 +240,33 @@ def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboar
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text=t("results.btn.back", lang), callback_data=f"results:day:{day_key}:{prev_step}"),
+                    InlineKeyboardButton(text=BACK, callback_data=f"results:day:{day_key}:{prev_step}"),
                     InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:{next_step}"),
-                ]
+                ],
+                [
+                    InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+                ],
             ]
         )
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=t("results.btn.back", lang), callback_data=f"results:day:{day_key}:3"),
-                InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+                InlineKeyboardButton(text=BACK, callback_data=f"results:day:{day_key}:3"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             ]
         ]
     )
 
 
-async def _show_text(callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
+async def _show_text(callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> int | None:
     msg = callback.message
     try:
         if msg.photo:
             await msg.edit_caption(caption=text, reply_markup=kb, parse_mode="HTML")
         else:
             await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        return
+        return int(msg.message_id)
     except Exception:
         pass
 
@@ -194,27 +276,29 @@ async def _show_text(callback: CallbackQuery, text: str, kb: InlineKeyboardMarku
         pass
 
     try:
-        await msg.bot.send_message(
+        sent = await msg.bot.send_message(
             chat_id=msg.chat.id,
             text=text,
             reply_markup=kb,
             parse_mode="HTML",
             disable_notification=True,
         )
+        return int(sent.message_id)
     except Exception:
         try:
-            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+            sent = await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+            return int(sent.message_id)
         except Exception:
-            pass
+            return None
 
 
-async def _show_photo(callback: CallbackQuery, file_id: str, caption: str, kb: InlineKeyboardMarkup) -> None:
+async def _show_photo(callback: CallbackQuery, file_id: str, caption: str, kb: InlineKeyboardMarkup) -> int | None:
     try:
         await callback.message.edit_media(
             media=InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML"),
             reply_markup=kb,
         )
-        return
+        return int(callback.message.message_id)
     except Exception:
         pass
 
@@ -224,7 +308,7 @@ async def _show_photo(callback: CallbackQuery, file_id: str, caption: str, kb: I
         pass
 
     try:
-        await callback.message.bot.send_photo(
+        sent = await callback.message.bot.send_photo(
             chat_id=callback.message.chat.id,
             photo=file_id,
             caption=caption,
@@ -232,8 +316,9 @@ async def _show_photo(callback: CallbackQuery, file_id: str, caption: str, kb: I
             parse_mode="HTML",
             disable_notification=True,
         )
+        return int(sent.message_id)
     except Exception:
-        await _show_text(callback, caption, kb)
+        return await _show_text(callback, caption, kb)
 
 
 def _label_for_day(day_key: str) -> str:
@@ -1038,34 +1123,129 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
     user = await get_user_by_tg_id(int(callback.from_user.id))
     lang = _lang(user)
     kb = build_results_menu_kb(lang)
+    latest = await get_latest_daily_results_cache()
+    latest_day = latest.get("submit_day") if latest else None
     text = (
         "🏁 <b>Итоги</b>\n\n"
-        "Доступны:\n"
-        "• 📅 Итоги дня\n"
-        "• 🏆 За всё время\n"
-        "• 👑 Зал славы\n"
-        "• 👤 Мои итоги (soon)\n\n"
-        "Остальные разделы подключим позже."
+        "Экран показывает последние опубликованные итоги (за позавчера).\n"
+        "Также доступен архив итогов по датам.\n\n"
+        f"Последняя публикация: <b>{latest_day or 'пока нет'}</b>"
     )
+    shown_msg_id = await _show_text(callback, text, kb)
     try:
-        sent = await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
-            parse_mode="HTML",
-            disable_notification=True,
-        )
-    except Exception:
-        sent = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
-    try:
-        await remember_screen(callback.from_user.id, sent.message_id, state=state)
+        await remember_screen(callback.from_user.id, int(shown_msg_id or callback.message.message_id), state=state)
     except Exception:
         pass
+    await callback.answer()
 
+
+@router.callback_query(F.data == "results:latest")
+async def results_latest(callback: CallbackQuery):
+    latest = await get_latest_daily_results_cache()
+    if not latest:
+        text = (
+            "🏆 <b>Итоги (последние опубликованные)</b>\n\n"
+            "Пока нет опубликованных итогов.\n"
+            "Итоги выходят ежедневно в 08:00 МСК за позавчера."
+        )
+        await _show_text(callback, text, _build_latest_results_kb())
+        await callback.answer()
+        return
+
+    payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+    merged_payload = dict(payload or {})
+    merged_payload.setdefault("submit_day", latest.get("submit_day"))
+    merged_payload.setdefault("participants_count", latest.get("participants_count"))
+    merged_payload.setdefault("top_threshold", latest.get("top_threshold"))
+    text = _render_cached_daily_results(merged_payload, title_prefix="Итоги (последние опубликованные)")
+    await _show_text(callback, text, _build_latest_results_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^results:archive:(\d+)$"))
+async def results_archive(callback: CallbackQuery):
     try:
-        await callback.message.delete()
+        page = max(0, int((callback.data or "results:archive:0").split(":")[2]))
     except Exception:
-        pass
+        page = 0
+    page_size = 8
+    offset = page * page_size
+    rows = await list_daily_results_days(limit=page_size + 1, offset=offset)
+    has_next = len(rows) > page_size
+    page_rows = rows[:page_size]
+    has_prev = page > 0
+
+    lines: list[str] = ["📅 <b>Архив итогов</b>", ""]
+    day_buttons: list[tuple[str, str]] = []
+    if not page_rows:
+        lines.append("В архиве пока нет дат.")
+    else:
+        for row in page_rows:
+            day = str(row.get("submit_day") or "")
+            participants = int(row.get("participants_count") or 0)
+            threshold = int(row.get("top_threshold") or 0)
+            lines.append(f"• {day} — участников: {participants}, TOP: {threshold}")
+            day_buttons.append(
+                (
+                    f"📅 {day}",
+                    f"results:daycache:{day}:{page}",
+                )
+            )
+        lines.append("")
+        lines.append(f"Страница {page + 1}")
+
+    kb = _build_results_archive_kb(
+        page=page,
+        has_prev=has_prev,
+        has_next=has_next,
+        day_buttons=day_buttons,
+    )
+    await _show_text(callback, "\n".join(lines), kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^results:daycache:(\d{4}-\d{2}-\d{2}):(\d+)$"))
+async def results_archive_day(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+    day = str(parts[2] or "")
+    try:
+        page = max(0, int(parts[3]))
+    except Exception:
+        page = 0
+
+    cache = await get_daily_results_cache(day)
+    if not cache:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=BACK, callback_data=f"results:archive:{page}"),
+                    InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+                ]
+            ]
+        )
+        await _show_text(callback, "Итоги за эту дату пока недоступны.", kb)
+        await callback.answer()
+        return
+
+    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
+    merged_payload = dict(payload or {})
+    merged_payload.setdefault("submit_day", cache.get("submit_day"))
+    merged_payload.setdefault("participants_count", cache.get("participants_count"))
+    merged_payload.setdefault("top_threshold", cache.get("top_threshold"))
+    text = _render_cached_daily_results(merged_payload, title_prefix=f"Итоги за {day}")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data=f"results:archive:{page}")],
+            [
+                InlineKeyboardButton(text=BACK, callback_data=f"results:archive:{page}"),
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            ],
+        ]
+    )
+    await _show_text(callback, text, kb)
     await callback.answer()
 
 
@@ -1280,42 +1460,25 @@ async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) 
 @router.callback_query(F.data == "results:day")
 async def results_day(callback: CallbackQuery):
     """
-    Итоги дня показываем за вчерашний календарный день по Москве,
-    и показываем только после 07:00 МСК (как у тебя было).
+    Итоги дня показываем за позавчерашний календарный день по Москве,
+    и публикуем после 08:00 МСК.
     """
-    # Если пользователь ещё не допущен — показываем чеклист.
     user = await get_user_by_tg_id(int(callback.from_user.id))
     lang = _lang(user)
-    elig = await get_day_eligibility(int(callback.from_user.id))
-    if not elig.get("eligible"):
-        kb = build_back_to_results_kb(lang)
-        lines = ["🔥 <b>Итоги дня</b>", "", "Чтобы участвовать, выполни условия:"]
-        for c in elig.get("checks", []):
-            mark = "✅" if c.get("ok") else "❌"
-            extra = f" ({c.get('value')} из 2)" if c.get("value") is not None else ""
-            lines.append(f"{mark} {c.get('title')}{extra}")
-        note = elig.get("note_best_photo")
-        if note:
-            lines.append("")
-            lines.append(note)
-        await _show_text(callback, "\n".join(lines), kb)
-        await callback.answer()
-        return
 
     now = get_moscow_now()
 
-    if now.hour < 7:
-        kb = build_back_to_menu_kb()
+    if now.hour < 8:
         text = (
-            "⏰ Итоги дня появляются каждый день после <b>07:00 по МСК</b>.\n\n"
+            "⏰ Итоги дня появляются каждый день после <b>08:00 по МСК</b>.\n\n"
             f"Сейчас: <b>{now.strftime('%H:%M')}</b>.\n"
-            "Загляни чуть позже — мы подсчитаем все оценки за вчера."
+            "Загляни чуть позже — мы публикуем итоги за позавчера."
         )
         await _show_text(callback, text, build_back_to_results_kb(lang))
         await callback.answer()
         return
 
-    day_key = (now.date() - timedelta(days=1)).isoformat()
+    day_key = (now.date() - timedelta(days=2)).isoformat()
     await _render_results_day(callback, day_key, step=0)
 
 

@@ -14,7 +14,12 @@ from aiogram.dispatcher.event.bases import SkipHandler
 from utils.time import get_moscow_now, get_moscow_today
 
 from config import BOT_TOKEN, MASTER_ADMIN_ID
-from services.jobs import finalize_party_job, daily_recap_job, notifications_worker
+from services.jobs import (
+    finalize_party_job,
+    daily_credits_grant_job,
+    daily_results_publish_job,
+    notifications_worker,
+)
 from database import (
     init_db,
     log_bot_error,
@@ -38,6 +43,7 @@ from database import (
     get_support_users,
     get_helpers,
     log_activity_event,
+    get_user_by_id,
 )
 def _premium_expiry_reminder_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -782,19 +788,32 @@ async def main() -> None:
     asyncio.create_task(scheduled_broadcast_loop(bot))
     # ежедневное обновление кэша итогов за всё время (без видимых сообщений)
     asyncio.create_task(alltime_cache_refresh_loop())
-    # новые фоновые джобы
+    # фоновые джобы жизненного цикла/экономики/итогов
     asyncio.create_task(finalize_party_job(bot))
-    asyncio.create_task(daily_recap_job(bot))
+    asyncio.create_task(daily_credits_grant_job(bot))
+    asyncio.create_task(daily_results_publish_job(bot))
 
     async def _send_notification(_: int, item: dict):
         """Простой отправитель уведомлений из notification_queue."""
         user_id = int(item.get("user_id"))
+        user = await get_user_by_id(user_id)
+        if not user or not user.get("tg_id"):
+            return
+        chat_id = int(user["tg_id"])
         n_type = str(item.get("type") or "")
         payload = item.get("payload") or {}
         text = None
         if n_type == "final_rank":
             rank = payload.get("final_rank")
             text = f"📊 Итоги партии: ваше фото заняло место #{rank}. Спасибо за участие!"
+        elif n_type == "daily_results_top":
+            rank = int(payload.get("rank") or 0)
+            submit_day = str(payload.get("submit_day") or "")
+            threshold = int(payload.get("top_threshold") or 0)
+            text = (
+                f"🏆 Итоги за {submit_day} опубликованы.\n"
+                f"Твоя работа в TOP {threshold}: место #{rank}."
+            )
         elif n_type == "daily_recap_top":
             rank = payload.get("rank_hint")
             text = f"🔥 Ты в топ-{rank} за вчера! Продолжай."
@@ -806,13 +825,13 @@ async def main() -> None:
             expires_at = payload.get("expires_at")
             text = (
                 "🚀 Обновили GlowShot!\n"
-                "Фото теперь участвует 72 часа, а потом публикуем итоги.\n"
+                "Фото теперь участвует 2 дня (день загрузки + следующий).\n"
                 f"Текущее фото в игре до: {expires_at}\n"
                 "Оценивай других: 1 оценка = +1 credit = 2 показа (в 15–16 — 4)."
             )
         if text:
             try:
-                await bot.send_message(chat_id=user_id, text=text)
+                await bot.send_message(chat_id=chat_id, text=text)
             except Exception:
                 pass
 

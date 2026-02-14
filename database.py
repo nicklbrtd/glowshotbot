@@ -1541,14 +1541,25 @@ async def streak_rollover_if_needed_by_tg_id(tg_id: int) -> dict:
 
 
 async def count_today_photos_for_user(user_id: int, *, include_deleted: bool = False) -> int:
-    """How many photos the user uploaded today (Moscow day_key)."""
+    """How many photos the user uploaded today (submit_day in bot timezone)."""
     p = _assert_pool()
+    today = get_bot_today()
     day_key = _today_key()
     where_deleted = "" if include_deleted else "AND is_deleted=0"
     async with p.acquire() as conn:
         v = await conn.fetchval(
-            f"SELECT COUNT(*) FROM photos WHERE user_id=$1 AND day_key=$2 {where_deleted}",
+            f"""
+            SELECT COUNT(*)
+            FROM photos
+            WHERE user_id=$1
+              AND (
+                    submit_day=$2::date
+                 OR (submit_day IS NULL AND day_key=$3)
+              )
+              {where_deleted}
+            """,
             int(user_id),
+            today,
             day_key,
         )
     return int(v or 0)
@@ -1929,7 +1940,7 @@ async def ensure_schema() -> None:
               moderation_status TEXT NOT NULL DEFAULT 'active',
               ratings_enabled INTEGER NOT NULL DEFAULT 1,
               is_deleted INTEGER NOT NULL DEFAULT 0,
-              deleted_at TEXT,
+              deleted_at TIMESTAMPTZ,
               created_at TEXT NOT NULL
             );
             """
@@ -2131,6 +2142,7 @@ async def ensure_schema() -> None:
               credits INTEGER NOT NULL DEFAULT 0,
               show_tokens INTEGER NOT NULL DEFAULT 0,
               last_active_at TIMESTAMPTZ,
+              last_daily_grant_day DATE,
               votes_given_today INTEGER NOT NULL DEFAULT 0,
               votes_given_happyhour_today INTEGER NOT NULL DEFAULT 0,
               public_portfolio BOOLEAN NOT NULL DEFAULT FALSE
@@ -2138,6 +2150,7 @@ async def ensure_schema() -> None:
             """
         )
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS show_tokens INTEGER NOT NULL DEFAULT 0;")
+        await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS last_daily_grant_day DATE;")
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS migration_notified BOOLEAN NOT NULL DEFAULT FALSE;")
 
         await conn.execute(
@@ -2171,6 +2184,20 @@ async def ensure_schema() -> None:
               final_rank INTEGER NOT NULL,
               finalized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
               PRIMARY KEY (photo_id, submit_day)
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_results_cache (
+              submit_day DATE PRIMARY KEY,
+              participants_count INTEGER NOT NULL DEFAULT 0,
+              top_threshold INTEGER NOT NULL DEFAULT 0,
+              payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+              published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              notifications_enqueued_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
         )
@@ -2456,6 +2483,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS daily_views_budget INTEGER NOT NULL DEFAULT 0;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS tg_file_id TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS deleted_reason TEXT;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -2491,8 +2519,11 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_photo_created ON votes(photo_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_created ON votes(voter_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_views_viewer ON photo_views(viewer_id, created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_result_ranks_submit_day ON result_ranks(submit_day, final_rank);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_results_cache_published ON daily_results_cache(published_at DESC, submit_day DESC);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_notification_queue_status_run ON notification_queue(status, run_after);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_daily_grant ON user_stats(last_daily_grant_day, user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_author_votes_voter_day ON daily_author_votes(voter_id, day);")
 
         # ======== CREATE UNIQUE INDEX IF NOT EXISTS ========
@@ -4256,7 +4287,7 @@ async def create_today_photo(
 
     Заполняем:
       - submit_day (date) для итогов/партий,
-      - expires_at = end_of_day(today)+72h,
+      - expires_at = конец следующего календарного дня (submit_day + 1),
       - status='active',
       - базовые счетчики (votes/avg/views) через DEFAULT.
     """
@@ -4264,7 +4295,7 @@ async def create_today_photo(
     now_iso = get_bot_now_iso()
     today = get_bot_today()
     day_key = str(today)
-    expires_at = end_of_day(get_bot_today()) + timedelta(hours=72)
+    expires_at = end_of_day(today + timedelta(days=1))
 
     # Если описания нет, явно сохраняем метку "нет"
     if description is not None:
@@ -4334,6 +4365,7 @@ async def get_today_photo_for_user(user_id: int) -> dict | None:
 
 async def get_today_photos_for_user(user_id: int, limit: int = 50) -> list[dict]:
     p = _assert_pool()
+    today = get_bot_today()
     day_key = _today_key()
     async with p.acquire() as conn:
         rows = await conn.fetch(
@@ -4341,39 +4373,66 @@ async def get_today_photos_for_user(user_id: int, limit: int = 50) -> list[dict]
             SELECT *
             FROM photos
             WHERE user_id=$1
-              AND day_key=$2
+              AND (
+                    submit_day=$2::date
+                 OR (submit_day IS NULL AND day_key=$3)
+              )
               AND is_deleted=0
             ORDER BY created_at DESC, id DESC
-            LIMIT $3
+            LIMIT $4
             """,
             int(user_id),
+            today,
             day_key,
             int(limit),
         )
     return [dict(r) for r in rows]
 
 
-async def is_today_slot_locked(user_id: int) -> bool:
-    """Слот дня занят, если уже есть активное фото или пользователь сам удалил фото сегодня."""
+async def check_can_upload_today(user_id: int, today: date | None = None) -> tuple[bool, str | None]:
+    """
+    Validate daily upload slot in bot timezone.
+
+    Returns:
+      (True, None) when user can publish now,
+      (False, reason_text) when slot is already consumed for submit_day.
+    """
     p = _assert_pool()
-    day = _today_key()
+    target_day = today or get_bot_today()
+    day_key = str(target_day)
     async with p.acquire() as conn:
-        v = await conn.fetchval(
+        row = await conn.fetchrow(
             """
-            SELECT 1
+            SELECT
+                COUNT(*)::int AS total,
+                BOOL_OR(COALESCE(deleted_reason, '')='user') AS has_user_deleted
             FROM photos
             WHERE user_id=$1
-              AND day_key=$2
               AND (
-                    status='active'
-                 OR deleted_reason='user'
+                    submit_day=$2::date
+                 OR (submit_day IS NULL AND day_key=$3)
               )
-            LIMIT 1
             """,
             int(user_id),
-            day,
+            target_day,
+            day_key,
         )
-    return bool(v)
+    total = int((row or {}).get("total") or 0)
+    if total <= 0:
+        return True, None
+
+    if bool((row or {}).get("has_user_deleted")):
+        return (
+            False,
+            "Ты удалил фото. Сегодня новая публикация недоступна — слот дня потрачен. Завтра можно.",
+        )
+    return False, "Сегодня ты уже публиковал фото. Новая публикация доступна завтра."
+
+
+async def is_today_slot_locked(user_id: int) -> bool:
+    """Backward-compatible slot check wrapper."""
+    can_upload, _reason = await check_can_upload_today(int(user_id))
+    return not can_upload
 
 
 async def get_active_photos_for_user(user_id: int, limit: int = 50, offset: int = 0) -> list[dict]:
@@ -4382,7 +4441,10 @@ async def get_active_photos_for_user(user_id: int, limit: int = 50, offset: int 
         rows = await conn.fetch(
             """
             SELECT * FROM photos
-            WHERE user_id=$1 AND is_deleted=0 AND status='active'
+            WHERE user_id=$1
+              AND is_deleted=0
+              AND status='active'
+              AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY created_at DESC, id DESC
             LIMIT $2 OFFSET $3
             """,
@@ -5327,6 +5389,309 @@ async def mark_notification_done(
             )
 
 
+def _daily_results_top_threshold(participants_count: int) -> int:
+    pc = max(int(participants_count), 0)
+    if pc < 30:
+        return 3
+    if pc < 100:
+        return 5
+    return 10
+
+
+async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> dict:
+    """
+    Build immutable daily results payload for archived party (submit_day).
+    Uses result_ranks + precomputed photo counters (no heavy real-time aggregates).
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        participants_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM result_ranks rr
+            JOIN photos p ON p.id = rr.photo_id
+            WHERE rr.submit_day=$1::date
+              AND COALESCE(p.is_deleted,0)=0
+            """,
+            submit_day,
+        )
+        rows = await conn.fetch(
+            """
+            SELECT
+                rr.final_rank,
+                p.id AS photo_id,
+                p.user_id,
+                COALESCE(p.title, 'Без названия') AS title,
+                COALESCE(p.file_id_public, p.file_id) AS file_id,
+                COALESCE(p.avg_score, 0)::float AS avg_score,
+                COALESCE(p.votes_count, 0)::int AS votes_count,
+                COALESCE(NULLIF(u.name,''), '') AS author_name,
+                COALESCE(NULLIF(u.username,''), '') AS author_username
+            FROM result_ranks rr
+            JOIN photos p ON p.id = rr.photo_id
+            LEFT JOIN users u ON u.id = p.user_id
+            WHERE rr.submit_day=$1::date
+              AND COALESCE(p.is_deleted,0)=0
+            ORDER BY rr.final_rank ASC
+            LIMIT $2
+            """,
+            submit_day,
+            int(limit),
+        )
+
+    participants = int(participants_count or 0)
+    threshold = _daily_results_top_threshold(participants)
+    top: list[dict] = []
+    for r in rows:
+        top.append(
+            {
+                "final_rank": int(r.get("final_rank") or 0),
+                "photo_id": int(r.get("photo_id") or 0),
+                "user_id": int(r.get("user_id") or 0),
+                "title": str(r.get("title") or "Без названия"),
+                "file_id": str(r.get("file_id") or ""),
+                "avg_score": float(r.get("avg_score") or 0),
+                "votes_count": int(r.get("votes_count") or 0),
+                "author_name": str(r.get("author_name") or ""),
+                "author_username": str(r.get("author_username") or ""),
+            }
+        )
+    return {
+        "submit_day": str(submit_day),
+        "participants_count": participants,
+        "top_threshold": threshold,
+        "top": top,
+    }
+
+
+async def publish_daily_results(submit_day: date, *, limit: int = 10) -> dict:
+    """
+    Publish cached daily results and enqueue DM notifications only for dynamic TOP threshold.
+    Idempotent: notifications are enqueued once per submit_day.
+    """
+    snapshot = await build_daily_results_snapshot(submit_day, limit=limit)
+    p = _assert_pool()
+    now = get_bot_now()
+    payload_json = json.dumps(snapshot, ensure_ascii=False)
+    enqueued_count = 0
+
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT notifications_enqueued_at FROM daily_results_cache WHERE submit_day=$1 FOR UPDATE",
+                submit_day,
+            )
+            already_enqueued = bool(row and row.get("notifications_enqueued_at") is not None)
+
+            await conn.execute(
+                """
+                INSERT INTO daily_results_cache (
+                    submit_day,
+                    participants_count,
+                    top_threshold,
+                    payload,
+                    published_at,
+                    updated_at
+                )
+                VALUES ($1,$2,$3,$4::jsonb,$5,$5)
+                ON CONFLICT (submit_day) DO UPDATE
+                SET participants_count = EXCLUDED.participants_count,
+                    top_threshold = EXCLUDED.top_threshold,
+                    payload = EXCLUDED.payload,
+                    published_at = EXCLUDED.published_at,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                submit_day,
+                int(snapshot.get("participants_count") or 0),
+                int(snapshot.get("top_threshold") or 0),
+                payload_json,
+                now,
+            )
+
+            if not already_enqueued:
+                threshold = int(snapshot.get("top_threshold") or 0)
+                participants = int(snapshot.get("participants_count") or 0)
+                for item in snapshot.get("top", []):
+                    user_id = int(item.get("user_id") or 0)
+                    rank = int(item.get("final_rank") or 0)
+                    if user_id <= 0 or rank <= 0 or rank > threshold:
+                        continue
+                    jitter = random.randint(0, 180)
+                    await conn.execute(
+                        """
+                        INSERT INTO notification_queue (user_id, type, payload, run_after, status)
+                        VALUES ($1, 'daily_results_top', $2::jsonb, $3, 'pending')
+                        """,
+                        user_id,
+                        json.dumps(
+                            {
+                                "submit_day": str(submit_day),
+                                "photo_id": int(item.get("photo_id") or 0),
+                                "rank": rank,
+                                "participants_count": participants,
+                                "top_threshold": threshold,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        now + timedelta(seconds=jitter),
+                    )
+                    enqueued_count += 1
+
+                await conn.execute(
+                    """
+                    UPDATE daily_results_cache
+                    SET notifications_enqueued_at=$2,
+                        updated_at=$2
+                    WHERE submit_day=$1
+                    """,
+                    submit_day,
+                    now,
+                )
+
+    snapshot["notifications_enqueued"] = int(enqueued_count)
+    return snapshot
+
+
+async def get_daily_results_cache(submit_day: date | str) -> dict | None:
+    p = _assert_pool()
+    day = submit_day if isinstance(submit_day, date) else date.fromisoformat(str(submit_day))
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT submit_day, participants_count, top_threshold, payload, published_at
+            FROM daily_results_cache
+            WHERE submit_day=$1::date
+            """,
+            day,
+        )
+    if not row:
+        return None
+    payload = row.get("payload") or {}
+    return {
+        "submit_day": str(row.get("submit_day")),
+        "participants_count": int(row.get("participants_count") or 0),
+        "top_threshold": int(row.get("top_threshold") or 0),
+        "published_at": row.get("published_at"),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
+async def get_latest_daily_results_cache() -> dict | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT submit_day, participants_count, top_threshold, payload, published_at
+            FROM daily_results_cache
+            ORDER BY submit_day DESC
+            LIMIT 1
+            """
+        )
+    if not row:
+        return None
+    payload = row.get("payload") or {}
+    return {
+        "submit_day": str(row.get("submit_day")),
+        "participants_count": int(row.get("participants_count") or 0),
+        "top_threshold": int(row.get("top_threshold") or 0),
+        "published_at": row.get("published_at"),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
+async def list_daily_results_days(limit: int = 10, offset: int = 0) -> list[dict]:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT submit_day, participants_count, top_threshold, published_at
+            FROM daily_results_cache
+            ORDER BY submit_day DESC
+            OFFSET $1 LIMIT $2
+            """,
+            int(offset),
+            int(limit),
+        )
+    out: list[dict] = []
+    for r in rows:
+        out.append(
+            {
+                "submit_day": str(r.get("submit_day")),
+                "participants_count": int(r.get("participants_count") or 0),
+                "top_threshold": int(r.get("top_threshold") or 0),
+                "published_at": r.get("published_at"),
+            }
+        )
+    return out
+
+
+async def grant_daily_credits_once(day: date | None = None, *, batch_size: int = 1000) -> dict:
+    """
+    Grant daily credits one time per day (idempotent by user_stats.last_daily_grant_day).
+      - regular users: +2 credits
+      - premium users: +3 credits
+    """
+    target_day = day or get_bot_today()
+    p = _assert_pool()
+    granted_total = 0
+    batches = 0
+
+    # Ensure user_stats rows exist for all non-deleted users (cheap idempotent upsert).
+    async with p.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_stats (user_id, last_active_at)
+            SELECT u.id, NOW()
+            FROM users u
+            LEFT JOIN user_stats us ON us.user_id = u.id
+            WHERE COALESCE(u.is_deleted,0)=0
+              AND us.user_id IS NULL
+            ON CONFLICT (user_id) DO NOTHING
+            """
+        )
+
+    while True:
+        async with p.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    WITH picked AS (
+                        SELECT us.user_id
+                        FROM user_stats us
+                        JOIN users u ON u.id = us.user_id
+                        WHERE COALESCE(u.is_deleted,0)=0
+                          AND COALESCE(us.last_daily_grant_day, DATE '1970-01-01') < $1::date
+                        ORDER BY us.user_id
+                        LIMIT $2
+                        FOR UPDATE OF us SKIP LOCKED
+                    )
+                    UPDATE user_stats us
+                    SET credits = us.credits + CASE WHEN COALESCE(u.is_premium,0)=1 THEN 3 ELSE 2 END,
+                        last_daily_grant_day = $1::date,
+                        last_active_at = COALESCE(us.last_active_at, NOW())
+                    FROM picked p
+                    JOIN users u ON u.id = p.user_id
+                    WHERE us.user_id = p.user_id
+                    RETURNING us.user_id
+                    """,
+                    target_day,
+                    int(batch_size),
+                )
+        count = len(rows)
+        if count <= 0:
+            break
+        granted_total += count
+        batches += 1
+        if count < int(batch_size):
+            break
+
+    return {
+        "day": str(target_day),
+        "granted_users": int(granted_total),
+        "batches": int(batches),
+    }
+
+
 async def finalize_party(submit_day: date | None = None, *, min_votes: int = 7, limit: int = 500) -> list[dict]:
     """
     Закрываем партии:
@@ -5389,23 +5754,6 @@ async def finalize_party(submit_day: date | None = None, *, min_votes: int = 7, 
                     batch_results.append(dict(r) | {"final_rank": rank, "submit_day": sd})
 
                 results.extend(batch_results)
-
-                # уведомления авторам с лёгким джиттером
-                for res in batch_results:
-                    author_id = int(res["user_id"])
-                    jitter = random.randint(0, 900)
-                    await enqueue_notification(
-                        author_id,
-                        "final_rank",
-                        {
-                            "photo_id": int(res["id"]),
-                            "final_rank": int(res["final_rank"]),
-                            "submit_day": str(res.get("submit_day")),
-                            "votes_count": int(res.get("votes_count") or 0),
-                            "avg_score": float(res.get("avg_score") or 0),
-                        },
-                        run_after=now + timedelta(seconds=jitter),
-                    )
             if len(rows) < limit:
                 break
     return results
