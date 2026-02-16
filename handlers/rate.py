@@ -1028,7 +1028,7 @@ async def _clear_rate_comment_draft(state: FSMContext) -> None:
     except Exception:
         return
     changed = False
-    for key in ("photo_id", "comment_text", "is_public", "comment_saved", "rate_msg_id", "rate_chat_id"):
+    for key in ("photo_id", "comment_text", "is_public", "comment_saved"):
         if key in data:
             data.pop(key, None)
             changed = True
@@ -1199,7 +1199,7 @@ async def _apply_rating_card(
     card: RatingCard,
     state: FSMContext | None = None,
     reply_kb: ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
-) -> None:
+) -> int | None:
     """Всегда отправляет новую карточку и удаляет предыдущую, без редактирования."""
     prev_id = None
     if state is not None:
@@ -1207,6 +1207,8 @@ async def _apply_rating_card(
             prev_id = (await state.get_data()).get("rate_msg_id")
         except Exception:
             prev_id = None
+    if prev_id is None and message_id is not None:
+        prev_id = int(message_id)
 
     try:
         if card.photo_file_id:
@@ -1227,8 +1229,24 @@ async def _apply_rating_card(
                 parse_mode="HTML",
                 disable_notification=True,
             )
-    except Exception:
-        return
+    except Exception as e:
+        logger.warning(
+            "rate.apply_card.primary_send_failed",
+            extra={"chat_id": chat_id, "has_photo": bool(card.photo_file_id), "error": str(e)},
+        )
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=card.caption,
+                reply_markup=reply_kb or card.keyboard,
+                disable_notification=True,
+            )
+        except Exception as e2:
+            logger.exception(
+                "rate.apply_card.fallback_send_failed",
+                extra={"chat_id": chat_id, "error": str(e2)},
+            )
+            return None
 
     if state is not None:
         data = await state.get_data()
@@ -1244,6 +1262,7 @@ async def _apply_rating_card(
             await bot.delete_message(chat_id=chat_id, message_id=int(prev_id))
         except Exception:
             pass
+    return int(sent.message_id)
 
 
 async def _edit_rate_message(
@@ -1395,7 +1414,7 @@ def build_no_photos_keyboard(*, lang: str = "ru") -> InlineKeyboardMarkup:
 
 def build_no_photos_text() -> str:
     return (
-        "Фотографии на сегодня закончились 😭\n\n"
+        "Фотографий для оценивания не осталось 😭\n\n"
         "Но есть решение: хочешь больше фоток для оценивания — зови друзей. "
         "Чем больше людей, тем живее лента 🦒\n\n"
         f"Вот ссылка на бота:\n<code>{BOT_INVITE_LINK}</code>\n\n"
@@ -1695,14 +1714,24 @@ async def show_next_photo_for_rating(
         except Exception:
             pass
 
-    await _apply_rating_card(
+    sent_id = await _apply_rating_card(
         bot=bot,
         chat_id=chat_id,
         message=None,
-        message_id=None,
+        message_id=(
+            int(callback.message.message_id)
+            if is_cb and getattr(callback, "message", None) is not None
+            else (int(old_msg) if isinstance(old_msg, int) else None)
+        ),
         card=card,
         state=state,
     )
+    if sent_id is None and is_cb:
+        try:
+            await callback.answer("Не удалось обновить карточку. Попробуй ещё раз.", show_alert=True)
+        except Exception:
+            pass
+        return
 
     if is_cb:
         try:
@@ -3684,17 +3713,3 @@ async def rate_award(callback: CallbackQuery, state: FSMContext) -> None:
         "Функция выдачи ачивок из оценивания скоро будет доступна 💎.",
         show_alert=True,
     )
-
-# --- "More" handler: rate:more: ---
-@router.callback_query(F.data.startswith("rate:more:"))
-async def rate_more(callback: CallbackQuery, state: FSMContext) -> None:
-    if await _deny_if_full_banned(callback=callback):
-        return
-    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
-    # ... (rest of the logic for "more" handler should be here) ...
-
-# --- "Back" handler: rate:back ---
-@router.callback_query(F.data == "rate:back")
-async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
-    await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
-    # ... (rest of the logic for "back" handler should be here) ...
