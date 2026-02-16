@@ -1298,9 +1298,9 @@ def build_rate_keyboard(
                 text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
                 callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
             ),
+            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
         ]
     )
-    rows.append([InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1337,9 +1337,9 @@ def build_view_only_keyboard(
                 text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
                 callback_data=f"rate:more:{photo_id}:{0 if show_details else 1}",
             ),
+            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
         ]
     )
-    rows.append([InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2096,13 +2096,29 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
     rate_msg_id = data.get("rate_msg_id")
     rate_chat_id = data.get("rate_chat_id")
     is_public = bool(data.get("is_public", True))
+    text = (message.text or "").strip()
+
+    # Если в режиме комментария пришла оценка 1-10 — считаем это голосом, а не текстом комментария.
+    if text.isdigit() and 1 <= int(text) <= 10:
+        try:
+            if photo_id is not None:
+                await state.update_data(rate_current_photo_id=int(photo_id))
+            await state.set_state(None)
+        except Exception:
+            pass
+        await rate_score_from_keyboard(message, state)
+        return
 
     if photo_id is None or rate_msg_id is None or rate_chat_id is None:
         await state.clear()
-        await message.delete()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        user = await get_user_by_tg_id(message.from_user.id)
+        if user is not None:
+            await show_next_photo_for_rating(message, int(user["id"]), state=state, replace_message=False)
         return
-
-    text = (message.text or "").strip()
 
     # Пустой комментарий
     if not text:
@@ -2374,15 +2390,31 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
     report_msg_id = data.get("report_msg_id")
     report_chat_id = data.get("report_chat_id")
     report_reason = data.get("report_reason") or "other"
+    text = (message.text or "").strip()
+
+    # Если в режиме жалобы пришла оценка 1-10 — выходим из жалобы и считаем это голосом.
+    if text.isdigit() and 1 <= int(text) <= 10:
+        try:
+            if photo_id is not None:
+                await state.update_data(rate_current_photo_id=int(photo_id))
+            await _clear_rate_report_draft(state)
+        except Exception:
+            pass
+        await rate_score_from_keyboard(message, state)
+        return
 
     # from database import get_photo_by_id, get_moderators  # локальный импорт, чтобы избежать циклов
 
     if photo_id is None or report_msg_id is None or report_chat_id is None:
         await _clear_rate_report_draft(state)
-        await message.delete()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        user = await get_user_by_tg_id(message.from_user.id)
+        if user is not None:
+            await show_next_photo_for_rating(message, int(user["id"]), state=state, replace_message=False)
         return
-
-    text = (message.text or "").strip()
 
     # Пустая жалоба
     if not text:
