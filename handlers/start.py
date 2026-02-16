@@ -1,4 +1,3 @@
-import os
 import random
 import html
 import hashlib
@@ -21,7 +20,13 @@ from handlers.rate import rate_root
 from handlers.profile import profile_menu
 from handlers.results import results_menu
 from handlers.premium import maybe_send_premium_expiry_warning
-from config import MASTER_ADMIN_ID
+from config import (
+    MASTER_ADMIN_ID,
+    SUBSCRIPTION_GATE_ENABLED,
+    REQUIRED_CHANNEL_ID,
+    REQUIRED_CHANNEL_LINK,
+    AD_CHANNEL_LINK,
+)
 from utils.time import get_moscow_now, get_moscow_today, is_happy_hour
 from utils.banner import ensure_giraffe_banner
 from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
@@ -75,14 +80,6 @@ def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
     code = (tg_lang_code or "").lower()
     return "ru" if code.startswith("ru") else "en"
 
-
-# Channel required to use the bot (subscription gate)
-SUBSCRIPTION_GATE_ENABLED = os.getenv("SUBSCRIPTION_GATE_ENABLED", "false").lower() == "true"
-REQUIRED_CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
-REQUIRED_CHANNEL_LINK = os.getenv("REQUIRED_CHANNEL_LINK", "https://t.me/nyqcreative")
-
-# Advertising channel shown inside the menu text (not the gate)
-AD_CHANNEL_LINK = os.getenv("AD_CHANNEL_LINK", "https://t.me/glowshotchannel")
 
 # Рандом-строки для рекламного блока (вторая строка)
 AD_LINES_RU: list[str] = [

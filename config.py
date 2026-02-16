@@ -14,9 +14,13 @@ SUPPORT_BOT_TOKEN = os.getenv("SUPPORT_BOT_TOKEN")
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID"))
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/supofglowshotbot")
 
-REQUIRED_CHANNEL_ID = os.getenv("@nyqcreative")
-REQUIRED_CHANNEL_LINK = os.getenv("https://t.me/nyqcreative")
-AD_CHANNEL_LINK = os.getenv("https://t.me/glowshotchannel")
+# ---------------------------------------------------------------------------
+# Public app config (non-secret): keep these values in code, not in .env
+# ---------------------------------------------------------------------------
+SUBSCRIPTION_GATE_ENABLED = False
+REQUIRED_CHANNEL_ID = "@nyqcreative"
+REQUIRED_CHANNEL_LINK = "https://t.me/nyqcreative"
+AD_CHANNEL_LINK = "https://t.me/glowshotchannel"
 
 # ===== Moderation notifications =====
 # Optional: if set, all report notifications and threshold cards will be sent to this chat (group/supergroup).
@@ -54,37 +58,58 @@ else:
     FEEDBACK_CHAT_ID = -1003726130918
 
 # ===== Rating tutorial photo =====
-RATE_TUTORIAL_PHOTO_FILE_ID = os.getenv(
-    "RATE_TUTORIAL_PHOTO_FILE_ID",
-    "AgACAgIAAxkBAAIg2GmDn0m5yO122K7pVB2_9j_sGOegAAK2DWsbRt4hSBEpPEq_thR_AQADAgADdwADOAQ",
+RATE_TUTORIAL_PHOTO_FILE_ID = (
+    "AgACAgIAAxkBAAIg2GmDn0m5yO122K7pVB2_9j_sGOegAAK2DWsbRt4hSBEpPEq_thR_AQADAgADdwADOAQ"
 )
 
 # ===== Rating feed tuning =====
-RATE_POPULAR_MIN_RATINGS = int(os.getenv("RATE_POPULAR_MIN_RATINGS", "10"))
-RATE_LOW_RATINGS_MAX = int(os.getenv("RATE_LOW_RATINGS_MAX", "2"))
-BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
+RATE_POPULAR_MIN_RATINGS = 10
+RATE_LOW_RATINGS_MAX = 2
+RATE_PREMIUM_BOOST_CHANCE = 0.3
+RATE_ONES_DAILY_MIN_TOTAL = 12
+RATE_ONES_DAILY_LIMIT = 10
+RATE_ONES_DAILY_HARD_CAP = 20
+RATE_ONES_DAILY_RATIO = 0.85
+BOT_TIMEZONE = "Europe/Moscow"
+
+# ===== Bayesian rating tuning (transparent app config, not secrets) =====
+# Prior virtual-votes weight for Bayesian smoothing.
+RATE_BAYES_PRIOR = 12
+# Fallback global mean if project has no ratings yet.
+RATE_BAYES_FALLBACK_MEAN = 7.0
+LINK_RATING_WEIGHT = 0.5
 
 
-def _parse_time(raw: str | None, default: str) -> time:
-    val = (raw or default).strip()
-    parts = val.split(":")
-    try:
-        h = int(parts[0]) if parts and parts[0] else 0
-        m = int(parts[1]) if len(parts) > 1 else 0
-        return time(hour=max(0, min(23, h)), minute=max(0, min(59, m)))
-    except Exception:
-        return _parse_time(default, default) if raw != default else time(15, 0)
+HAPPY_HOUR_START = time(15, 0)
+HAPPY_HOUR_END = time(16, 0)
+CREDIT_SHOWS_BASE = 2
+CREDIT_SHOWS_HAPPY = 4
+MIN_VOTES_FOR_TOP = 7
+ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY = 5
+PORTFOLIO_TOP_N = 9
+TAIL_PROBABILITY = 0.05
+MIN_VOTES_FOR_NORMAL_FEED = 5
 
+# ===== Streak tuning =====
+STREAK_DAILY_RATINGS = 3
+STREAK_DAILY_COMMENTS = 1
+STREAK_DAILY_UPLOADS = 1
+STREAK_GRACE_HOURS = 6
+STREAK_MAX_NUDGES_PER_DAY = 2
 
-HAPPY_HOUR_START = _parse_time(os.getenv("HAPPY_HOUR_START"), "15:00")
-HAPPY_HOUR_END = _parse_time(os.getenv("HAPPY_HOUR_END"), "16:00")
-CREDIT_SHOWS_BASE = int(os.getenv("CREDIT_SHOWS_BASE", "2"))
-CREDIT_SHOWS_HAPPY = int(os.getenv("CREDIT_SHOWS_HAPPY", "4"))
-MIN_VOTES_FOR_TOP = int(os.getenv("MIN_VOTES_FOR_TOP", "7"))
-ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY = int(os.getenv("ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY", "5"))
-PORTFOLIO_TOP_N = int(os.getenv("PORTFOLIO_TOP_N", "9"))
-TAIL_PROBABILITY = float(os.getenv("TAIL_PROBABILITY", "0.05"))
-MIN_VOTES_FOR_NORMAL_FEED = int(os.getenv("MIN_VOTES_FOR_NORMAL_FEED", "5"))
+# ===== Results scoring tuning =====
+RESULTS_BAYES_PRIOR = 20
+RESULTS_MIN_RATINGS_COMMON = 5
+RESULTS_MIN_UNIQUE_RATERS_COMMON = 4
+RESULTS_MIN_RATINGS_CITY = 10
+RESULTS_MIN_UNIQUE_RATERS_CITY = 6
+RESULTS_MIN_RATINGS_COUNTRY = 25
+RESULTS_MIN_UNIQUE_RATERS_COUNTRY = 12
+RESULTS_MIN_RATINGS_TAG = 20
+RESULTS_MIN_UNIQUE_RATERS_TAG = 10
+RESULTS_WEIGHT_RATINGS = 0.02
+RESULTS_WEIGHT_COMMENTS = 0.01
+RESULTS_PENALTY_REPORT = 5.0
 
 # ===== Manual RUB (card transfer) =====
 # Toggle manual RUB flow (card transfer + user sends receipt)

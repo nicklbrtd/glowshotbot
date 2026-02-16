@@ -21,6 +21,19 @@ from utils.time import (
     is_happy_hour,
 )
 from utils.watermark import generate_author_code
+from config import (
+    LINK_RATING_WEIGHT,
+    RATE_POPULAR_MIN_RATINGS,
+    RATE_LOW_RATINGS_MAX,
+    RATE_PREMIUM_BOOST_CHANCE,
+    RATE_BAYES_PRIOR,
+    RATE_BAYES_FALLBACK_MEAN,
+    STREAK_DAILY_RATINGS,
+    STREAK_DAILY_COMMENTS,
+    STREAK_DAILY_UPLOADS,
+    STREAK_GRACE_HOURS,
+    STREAK_MAX_NUDGES_PER_DAY,
+)
 
 import traceback
 
@@ -31,10 +44,6 @@ pool: asyncpg.Pool | None = None
 # Stored as (ts, mean, count)
 _GLOBAL_RATING_CACHE: tuple[float, float, int] | None = None
 _GLOBAL_RATING_TTL_SECONDS = 300
-LINK_RATING_WEIGHT = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
-RATE_POPULAR_MIN_RATINGS = int(os.getenv("RATE_POPULAR_MIN_RATINGS", "10"))
-RATE_LOW_RATINGS_MAX = int(os.getenv("RATE_LOW_RATINGS_MAX", "2"))
-RATE_PREMIUM_BOOST_CHANCE = float(os.getenv("RATE_PREMIUM_BOOST_CHANCE", "0.3"))
 
 
 def _link_rating_weight() -> float:
@@ -50,9 +59,30 @@ def _link_rating_weight() -> float:
 def _bayes_prior_weight() -> int:
     """How many virtual votes the global mean contributes.
 
-    Tunable constant. 20 works well for 1..10 ratings.
+    Tunable constant (1..200). Lower value reacts faster to new votes.
     """
-    return 20
+    try:
+        v = int(RATE_BAYES_PRIOR)
+    except Exception:
+        v = 12
+    if v < 1:
+        return 1
+    if v > 200:
+        return 200
+    return v
+
+
+def _bayes_fallback_mean() -> float:
+    """Neutral fallback for an empty project (no ratings yet)."""
+    try:
+        v = float(RATE_BAYES_FALLBACK_MEAN)
+    except Exception:
+        v = 7.0
+    if v < 1.0:
+        return 1.0
+    if v > 10.0:
+        return 10.0
+    return v
 
 
 def _premium_boost_chance() -> float:
@@ -94,8 +124,8 @@ async def _get_global_rating_mean(conn: asyncpg.Connection) -> tuple[float, int]
     sum_w = float(row["sum_w"]) if row and row["sum_w"] is not None else 0.0
     cnt_w = float(row["cnt_w"]) if row and row["cnt_w"] is not None else 0.0
 
-    # If the bot is new / no ratings yet, use a neutral default.
-    mean = (sum_w / cnt_w) if cnt_w > 0 else 7.0
+    # If the bot is new / no ratings yet, use neutral fallback.
+    mean = (sum_w / cnt_w) if cnt_w > 0 else _bayes_fallback_mean()
 
     _GLOBAL_RATING_CACHE = (now, mean, cnt)
     return mean, cnt
@@ -246,6 +276,48 @@ async def consume_credits_on_show(author_user_id: int, *, now: datetime | None =
     multiplier = _happy_hour_multiplier(now_dt)
     async with p.acquire() as conn:
         stats = await _ensure_user_stats_row(conn, int(author_user_id))
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT credits, show_tokens FROM user_stats WHERE user_id=$1 FOR UPDATE",
+                int(author_user_id),
+            )
+            if not row:
+                return False
+            credits = int(row["credits"] or 0)
+            tokens = int(row["show_tokens"] or 0)
+            if tokens <= 0 and credits > 0:
+                credits -= 1
+                tokens += multiplier
+            if tokens <= 0:
+                await conn.execute(
+                    "UPDATE user_stats SET credits=$2, show_tokens=$3, last_active_at=$4 WHERE user_id=$1",
+                    int(author_user_id),
+                    credits,
+                    tokens,
+                    now_dt,
+                )
+                return False
+            tokens -= 1
+            await conn.execute(
+                "UPDATE user_stats SET credits=$2, show_tokens=$3, last_active_at=$4 WHERE user_id=$1",
+                int(author_user_id),
+                credits,
+                tokens,
+                now_dt,
+            )
+            return True
+
+
+async def consume_credits_on_rating(author_user_id: int, *, now: datetime | None = None) -> bool:
+    """
+    Spend exactly one show impression for a rating event.
+    Fixed economics here: 2 impressions = 1 credit.
+    """
+    p = _assert_pool()
+    now_dt = now or get_bot_now()
+    multiplier = 2
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(author_user_id))
         async with conn.transaction():
             row = await conn.fetchrow(
                 "SELECT credits, show_tokens FROM user_stats WHERE user_id=$1 FOR UPDATE",
@@ -1058,11 +1130,11 @@ async def get_random_active_ad() -> dict | None:
 
 # -------------------- streak (🔥) API --------------------
 
-_STREAK_DAILY_RATINGS = int(os.getenv("STREAK_DAILY_RATINGS", "3"))
-_STREAK_DAILY_COMMENTS = int(os.getenv("STREAK_DAILY_COMMENTS", "1"))
-_STREAK_DAILY_UPLOADS = int(os.getenv("STREAK_DAILY_UPLOADS", "1"))
-_STREAK_GRACE_HOURS = int(os.getenv("STREAK_GRACE_HOURS", "6"))
-_STREAK_MAX_NUDGES_PER_DAY = int(os.getenv("STREAK_MAX_NUDGES_PER_DAY", "2"))
+_STREAK_DAILY_RATINGS = int(STREAK_DAILY_RATINGS)
+_STREAK_DAILY_COMMENTS = int(STREAK_DAILY_COMMENTS)
+_STREAK_DAILY_UPLOADS = int(STREAK_DAILY_UPLOADS)
+_STREAK_GRACE_HOURS = int(STREAK_GRACE_HOURS)
+_STREAK_MAX_NUDGES_PER_DAY = int(STREAK_MAX_NUDGES_PER_DAY)
 _STREAK_REWARD_THRESHOLD = 111
 _STREAK_REWARD_PREMIUM_DAYS = 11
 

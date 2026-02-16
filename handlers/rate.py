@@ -5,7 +5,6 @@ from aiogram.dispatcher.event.bases import SkipHandler
 import traceback
 from dataclasses import dataclass
 from datetime import date, datetime
-import os
 from utils.time import get_moscow_today, get_moscow_now
 
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -53,6 +52,7 @@ from database import (
     set_user_block_status_by_tg_id,
     get_user_reports_since,
     mark_viewonly_seen,
+    has_viewonly_seen,
     get_active_photos_for_user,
     get_random_active_ad,
     get_ads_enabled_by_tg_id,
@@ -63,10 +63,18 @@ from database import (
     set_user_rate_tutorial_seen,
     get_user_rating_day_stats,
     mark_user_suspicious_rating,
+    consume_credits_on_rating,
 )
 from handlers.upload import EDIT_TAGS
 from html import escape
-from config import MODERATION_CHAT_ID, RATE_TUTORIAL_PHOTO_FILE_ID
+from config import (
+    MODERATION_CHAT_ID,
+    RATE_TUTORIAL_PHOTO_FILE_ID,
+    RATE_ONES_DAILY_MIN_TOTAL,
+    RATE_ONES_DAILY_LIMIT,
+    RATE_ONES_DAILY_HARD_CAP,
+    RATE_ONES_DAILY_RATIO,
+)
 from utils.banner import ensure_giraffe_banner
 from utils.registration_guard import require_user_name
 
@@ -460,10 +468,10 @@ def _format_report_cooldown(seconds: int) -> str:
     return " ".join(parts)
 
 
-_RATE_ONES_DAILY_MIN_TOTAL = int(os.getenv("RATE_ONES_DAILY_MIN_TOTAL", "12"))
-_RATE_ONES_DAILY_LIMIT = int(os.getenv("RATE_ONES_DAILY_LIMIT", "10"))
-_RATE_ONES_DAILY_HARD_CAP = int(os.getenv("RATE_ONES_DAILY_HARD_CAP", "20"))
-_RATE_ONES_DAILY_RATIO = float(os.getenv("RATE_ONES_DAILY_RATIO", "0.85"))
+_RATE_ONES_DAILY_MIN_TOTAL = int(RATE_ONES_DAILY_MIN_TOTAL)
+_RATE_ONES_DAILY_LIMIT = int(RATE_ONES_DAILY_LIMIT)
+_RATE_ONES_DAILY_HARD_CAP = int(RATE_ONES_DAILY_HARD_CAP)
+_RATE_ONES_DAILY_RATIO = float(RATE_ONES_DAILY_RATIO)
 
 
 async def _check_rate_spam_block(user: dict, *, value: int) -> tuple[bool, str | None]:
@@ -718,7 +726,7 @@ async def _build_rate_view(
             int(photo_id),
             is_premium=viewer_is_premium,
             show_details=show_details,
-            more_only=show_details,
+            more_only=False,
             link_button=link_button,
             lang=viewer_lang,
         )
@@ -727,7 +735,7 @@ async def _build_rate_view(
             int(photo_id),
             show_details=show_details,
             is_premium=viewer_is_premium,
-            more_only=show_details,
+            more_only=False,
             link_button=link_button,
             lang=viewer_lang,
         )
@@ -794,11 +802,12 @@ RATE_TUTORIAL_CAPTION = (
 def _build_rate_tutorial_inline_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Ссылка автора", callback_data="rate:tutor:noop")
-    kb.button(text="Коммент", callback_data="rate:tutor:noop")
-    kb.button(text="Жалоба", callback_data="rate:tutor:noop")
+    kb.button(text="1-5", callback_data="rate:tutor:noop")
+    kb.button(text="6-10", callback_data="rate:tutor:noop")
     kb.button(text="В меню", callback_data="menu:back")
     kb.button(text="Еще", callback_data="rate:tutor:noop")
-    kb.adjust(1, 2, 2)
+    kb.button(text="Все понятно", callback_data="rate:tutor:ok")
+    kb.adjust(1, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -1072,16 +1081,8 @@ async def _sync_rate_state_for_card(
     except Exception:
         pass
 
-    if card.photo:
-        await _send_reply_keyboard_for_photo(
-            bot,
-            chat_id,
-            state,
-            lang,
-            bool(card.photo.get("ratings_enabled", True)),
-        )
-    else:
-        await _delete_rate_reply_keyboard(bot, chat_id, state)
+    # Inline-only rating flow: reply keyboard must stay hidden.
+    await _delete_rate_reply_keyboard(bot, chat_id, state)
 
 
 async def _show_rate_block_banner(
@@ -1173,6 +1174,22 @@ async def _safe_create_comment(
         except Exception:
             pass
         return False
+
+
+async def _consume_author_impression_on_vote(photo: dict | None, voter_user_id: int) -> None:
+    """After a successful vote, spend 1 author impression (2 impressions = 1 credit)."""
+    try:
+        author_user_id = int((photo or {}).get("user_id") or 0)
+    except Exception:
+        author_user_id = 0
+    if author_user_id <= 0 or int(author_user_id) == int(voter_user_id):
+        return
+    try:
+        await consume_credits_on_rating(int(author_user_id))
+    except Exception:
+        pass
+
+
 async def _apply_rating_card(
     *,
     bot,
@@ -1276,31 +1293,24 @@ def build_rate_keyboard(
         link_text, link_url = link_button
         rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
 
-    if not more_only:
+    rows.append([InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}") for i in range(1, 6)])
+    rows.append([InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}") for i in range(6, 11)])
+
+    if show_details:
         rows.append(
             [
                 InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
                 InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
             ]
         )
-
-    if show_details and is_premium and not more_only:
+        rows.append([InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")])
+    else:
         rows.append(
             [
-                InlineKeyboardButton(text="💥+15", callback_data=f"rate:super:{photo_id}"),
-                InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}"),
+                InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+                InlineKeyboardButton(text=t("rate.btn.more", lang), callback_data=f"rate:more:{photo_id}:1"),
             ]
         )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
-                callback_data=f"rate:more:{photo_id}:{1 if not show_details else 0}",
-            ),
-            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
-        ]
-    )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1320,26 +1330,23 @@ def build_view_only_keyboard(
         link_text, link_url = link_button
         rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
 
-    if not more_only:
+    rows.append([InlineKeyboardButton(text=t("rate.btn.next", lang), callback_data=f"rate:skip:{photo_id}")])
+
+    if show_details:
         rows.append(
             [
                 InlineKeyboardButton(text=t("rate.btn.comment", lang), callback_data=f"rate:comment:{photo_id}"),
                 InlineKeyboardButton(text=t("rate.btn.report", lang), callback_data=f"rate:report:{photo_id}"),
             ]
         )
-
-    if show_details and is_premium and not more_only:
-        rows.append([InlineKeyboardButton(text=t("rate.btn.award", lang), callback_data=f"rate:award:{photo_id}")])
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=(t("rate.btn.hide", lang) if show_details else t("rate.btn.more", lang)),
-                callback_data=f"rate:more:{photo_id}:{0 if show_details else 1}",
-            ),
-            InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
-        ]
-    )
+        rows.append([InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back")])
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(text=t("common.menu", lang), callback_data="menu:back"),
+                InlineKeyboardButton(text=t("rate.btn.more", lang), callback_data=f"rate:more:{photo_id}:1"),
+            ]
+        )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1648,10 +1655,7 @@ async def show_next_photo_for_rating(
                 msg_id = None
 
     viewer = await get_user_by_tg_id(viewer_tg_id)
-    lang = _lang(viewer)
     card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id)
-
-    is_rateable = bool(card.photo and card.photo.get("ratings_enabled", True))
 
     if state is not None:
         data = await state.get_data()
@@ -1659,50 +1663,31 @@ async def show_next_photo_for_rating(
         data["rate_show_details"] = False
         await state.set_data(data)
 
-    # Показываем/обновляем reply‑клавиатуру ДО отправки карточки, чтобы «жираф» оставался сверху.
-    # ВАЖНО: даже если `state` не передали (None), мы всё равно обязаны восстановить reply‑клавиатуру,
-    # иначе после любого ReplyKeyboardRemove кнопки 1–10 «пропадут».
+    # Inline-only rating flow: always hide any reply keyboard remnants.
     try:
-        if card.photo:
-            if state is not None:
-                await _send_reply_keyboard_for_photo(bot, chat_id, state, lang, is_rateable)
-            else:
-                # Без FSM: просто перерисовываем баннер с нужной reply‑клавиатурой
-                reply_kb = _build_rate_reply_keyboard(lang) if is_rateable else _build_next_only_reply_keyboard(lang)
-                await ensure_giraffe_banner(
-                    bot,
-                    chat_id,
-                    viewer_tg_id,
-                    text="🦒",
-                    reply_markup=reply_kb,
-                    force_new=False,
-                    reason="show_next_photo:set_reply_kb",
-                )
+        if state is not None:
+            await _delete_rate_reply_keyboard(bot, chat_id, state)
         else:
-            # Нет фото — скрываем reply‑клавиатуру
-            if state is not None:
-                await _delete_rate_reply_keyboard(bot, chat_id, state)
-            else:
-                new_id = await ensure_giraffe_banner(
-                    bot,
-                    chat_id,
-                    viewer_tg_id,
-                    text="🦒",
-                    reply_markup=ReplyKeyboardRemove(),
-                    force_new=False,
-                    reason="show_next_photo:no_photos",
-                )
-                try:
-                    ui_state = await get_user_ui_state(chat_id)
-                except Exception:
-                    ui_state = {}
-                await _dedupe_banner_messages(
-                    bot,
-                    chat_id,
-                    new_id,
-                    [ui_state.get("banner_msg_id"), ui_state.get("rate_kb_msg_id")],
-                    reason="show_next_photo:no_photos:dedupe",
-                )
+            new_id = await ensure_giraffe_banner(
+                bot,
+                chat_id,
+                viewer_tg_id,
+                text="🦒",
+                reply_markup=ReplyKeyboardRemove(),
+                force_new=False,
+                reason="show_next_photo:inline_only",
+            )
+            try:
+                ui_state = await get_user_ui_state(chat_id)
+            except Exception:
+                ui_state = {}
+            await _dedupe_banner_messages(
+                bot,
+                chat_id,
+                new_id,
+                [ui_state.get("banner_msg_id"), ui_state.get("rate_kb_msg_id")],
+                reason="show_next_photo:inline_only:dedupe",
+            )
     except Exception:
         # Фоллбек: хотя бы держим баннер
         try:
@@ -1775,14 +1760,8 @@ async def _show_rate_tutorial(callback: CallbackQuery | Message, state: FSMConte
     except Exception:
         pass
 
-    # Показать reply‑клавиатуру «Все понятно!»
     try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=_rate_kb_hint(_lang(await get_user_by_tg_id(user_id)), "tutorial"),
-            reply_markup=_build_rate_tutorial_reply_keyboard(),
-            disable_notification=True,
-        )
+        await _delete_rate_reply_keyboard(bot, chat_id, state)
     except Exception:
         pass
 
@@ -1805,6 +1784,35 @@ async def rate_tutorial_noop(callback: CallbackQuery) -> None:
         await callback.answer()
     except Exception:
         pass
+
+
+@router.callback_query(F.data == "rate:tutor:ok")
+async def rate_tutorial_ok(callback: CallbackQuery, state: FSMContext) -> None:
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+
+    try:
+        await set_user_rate_tutorial_seen(callback.from_user.id, True)
+    except Exception:
+        pass
+
+    try:
+        data = await state.get_data()
+        data["rate_kb_msg_id"] = None
+        data["rate_kb_mode"] = "none"
+        await state.set_data(data)
+        await set_user_rate_kb_msg_id(callback.from_user.id, None)
+    except Exception:
+        pass
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await show_next_photo_for_rating(callback, int(user["id"]), state=state, replace_message=False)
 
 
 @router.callback_query(F.data.startswith("rate:comment:"))
@@ -2154,11 +2162,7 @@ async def rate_return_to_photo(callback: CallbackQuery, state: FSMContext) -> No
         pass
 
     try:
-        lang = _lang(user)
-        if is_rateable:
-            await _send_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state, lang)
-        else:
-            await _send_next_only_reply_keyboard(callback.message.bot, callback.message.chat.id, state, lang)
+        await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
     except Exception:
         pass
 
@@ -2260,8 +2264,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
         photo_for_caption = None
 
     is_rateable = bool(photo_for_caption and photo_for_caption.get("ratings_enabled", True))
-    rater_lang = _lang(user_for_rate)
-
     # Если фото можно оценивать — комментарий сохраняем в FSM и отправим только после оценки
     if is_rateable:
         await state.update_data(comment_text=text, comment_saved=False)
@@ -2281,19 +2283,13 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 message_id=rate_msg_id,
                 card=card,
             )
-            try:
-                await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
-            except Exception:
-                pass
         else:
             try:
                 await message.bot.edit_message_text(
                     chat_id=rate_chat_id,
                     message_id=rate_msg_id,
                     text=prefix,
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
-                    ),
+                    reply_markup=_build_back_to_photo_kb(int(photo_id)),
                     parse_mode="HTML",
                 )
             except Exception:
@@ -2328,9 +2324,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                         chat_id=rate_chat_id,
                         message_id=rate_msg_id,
                         text=prefix,
-                        reply_markup=InlineKeyboardMarkup(
-                            inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
-                        ),
+                        reply_markup=_build_back_to_photo_kb(int(photo_id)),
                         parse_mode="HTML",
                     )
                 except Exception:
@@ -2415,7 +2409,6 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     except Exception:
                         pass
 
-    rater_lang = _lang(user_for_rate)
     try:
         prefix = "✅ Комментарий отправлен!"
         card = await _build_rating_card_for_photo(
@@ -2432,23 +2425,13 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 message_id=rate_msg_id,
                 card=card,
             )
-            try:
-                # После отправки комментария возвращаем клавиатуру оценок (если фото всё ещё для оценивания)
-                if is_rateable:
-                    await _send_rate_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
-                else:
-                    await _send_next_only_reply_keyboard(message.bot, rate_chat_id, state, rater_lang)
-            except Exception:
-                pass
         else:
             try:
                 await message.bot.edit_message_text(
                     chat_id=rate_chat_id,
                     message_id=rate_msg_id,
                     text=prefix,
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
-                    ),
+                    reply_markup=_build_back_to_photo_kb(int(photo_id)),
                     parse_mode="HTML",
                 )
             except Exception:
@@ -2888,6 +2871,8 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     # Сохраняем обычную оценку 10
     vote_saved = await add_rating(user["id"], photo_id, value)
+    if vote_saved:
+        await _consume_author_impression_on_vote(photo, int(user["id"]))
     # И помечаем её как супер-оценку (+5 баллов в статистике)
     await set_super_rating(user["id"], photo_id)
     # streak: rating counts as daily activity
@@ -3066,6 +3051,8 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
 
     # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
     vote_saved = await add_rating(user["id"], photo_id, value)
+    if vote_saved:
+        await _consume_author_impression_on_vote(photo, int(user["id"]))
     # streak: rating counts as daily activity
     try:
         await streak_record_action_by_tg_id(int(callback.from_user.id), "rate")
@@ -3219,9 +3206,15 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
             photo = None
         if photo and not bool(photo.get("ratings_enabled", True)):
             try:
+                already_seen = await has_viewonly_seen(int(user["id"]), int(photo_id))
+            except Exception:
+                already_seen = False
+            try:
                 await mark_viewonly_seen(int(user["id"]), int(photo_id))
             except Exception:
                 pass
+            if not already_seen:
+                await _consume_author_impression_on_vote(photo, int(user["id"]))
 
         try:
             await message.delete()
@@ -3347,6 +3340,8 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
                         pass
 
     vote_saved = await add_rating(user["id"], int(photo_id), value)
+    if vote_saved:
+        await _consume_author_impression_on_vote(photo, int(user["id"]))
     try:
         await streak_record_action_by_tg_id(int(message.from_user.id), "rate")
     except Exception:
@@ -3505,9 +3500,15 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_rateable:
         await state.clear()
         try:
+            already_seen = await has_viewonly_seen(int(user["id"]), int(photo_id))
+        except Exception:
+            already_seen = False
+        try:
             await mark_viewonly_seen(int(user["id"]), photo_id)
         except Exception:
             pass
+        if not already_seen:
+            await _consume_author_impression_on_vote(photo, int(user["id"]))
         try:
             await callback.answer()
         except Exception:
@@ -3539,7 +3540,9 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
 
     # Пропуск реализуем как оценку 0
-    await add_rating(user["id"], photo_id, 0)
+    vote_saved = await add_rating(user["id"], photo_id, 0)
+    if vote_saved:
+        await _consume_author_impression_on_vote(photo, int(user["id"]))
     await show_next_photo_for_rating(callback, user["id"], state=state)
 
 

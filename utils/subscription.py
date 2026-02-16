@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
+from config import REQUIRED_CHANNEL_ID
 
-CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID", "@nyqcreative")
+CHANNEL_ID = REQUIRED_CHANNEL_ID
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import os
 import asyncpg
+from config import LINK_RATING_WEIGHT, RATE_BAYES_FALLBACK_MEAN
 
 
 def _link_rating_weight() -> float:
     try:
-        w = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
+        w = float(LINK_RATING_WEIGHT)
     except Exception:
         w = 0.5
     if w <= 0:
@@ -17,7 +17,7 @@ def _link_rating_weight() -> float:
 async def get_global_mean_and_count(conn: asyncpg.Connection) -> tuple[float, int]:
     """Global mean for all ratings in DB."""
     try:
-        w = float(os.getenv("LINK_RATING_WEIGHT", "0.5"))
+        w = float(LINK_RATING_WEIGHT)
     except Exception:
         w = 0.5
     row = await conn.fetchrow(
@@ -35,7 +35,7 @@ async def get_global_mean_and_count(conn: asyncpg.Connection) -> tuple[float, in
     cnt_w = float(row["cnt_w"]) if row and row["cnt_w"] is not None else 0.0
 
     # Neutral default if bot is new / no ratings
-    mean = (sum_w / cnt_w) if cnt_w > 0 else 7.0
+    mean = (sum_w / cnt_w) if cnt_w > 0 else float(RATE_BAYES_FALLBACK_MEAN)
     return mean, cnt
 
 

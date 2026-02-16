@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 import math
-import os
 from datetime import datetime
+from config import (
+    RESULTS_BAYES_PRIOR,
+    RESULTS_WEIGHT_RATINGS,
+    RESULTS_WEIGHT_COMMENTS,
+    RESULTS_PENALTY_REPORT,
+)
 
 from database_results import (
     PERIOD_DAY,
@@ -85,12 +90,12 @@ async def recalc_day_global(*, day_key: str, limit: int = 10) -> int:
         rows = await get_day_photo_rows_global(conn, day_key=str(day_key))
 
     # Параметры скоринга (тонкая настройка через ENV).
-    prior = int(os.getenv("RESULTS_BAYES_PRIOR", "20"))
+    prior = int(RESULTS_BAYES_PRIOR)
     min_ratings = 20  # жёсткое требование из ТЗ
     min_invited = 2
-    rating_weight = float(os.getenv("RESULTS_WEIGHT_RATINGS", "0.02"))
-    comments_weight = float(os.getenv("RESULTS_WEIGHT_COMMENTS", "0.01"))
-    reports_penalty = float(os.getenv("RESULTS_PENALTY_REPORT", "5.0"))
+    rating_weight = float(RESULTS_WEIGHT_RATINGS)
+    comments_weight = float(RESULTS_WEIGHT_COMMENTS)
+    reports_penalty = float(RESULTS_PENALTY_REPORT)
 
     # Разбор day_key в дату для проверки cooldown победителей.
     try:

@@ -12,7 +12,6 @@ Integration points for other handlers:
 
 from __future__ import annotations
 
-import os
 import html
 import traceback
 
@@ -32,13 +31,19 @@ from database import (
 )
 from keyboards.common import build_back_kb
 from utils.i18n import t
+from config import (
+    STREAK_DAILY_RATINGS,
+    STREAK_DAILY_COMMENTS,
+    STREAK_DAILY_UPLOADS,
+    STREAK_GRACE_HOURS,
+)
 
 router = Router(name="streak")
 
-DAILY_GOAL_RATE_COUNT = int(os.getenv("STREAK_DAILY_RATINGS", "3"))
-DAILY_GOAL_COMMENT_COUNT = int(os.getenv("STREAK_DAILY_COMMENTS", "1"))
-DAILY_GOAL_UPLOAD_COUNT = int(os.getenv("STREAK_DAILY_UPLOADS", "1"))
-GRACE_HOURS = int(os.getenv("STREAK_GRACE_HOURS", "6"))
+DAILY_GOAL_RATE_COUNT = int(STREAK_DAILY_RATINGS)
+DAILY_GOAL_COMMENT_COUNT = int(STREAK_DAILY_COMMENTS)
+DAILY_GOAL_UPLOAD_COUNT = int(STREAK_DAILY_UPLOADS)
+GRACE_HOURS = int(STREAK_GRACE_HOURS)
 
 
 def _get_lang(user: dict | None) -> str:

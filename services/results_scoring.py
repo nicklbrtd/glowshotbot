@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Iterable
+from config import (
+    RESULTS_BAYES_PRIOR,
+    RESULTS_MIN_RATINGS_COMMON,
+    RESULTS_MIN_UNIQUE_RATERS_COMMON,
+    RESULTS_MIN_RATINGS_CITY,
+    RESULTS_MIN_UNIQUE_RATERS_CITY,
+    RESULTS_MIN_RATINGS_COUNTRY,
+    RESULTS_MIN_UNIQUE_RATERS_COUNTRY,
+    RESULTS_MIN_RATINGS_TAG,
+    RESULTS_MIN_UNIQUE_RATERS_TAG,
+)
 
 
 @dataclass(frozen=True)
@@ -28,22 +38,22 @@ def rules_for_scope(scope_type: str) -> ScoringRules:
 
     Unique raters can be tuned separately.
     """
-    prior = int(os.getenv("RESULTS_BAYES_PRIOR", "20"))
+    prior = int(RESULTS_BAYES_PRIOR)
 
     # Common/global defaults
-    common_min_ratings = int(os.getenv("RESULTS_MIN_RATINGS_COMMON", "5"))
-    common_min_unique = int(os.getenv("RESULTS_MIN_UNIQUE_RATERS_COMMON", "4"))
+    common_min_ratings = int(RESULTS_MIN_RATINGS_COMMON)
+    common_min_unique = int(RESULTS_MIN_UNIQUE_RATERS_COMMON)
 
     # City/Country
-    city_min_ratings = int(os.getenv("RESULTS_MIN_RATINGS_CITY", "10"))
-    city_min_unique = int(os.getenv("RESULTS_MIN_UNIQUE_RATERS_CITY", "6"))
+    city_min_ratings = int(RESULTS_MIN_RATINGS_CITY)
+    city_min_unique = int(RESULTS_MIN_UNIQUE_RATERS_CITY)
 
-    country_min_ratings = int(os.getenv("RESULTS_MIN_RATINGS_COUNTRY", "25"))
-    country_min_unique = int(os.getenv("RESULTS_MIN_UNIQUE_RATERS_COUNTRY", "12"))
+    country_min_ratings = int(RESULTS_MIN_RATINGS_COUNTRY)
+    country_min_unique = int(RESULTS_MIN_UNIQUE_RATERS_COUNTRY)
 
     # Tags are stricter
-    tag_min_ratings = int(os.getenv("RESULTS_MIN_RATINGS_TAG", "20"))
-    tag_min_unique = int(os.getenv("RESULTS_MIN_UNIQUE_RATERS_TAG", "10"))
+    tag_min_ratings = int(RESULTS_MIN_RATINGS_TAG)
+    tag_min_unique = int(RESULTS_MIN_UNIQUE_RATERS_TAG)
 
     st = (scope_type or "").strip().lower()
 
