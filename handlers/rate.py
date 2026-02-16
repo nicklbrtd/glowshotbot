@@ -3077,7 +3077,14 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
         data = await state.get_data()
         photo_id = data.get("rate_current_photo_id")
         if not photo_id:
-            raise SkipHandler
+            user = await get_user_by_tg_id(message.from_user.id)
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            if user is not None:
+                await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+            return
         if should_throttle(message.from_user.id, "rate:skip", 0.6):
             try:
                 await message.delete()
@@ -3120,7 +3127,14 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     photo_id = data.get("rate_current_photo_id")
     if not photo_id:
-        raise SkipHandler
+        user = await get_user_by_tg_id(message.from_user.id)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        if user is not None:
+            await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
+        return
 
     if should_throttle(message.from_user.id, "rate:score", 0.4):
         try:
