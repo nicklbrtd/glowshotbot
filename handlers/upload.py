@@ -862,6 +862,10 @@ def build_upload_wizard_kb(*, back_to: str = "menu") -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+# Backward-compat alias for old typo name.
+buxild_upload_wizard_kb = build_upload_wizard_kb
+
+
 async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
     """Унифицированное получение пользователя.
 
