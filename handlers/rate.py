@@ -959,7 +959,6 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
     if msg_id is None:
         msg_id = ui_state.get("rate_kb_msg_id")
     banner_id = ui_state.get("banner_msg_id")
-    screen_id = ui_state.get("screen_msg_id")
 
     # Сбрасываем идентификаторы клавиатуры сразу (клавиатура убирается)
     data["rate_kb_msg_id"] = None
@@ -1016,7 +1015,7 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
         bot,
         chat_id,
         keep,
-        [msg_id, banner_id, screen_id],
+        [msg_id, banner_id],
         reason="remove_reply_kb:dedupe",
     )
 
@@ -1682,31 +1681,19 @@ async def show_next_photo_for_rating(
         data["rate_show_details"] = False
         await state.set_data(data)
 
-    # Inline-only rating flow: always hide any reply keyboard remnants.
+    # Inline-only rating flow: hide reply keyboard once per rating session.
     try:
         if state is not None:
-            await _delete_rate_reply_keyboard(bot, chat_id, state)
+            st = await state.get_data()
+            if not bool(st.get("rate_reply_hidden", False)):
+                await _delete_rate_reply_keyboard(bot, chat_id, state)
+                st = await state.get_data()
+                st["rate_reply_hidden"] = True
+                await state.set_data(st)
+            else:
+                await _touch_giraffe_banner(bot, chat_id, viewer_tg_id)
         else:
-            new_id = await ensure_giraffe_banner(
-                bot,
-                chat_id,
-                viewer_tg_id,
-                text="🦒",
-                reply_markup=ReplyKeyboardRemove(),
-                force_new=False,
-                reason="show_next_photo:inline_only",
-            )
-            try:
-                ui_state = await get_user_ui_state(chat_id)
-            except Exception:
-                ui_state = {}
-            await _dedupe_banner_messages(
-                bot,
-                chat_id,
-                new_id,
-                [ui_state.get("banner_msg_id"), ui_state.get("rate_kb_msg_id")],
-                reason="show_next_photo:inline_only:dedupe",
-            )
+            await _touch_giraffe_banner(bot, chat_id, viewer_tg_id)
     except Exception:
         # Фоллбек: хотя бы держим баннер
         try:
@@ -2187,11 +2174,6 @@ async def rate_return_to_photo(callback: CallbackQuery, state: FSMContext) -> No
         data["rate_current_photo_id"] = int(photo_id)
         data["rate_show_details"] = False
         await state.set_data(data)
-    except Exception:
-        pass
-
-    try:
-        await _delete_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state)
     except Exception:
         pass
 
@@ -2899,7 +2881,26 @@ async def rate_super_score(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
 
     # Сохраняем обычную оценку 10
-    vote_saved = await add_rating(user["id"], photo_id, value)
+    try:
+        vote_saved = await add_rating(user["id"], photo_id, value)
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="rate_super_score:add_rating",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+        try:
+            await callback.answer("Не удалось сохранить оценку. Попробуй ещё раз.", show_alert=True)
+        except Exception:
+            pass
+        return
     if vote_saved:
         await _consume_author_impression_on_vote(photo, int(user["id"]))
     # И помечаем её как супер-оценку (+5 баллов в статистике)
@@ -3079,7 +3080,26 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
                             pass
 
     # ✅ ВАЖНО: Всегда сохраняем оценку (даже если комментария не было)
-    vote_saved = await add_rating(user["id"], photo_id, value)
+    try:
+        vote_saved = await add_rating(user["id"], photo_id, value)
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="rate_score:add_rating",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+        try:
+            await callback.answer("Не удалось сохранить оценку. Попробуй ещё раз.", show_alert=True)
+        except Exception:
+            pass
+        return
     if vote_saved:
         await _consume_author_impression_on_vote(photo, int(user["id"]))
     # streak: rating counts as daily activity
@@ -3569,7 +3589,26 @@ async def rate_skip(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
 
     # Пропуск реализуем как оценку 0
-    vote_saved = await add_rating(user["id"], photo_id, 0)
+    try:
+        vote_saved = await add_rating(user["id"], photo_id, 0)
+    except Exception as e:
+        try:
+            await log_bot_error(
+                chat_id=callback.message.chat.id if callback.message else None,
+                tg_user_id=callback.from_user.id if callback.from_user else None,
+                handler="rate_skip:add_rating",
+                update_type="callback",
+                error_type=type(e).__name__,
+                error_text=str(e),
+                traceback_text=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+        try:
+            await callback.answer("Не удалось обработать действие. Попробуй ещё раз.", show_alert=True)
+        except Exception:
+            pass
+        return
     if vote_saved:
         await _consume_author_impression_on_vote(photo, int(user["id"]))
     await show_next_photo_for_rating(callback, user["id"], state=state)
@@ -3641,6 +3680,7 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
             data = await state.get_data()
             data["rate_kb_msg_id"] = None
             data["rate_kb_mode"] = "none"
+            data["rate_reply_hidden"] = False
             await state.set_data(data)
             await set_user_rate_kb_msg_id(callback.from_user.id, None)
         except Exception:

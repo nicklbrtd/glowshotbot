@@ -4398,6 +4398,23 @@ async def get_bot_error_logs_count() -> int:
         v = await conn.fetchval("SELECT COUNT(*) FROM bot_error_logs")
     return int(v or 0)
 
+
+async def get_bot_error_log_by_id(log_id: int) -> dict | None:
+    """Return one error log row by id (for admin details view)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM bot_error_logs
+            WHERE id=$1
+            LIMIT 1
+            """,
+            int(log_id),
+        )
+    return dict(row) if row else None
+
+
 async def clear_bot_error_logs() -> None:
     """Полностью очищает таблицу bot_error_logs (для админки)."""
     p = _assert_pool()
@@ -5036,8 +5053,21 @@ async def get_photo_author_tg_id(photo_id: int) -> int | None:
 
 # -------------------- rating flow --------------------
 
-async def _abuse_vote_limit_exceeded(conn: asyncpg.Connection, voter_id: int, author_id: int, day: str) -> bool:
+async def _abuse_vote_limit_exceeded(
+    conn: asyncpg.Connection,
+    voter_id: int,
+    author_id: int,
+    day: date | str,
+) -> bool:
     """Return True if voter already превысил лимит голосов по автору за день, O(1) через daily_author_votes."""
+    day_date: date
+    if isinstance(day, date):
+        day_date = day
+    else:
+        try:
+            day_date = date.fromisoformat(str(day))
+        except Exception:
+            day_date = get_bot_today()
     try:
         from config import ANTI_ABUSE_MAX_VOTES_PER_AUTHOR_PER_DAY as LIMIT
     except Exception:
@@ -5046,14 +5076,14 @@ async def _abuse_vote_limit_exceeded(conn: asyncpg.Connection, voter_id: int, au
         return False
     row = await conn.fetchrow(
         "SELECT cnt FROM daily_author_votes WHERE day=$1 AND voter_id=$2 AND author_id=$3 FOR UPDATE",
-        day,
+        day_date,
         int(voter_id),
         int(author_id),
     )
     if row is None:
         await conn.execute(
             "INSERT INTO daily_author_votes (day, voter_id, author_id, cnt) VALUES ($1,$2,$3,1)",
-            day,
+            day_date,
             int(voter_id),
             int(author_id),
         )
@@ -5063,7 +5093,7 @@ async def _abuse_vote_limit_exceeded(conn: asyncpg.Connection, voter_id: int, au
         return True
     await conn.execute(
         "UPDATE daily_author_votes SET cnt = cnt + 1 WHERE day=$1 AND voter_id=$2 AND author_id=$3",
-        day,
+        day_date,
         int(voter_id),
         int(author_id),
     )
@@ -5163,14 +5193,16 @@ async def next_photo_for_viewer(viewer_user_id: int) -> dict | None:
                 )
                 return photo
 
-    photo = await _pick(True, spend_token=True)
+    # Списание показа происходит при действии пользователя (оценка/дальше),
+    # а не в момент выдачи карточки.
+    photo = await _pick(True, spend_token=False)
     if photo:
         return photo
     # tail без списания кредитов с вероятностью
     from config import MIN_VOTES_FOR_NORMAL_FEED, TAIL_PROBABILITY
     if random.random() <= float(TAIL_PROBABILITY):
         return await _pick(False, spend_token=False, max_votes=int(MIN_VOTES_FOR_NORMAL_FEED))
-    return await _pick(False, spend_token=True)
+    return await _pick(False, spend_token=False)
 
 
 async def get_random_photo_for_rating_rateable(
@@ -6156,7 +6188,7 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> bool:
     p = _assert_pool()
     now_dt = get_bot_now()
     now_iso = get_bot_now_iso()
-    today = today_key()
+    today = get_bot_today()
     async with p.acquire() as conn:
         async with conn.transaction():
             photo_row = await conn.fetchrow(

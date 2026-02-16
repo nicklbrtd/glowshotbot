@@ -16,6 +16,7 @@ from database import (
     get_user_by_tg_id,
     get_bot_error_logs_page,
     get_bot_error_logs_count,
+    get_bot_error_log_by_id,
     clear_bot_error_logs,
     log_bot_error,
 )
@@ -94,6 +95,95 @@ def _tail_text(s: str, limit: int = _MAX_TG_TEXT) -> str:
         return s
     tail = s[-(limit - 4):]
     return "...\n" + tail
+
+
+def _escape_fit(raw: str | None, limit: int) -> str:
+    """Escape HTML and fit to length limit without breaking markup wrappers."""
+    if limit <= 0:
+        return ""
+    src = "" if raw is None else str(raw)
+    if not src:
+        return "—"
+
+    full = html.escape(src)
+    if len(full) <= limit:
+        return full
+
+    # Binary-search on raw slice length so escaped output fits.
+    lo, hi = 0, len(src)
+    best = ""
+    budget = max(1, limit - 3)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = html.escape(src[:mid])
+        if len(cand) <= budget:
+            best = cand
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    if not best:
+        return "..."
+    return best + "..."
+
+
+def _build_log_details_html(row: dict) -> str:
+    created_at = html.escape(_fmt_dt_safe(row.get("created_at")))
+    error_type = html.escape(str(row.get("error_type") or "Error"))
+    handler = html.escape(str(row.get("handler") or "—"))
+    update_type = html.escape(str(row.get("update_type") or "—"))
+    chat_id = row.get("chat_id")
+    tg_user_id = row.get("tg_user_id")
+
+    error_text = _escape_fit(row.get("error_text"), 1200)
+    head = (
+        "🧾 <b>Детали ошибки</b>\n\n"
+        f"ID: <code>{row.get('id')}</code>\n"
+        f"Когда: <b>{created_at}</b>\n"
+        f"Тип: <b>{error_type}</b>\n"
+        f"Хендлер: <code>{handler}</code>\n"
+        f"Update: <code>{update_type}</code>\n"
+        f"chat_id: <code>{chat_id if chat_id is not None else '—'}</code>\n"
+        f"user_id: <code>{tg_user_id if tg_user_id is not None else '—'}</code>\n\n"
+        f"<b>Сообщение</b>\n<code>{error_text}</code>"
+    )
+
+    tb_prefix = "\n\n<b>Traceback</b>\n<code>"
+    tb_suffix = "</code>"
+    tb_budget = _MAX_TG_TEXT - len(head) - len(tb_prefix) - len(tb_suffix)
+    tb_budget = max(64, tb_budget)
+    tb = _escape_fit(row.get("traceback_text"), tb_budget)
+
+    return f"{head}{tb_prefix}{tb}{tb_suffix}"
+
+
+def _build_log_details_plain(row: dict) -> str:
+    created_at = _fmt_dt_safe(row.get("created_at"))
+    error_type = str(row.get("error_type") or "Error")
+    handler = str(row.get("handler") or "—")
+    update_type = str(row.get("update_type") or "—")
+    chat_id = row.get("chat_id")
+    tg_user_id = row.get("tg_user_id")
+    error_text = str(row.get("error_text") or "—")
+    traceback_text = str(row.get("traceback_text") or "—")
+
+    head = (
+        "Детали ошибки\n\n"
+        f"ID: {row.get('id')}\n"
+        f"Когда: {created_at}\n"
+        f"Тип: {error_type}\n"
+        f"Хендлер: {handler}\n"
+        f"Update: {update_type}\n"
+        f"chat_id: {chat_id if chat_id is not None else '—'}\n"
+        f"user_id: {tg_user_id if tg_user_id is not None else '—'}\n\n"
+        f"Сообщение\n{error_text}\n\n"
+        "Traceback\n"
+    )
+
+    tb_budget = max(64, _MAX_TG_TEXT - len(head))
+    if len(traceback_text) > tb_budget:
+        traceback_text = traceback_text[: tb_budget - 3] + "..."
+    return head + traceback_text
 
 
 def _systemd_cmd(limit: int) -> list[str]:
@@ -194,13 +284,13 @@ async def _render_logs_page(page: int) -> tuple[str, InlineKeyboardMarkup]:
 
     kb = InlineKeyboardBuilder()
 
-    # Кнопки "Подробнее" по каждой записи (до 5, чтобы не раздувать клаву)
+    # Кнопки "Подробнее" по каждой записи страницы
     if rows:
-        for r in rows[:5]:
+        for r in rows:
             rid = r.get("id")
             if rid is not None:
                 kb.button(text=f"🔎 #{rid}", callback_data=f"admin:logs:view:{rid}:{page}")
-        kb.adjust(5)
+        kb.adjust(5, 5)
 
     # пагинация
     prev_cb = f"admin:logs:page:{page-1}" if page > 1 else None
@@ -407,14 +497,9 @@ async def admin_logs_view(callback: CallbackQuery):
     except Exception:
         back_page = 1
 
-    # Без отдельной функции get_by_id: ищем в свежих 200
     row = None
     try:
-        recent = await get_bot_error_logs_page(offset=0, limit=200)
-        for r in recent:
-            if int(r.get("id", -1)) == log_id:
-                row = r
-                break
+        row = await get_bot_error_log_by_id(int(log_id))
     except Exception:
         row = None
 
@@ -432,40 +517,18 @@ async def admin_logs_view(callback: CallbackQuery):
         await callback.answer()
         return
 
-    created_at = html.escape(_fmt_dt_safe(row.get("created_at")))
-    error_type = html.escape(str(row.get("error_type") or "Error"))
-    handler = html.escape(str(row.get("handler") or "—"))
-    update_type = html.escape(str(row.get("update_type") or "—"))
-    chat_id = row.get("chat_id")
-    tg_user_id = row.get("tg_user_id")
-
-    error_text = html.escape(_cut_text(row.get("error_text"), 1200))
-    tb = html.escape(_cut_text(row.get("traceback_text"), _MAX_TG_TEXT))
-
-    text = (
-        "🧾 <b>Детали ошибки</b>\n\n"
-        f"ID: <code>{row.get('id')}</code>\n"
-        f"Когда: <b>{created_at}</b>\n"
-        f"Тип: <b>{error_type}</b>\n"
-        f"Хендлер: <code>{handler}</code>\n"
-        f"Update: <code>{update_type}</code>\n"
-        f"chat_id: <code>{chat_id if chat_id is not None else '—'}</code>\n"
-        f"user_id: <code>{tg_user_id if tg_user_id is not None else '—'}</code>\n\n"
-        f"<b>Сообщение</b>\n<code>{error_text}</code>\n\n"
-        f"<b>Traceback</b>\n<code>{tb}</code>"
-    )
+    text = _build_log_details_html(row)
+    plain_text = _build_log_details_plain(row)
 
     try:
         await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     except TelegramBadRequest:
-        # Иногда Telegram ругается на слишком длинный текст даже после обрезки
-        safe_text = _cut_text(text, _MAX_TG_TEXT)
         try:
-            await callback.message.edit_text(safe_text, reply_markup=kb.as_markup(), parse_mode="HTML")
+            await callback.message.edit_text(plain_text, reply_markup=kb.as_markup())
         except Exception:
-            await callback.message.answer(safe_text, reply_markup=kb.as_markup(), parse_mode="HTML")
+            await callback.message.answer(plain_text, reply_markup=kb.as_markup(), disable_notification=True)
     except Exception:
-        await callback.message.answer(_cut_text(text, _MAX_TG_TEXT), reply_markup=kb.as_markup(), parse_mode="HTML")
+        await callback.message.answer(plain_text, reply_markup=kb.as_markup(), disable_notification=True)
 
     await callback.answer()
 
