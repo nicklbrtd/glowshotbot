@@ -1352,6 +1352,14 @@ def build_comment_notification_keyboard() -> InlineKeyboardMarkup:
     return build_viewed_kb(callback_data="comment:seen")
 
 
+def _build_back_to_photo_kb(photo_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Назад", callback_data=f"rate:return:{int(photo_id)}")]
+        ]
+    )
+
+
 def build_referral_thanks_keyboard() -> InlineKeyboardMarkup:
     """
     Кнопка «Спасибо!» для реферальных уведомлений.
@@ -1875,7 +1883,7 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             buttons_row,
-            [InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")],
+            [InlineKeyboardButton(text="Назад", callback_data=f"rate:return:{photo_id}")],
         ]
     )
 
@@ -1953,7 +1961,7 @@ async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
             "Напиши текст комментария к этой фотографии.\n\n"
             "Он появится под работой автора."
         ),
-        reply_markup=None,
+        reply_markup=_build_back_to_photo_kb(photo_id),
     )
     await callback.answer()
 
@@ -2011,7 +2019,7 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
             callback_data=f"rate:report_reason:{reason}:{photo_id}",
         )
     builder.adjust(2)
-    builder.row(InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"))
+    builder.row(InlineKeyboardButton(text="Назад", callback_data=f"rate:return:{photo_id}"))
     kb = builder.as_markup()
 
     await callback.message.edit_caption(
@@ -2077,8 +2085,83 @@ async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None
             "Опиши, что не так с этой фотографией.\n\n"
             "Твой текст увидят модераторы."
         ),
-        reply_markup=None,
+        reply_markup=_build_back_to_photo_kb(photo_id),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rate:return:"))
+async def rate_return_to_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _deny_if_full_banned(callback=callback):
+        return
+    touched = False
+    try:
+        await _touch_giraffe_banner(callback.message.bot, callback.message.chat.id, int(callback.from_user.id))
+        touched = True
+    finally:
+        logger.info(
+            "rate.inline.return_to_photo",
+            extra={
+                "tg_id": callback.from_user.id,
+                "chat_id": callback.message.chat.id,
+                "data": callback.data,
+                "touched": touched,
+            },
+        )
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer()
+        return
+    try:
+        photo_id = int(parts[2])
+    except Exception:
+        await callback.answer()
+        return
+
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+
+    try:
+        await state.set_state(None)
+    except Exception:
+        pass
+    await _clear_rate_comment_draft(state)
+    await _clear_rate_report_draft(state)
+
+    view = await _build_rate_view(photo_id, int(callback.from_user.id), show_details=False)
+    if view is None:
+        await callback.answer("Фото недоступно.", show_alert=True)
+        await show_next_photo_for_rating(callback, int(user["id"]), state=state)
+        return
+
+    caption, kb, is_rateable = view
+    await _edit_rate_message(
+        callback.message,
+        caption=caption,
+        reply_markup=kb,
+        show_caption_above_media=True,
+    )
+
+    try:
+        data = await state.get_data()
+        data["rate_current_photo_id"] = int(photo_id)
+        data["rate_show_details"] = False
+        await state.set_data(data)
+    except Exception:
+        pass
+
+    try:
+        lang = _lang(user)
+        if is_rateable:
+            await _send_rate_reply_keyboard(callback.message.bot, callback.message.chat.id, state, lang)
+        else:
+            await _send_next_only_reply_keyboard(callback.message.bot, callback.message.chat.id, state, lang)
+    except Exception:
+        pass
+
     await callback.answer()
 
 
@@ -2128,6 +2211,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                 chat_id=rate_chat_id,
                 message_id=rate_msg_id,
                 caption="Комментарий не может быть пустым.\n\nНапиши текст комментария.",
+                reply_markup=_build_back_to_photo_kb(int(photo_id)),
                 parse_mode="HTML",
             )
         except TelegramBadRequest as e:
@@ -2147,6 +2231,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
                     "а также рекламировать каналы.\n\n"
                     "Напиши комментарий по самой фотографии <b>без контактов</b>."
                 ),
+                reply_markup=_build_back_to_photo_kb(int(photo_id)),
                 parse_mode="HTML",
             )
         except TelegramBadRequest as e:
@@ -2279,9 +2364,7 @@ async def rate_comment_text(message: Message, state: FSMContext) -> None:
             pass
 
     if not saved:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
-        )
+        kb = _build_back_to_photo_kb(int(photo_id))
         err_txt = "Не удалось сохранить комментарий. Попробуй ещё раз чуть позже."
         if save_error is not None:
             err_txt += f"\n\nПричина: {type(save_error).__name__}: {save_error}"
@@ -2427,6 +2510,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                     "Текст жалобы не может быть пустым.\n\n"
                     "Опиши, что не так с этой фотографией."
                 ),
+                reply_markup=_build_back_to_photo_kb(int(photo_id)),
                 parse_mode="HTML",
             )
         except TelegramBadRequest as e:
@@ -2447,6 +2531,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                     "а также рекламировать каналы.\n\n"
                     "Опиши словами, что именно не так с этой фотографией <b>без контактов</b>."
                 ),
+                reply_markup=_build_back_to_photo_kb(int(photo_id)),
                 parse_mode="HTML",
             )
         except TelegramBadRequest as e:
@@ -2509,9 +2594,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 card=card,
             )
         else:
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
-            )
+            kb = _build_back_to_photo_kb(int(photo_id))
             try:
                 await message.bot.edit_message_text(
                     chat_id=report_chat_id,
@@ -2569,9 +2652,7 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
         except Exception:
             pass
 
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back")]]
-        )
+        kb = _build_back_to_photo_kb(int(photo_id))
         try:
             await message.bot.edit_message_caption(
                 chat_id=report_chat_id,
