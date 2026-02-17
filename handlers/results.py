@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont  # type: ignore[import]
 
 from keyboards.common import HOME, RESULTS, RESULTS_ARCHIVE, build_back_to_menu_kb
 from utils.i18n import t
-from utils.banner import ensure_giraffe_banner
+from utils.banner import sync_giraffe_section_nav
 from utils.time import get_moscow_now, get_moscow_today
 from utils.ui import cleanup_previous_screen, remember_screen
 
@@ -1118,17 +1118,19 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
         state=state,
         exclude_ids={callback.message.message_id},
     )
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(user)
     try:
-        await ensure_giraffe_banner(
+        await sync_giraffe_section_nav(
             callback.message.bot,
             callback.message.chat.id,
             callback.from_user.id,
+            section="results",
+            lang=lang,
             force_new=False,
         )
     except Exception:
         pass
-    user = await get_user_by_tg_id(int(callback.from_user.id))
-    lang = _lang(user)
     kb = build_results_menu_kb(lang)
     latest = await get_latest_daily_results_cache()
     latest_day = latest.get("submit_day") if latest else None
@@ -1138,9 +1140,19 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
         "Также доступен архив итогов по датам.\n\n"
         f"Последняя публикация: <b>{latest_day or 'пока нет'}</b>"
     )
-    shown_msg_id = await _show_text(callback, text, kb)
+    sent = await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text,
+        reply_markup=kb,
+        parse_mode="HTML",
+        disable_notification=True,
+    )
     try:
-        await remember_screen(callback.from_user.id, int(shown_msg_id or callback.message.message_id), state=state)
+        await remember_screen(callback.from_user.id, int(sent.message_id), state=state)
+    except Exception:
+        pass
+    try:
+        await callback.message.delete()
     except Exception:
         pass
     await callback.answer()

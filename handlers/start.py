@@ -7,7 +7,6 @@ from aiogram.types import (
     CallbackQuery,
     LinkPreviewOptions,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -30,7 +29,7 @@ from config import (
     REQUIRED_CHANNEL_LINK,
 )
 from utils.time import is_happy_hour
-from utils.banner import ensure_giraffe_banner
+from utils.banner import ensure_giraffe_banner, sync_giraffe_section_nav
 from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
 
 router = Router()
@@ -130,20 +129,15 @@ async def _send_fresh_menu(
     user_id: int,
     state: FSMContext,
     lang_hint: str | None = None,
+    force_new_banner: bool = False,
 ) -> None:
     """Унифицированная выдача главного меню.
     Сначала отправляем новое меню, затем удаляем старое (если было), чтобы не было пустоты."""
-
-    try:
-        await ensure_giraffe_banner(bot, chat_id, user_id, force_new=False)
-    except Exception:
-        pass
 
     data = await state.get_data()
     prev_menu_id = data.get("menu_msg_id")
     prev_rate_kb_id = data.get("rate_kb_msg_id")
     prev_screen_id = None
-    prev_banner_id = None
     try:
         ui_state = await db.get_user_ui_state(user_id)
         if prev_menu_id is None:
@@ -151,7 +145,6 @@ async def _send_fresh_menu(
         if prev_rate_kb_id is None:
             prev_rate_kb_id = ui_state.get("rate_kb_msg_id")
         prev_screen_id = ui_state.get("screen_msg_id")
-        prev_banner_id = ui_state.get("banner_msg_id")
     except Exception:
         pass
     user = await db.get_user_by_tg_id(user_id)
@@ -222,11 +215,23 @@ async def _send_fresh_menu(
         is_moderator=is_moderator,
         is_premium=is_premium,
     )
-    # Сообщение меню без дополнительных inline‑кнопок, с reply‑клавиатурой сразу
+    try:
+        await ensure_giraffe_banner(
+            bot,
+            chat_id,
+            user_id,
+            text="🦒",
+            reply_markup=main_kb,
+            force_new=force_new_banner,
+            send_if_missing=True,
+            reason="main_menu",
+        )
+    except Exception:
+        pass
+    # Reply-клавиатура применяется на баннере «🦒», здесь отправляем только текст меню.
     sent = await bot.send_message(
         chat_id=chat_id,
         text=menu_text,
-        reply_markup=main_kb,
         disable_notification=True,
         link_preview_options=NO_PREVIEW,
         parse_mode="HTML",
@@ -628,6 +633,8 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             pass
         await state.set_data(data)
 
+    lang = _pick_lang(u, getattr(message.from_user, "language_code", None))
+
     if key == "menu":
         await _send_fresh_menu(
             bot=message.bot,
@@ -635,14 +642,47 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             user_id=message.from_user.id,
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
+            force_new_banner=True,
         )
     elif key == "myphoto":
+        await sync_giraffe_section_nav(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            section="myphoto",
+            lang=lang,
+            force_new=False,
+        )
         await my_photo_menu(pseudo_cb, state)
     elif key == "rate":
+        await sync_giraffe_section_nav(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            section="rate",
+            lang=lang,
+            force_new=False,
+        )
         await rate_root(pseudo_cb, state=state, replace_message=True)
     elif key == "profile":
+        await sync_giraffe_section_nav(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            section="profile",
+            lang=lang,
+            force_new=True,
+        )
         await profile_menu(pseudo_cb, state)
     elif key == "results":
+        await sync_giraffe_section_nav(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            section="results",
+            lang=lang,
+            force_new=False,
+        )
         await results_menu(pseudo_cb, state)
 
     # После успешного перехода удаляем сообщение пользователя и старое меню
@@ -722,6 +762,7 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             user_id=message.from_user.id,
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
+            force_new_banner=True,
         )
 
         # Убираем сам /start, чтобы не плодить сообщения
@@ -855,6 +896,7 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             user_id=message.from_user.id,
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
+            force_new_banner=True,
         )
         # при включённом режиме обновления показываем уведомление один раз, но не блокируем
         try:

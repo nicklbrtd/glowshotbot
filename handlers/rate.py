@@ -75,7 +75,7 @@ from config import (
     RATE_ONES_DAILY_HARD_CAP,
     RATE_ONES_DAILY_RATIO,
 )
-from utils.banner import ensure_giraffe_banner
+from utils.banner import ensure_giraffe_banner, sync_giraffe_section_nav
 from utils.registration_guard import require_user_name
 
 
@@ -1715,7 +1715,14 @@ async def show_next_photo_for_rating(
     except Exception:
         # Фоллбек: хотя бы держим баннер
         try:
-            await ensure_giraffe_banner(bot, chat_id, viewer_tg_id, force_new=False)
+            await ensure_giraffe_banner(
+                bot,
+                chat_id,
+                viewer_tg_id,
+                force_new=False,
+                send_if_missing=False,
+                reason="rate_show_next:fallback_touch",
+            )
         except Exception:
             pass
 
@@ -3710,6 +3717,18 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
         if user is None:
             await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
         return
+    lang = _lang(user)
+    try:
+        await sync_giraffe_section_nav(
+            callback.message.bot,
+            callback.message.chat.id,
+            callback.from_user.id,
+            section="rate",
+            lang=lang,
+            force_new=False,
+        )
+    except Exception:
+        pass
 
     if state is not None:
         try:

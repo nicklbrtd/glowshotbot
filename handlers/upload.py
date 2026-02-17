@@ -11,7 +11,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from utils.i18n import t
-from utils.banner import ensure_giraffe_banner
+from utils.banner import sync_giraffe_section_nav
 from utils.registration_guard import require_user_name
 from utils.antispam import should_throttle
 from keyboards.common import HOME
@@ -1412,11 +1412,14 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     if not (user.get("name") or "").strip():
         if not await require_user_name(callback):
             return
+    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
     try:
-        await ensure_giraffe_banner(
+        await sync_giraffe_section_nav(
             callback.message.bot,
             callback.message.chat.id,
             callback.from_user.id,
+            section="myphoto",
+            lang=lang,
             force_new=False,
         )
     except Exception:

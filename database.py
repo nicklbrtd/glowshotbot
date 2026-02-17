@@ -649,7 +649,7 @@ async def get_user_ui_state(tg_id: int) -> dict:
         await _ensure_ui_state_table(conn)
         row = await conn.fetchrow(
             """
-            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_tutorial_seen, update_notice_seen_ver
+            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_tutorial_seen, update_notice_seen_ver, updated_at
             FROM user_ui_state
             WHERE tg_id=$1
             """,
@@ -663,6 +663,7 @@ async def get_user_ui_state(tg_id: int) -> dict:
                 "banner_msg_id": None,
                 "rate_tutorial_seen": False,
                 "update_notice_seen_ver": 0,
+                "updated_at": None,
             }
         d = dict(row)
         d.setdefault("update_notice_seen_ver", 0)

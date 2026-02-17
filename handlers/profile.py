@@ -1,7 +1,7 @@
 from aiogram import Router, F
 import html
 from utils.i18n import t
-from utils.banner import ensure_giraffe_banner
+from utils.banner import sync_giraffe_section_nav
 from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -650,12 +650,15 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
         return
+    lang = _get_lang(user)
     try:
-        await ensure_giraffe_banner(
+        await sync_giraffe_section_nav(
             callback.message.bot,
             callback.message.chat.id,
             callback.from_user.id,
-            force_new=False,
+            section="profile",
+            lang=lang,
+            force_new=True,
         )
     except Exception:
         pass
@@ -732,6 +735,19 @@ async def profile_back_to_profile(callback: CallbackQuery):
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
         return
+
+    lang = _get_lang(user)
+    try:
+        await sync_giraffe_section_nav(
+            callback.message.bot,
+            callback.message.chat.id,
+            callback.from_user.id,
+            section="profile",
+            lang=lang,
+            force_new=True,
+        )
+    except Exception:
+        pass
 
     text, markup = await build_profile_view(user)
 

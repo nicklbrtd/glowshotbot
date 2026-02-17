@@ -62,8 +62,46 @@ def build_main_menu(
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
-        one_time_keyboard=True,
-        selective=True,
+        one_time_keyboard=False,
+        selective=False,
+    )
+
+
+def build_section_menu(
+    section: str,
+    *,
+    lang: str = "ru",
+) -> ReplyKeyboardMarkup:
+    """
+    Навигационная reply-клавиатура для внутренних разделов.
+    section: profile | myphoto | rate | results
+    """
+    myphoto = t("kb.main.myphoto.filled", lang)
+    rate = t("kb.main.rate", lang)
+    results = t("kb.main.results", lang)
+    profile = t("kb.main.profile", lang)
+    menu = t("kb.back_to_menu", lang)
+
+    section_key = (section or "").strip().lower()
+    layout: list[list[str]]
+
+    if section_key == "profile":
+        layout = [[myphoto, rate], [results, menu]]
+    elif section_key == "myphoto":
+        layout = [[menu, rate], [results, profile]]
+    elif section_key == "rate":
+        layout = [[myphoto, menu], [results, profile]]
+    elif section_key == "results":
+        layout = [[myphoto, rate], [menu, profile]]
+    else:
+        layout = [[myphoto, rate], [results, profile]]
+
+    keyboard = [[KeyboardButton(text=cell) for cell in row] for row in layout]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=False,
     )
 
 
