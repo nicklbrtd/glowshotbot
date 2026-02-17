@@ -162,6 +162,11 @@ def apply_text_watermark(
     if not image_bytes or not text:
         return image_bytes
 
+    # Some fallback fonts may miss rare glyphs and render squares/tofu.
+    # Normalize to widely supported alternatives.
+    text = str(text).replace("Ⓒ", "©")
+    text = text.replace("™", "TM")
+
     try:
         composed, src_format = _render_rgba_with_watermark(
             image_bytes,
