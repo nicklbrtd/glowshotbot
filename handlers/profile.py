@@ -658,7 +658,6 @@ async def profile_menu(callback: CallbackQuery, state: FSMContext):
             callback.from_user.id,
             section="profile",
             lang=lang,
-            force_new=True,
         )
     except Exception:
         pass
@@ -744,7 +743,6 @@ async def profile_back_to_profile(callback: CallbackQuery):
             callback.from_user.id,
             section="profile",
             lang=lang,
-            force_new=True,
         )
     except Exception:
         pass

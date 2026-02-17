@@ -984,7 +984,6 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
             int(chat_id),
             section="rate",
             lang=lang,
-            force_new=False,
         )
     except Exception:
         pass
@@ -1116,7 +1115,6 @@ async def _show_rate_block_banner(
                 int(chat_id),
                 section="rate",
                 lang=lang,
-                force_new=False,
             )
         except Exception:
             pass
@@ -3657,7 +3655,6 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
             callback.from_user.id,
             section="rate",
             lang=lang,
-            force_new=False,
         )
     except Exception:
         pass

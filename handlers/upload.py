@@ -1420,7 +1420,6 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
             callback.from_user.id,
             section="myphoto",
             lang=lang,
-            force_new=False,
         )
     except Exception:
         pass

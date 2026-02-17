@@ -1,13 +1,10 @@
 import logging
-from datetime import datetime
 
 from aiogram import Bot
 from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 
 from database import get_user_ui_state, set_user_banner_msg_id
-from keyboards.common import build_section_menu
-from utils.time import get_moscow_today
 
 
 logger = logging.getLogger(__name__)
@@ -212,35 +209,17 @@ async def sync_giraffe_section_nav(
     *,
     section: str,
     lang: str = "ru",
-    force_new: bool = False,
 ) -> int | None:
     """
-    Обновить навигационную reply-клавиатуру для текущего раздела и удержать один баннер «🦒».
+    Для внутренних разделов: скрыть reply-клавиатуру и удержать один баннер «🦒».
     """
-    # Если пользователь вернулся в другой день — обновляем баннер полностью.
-    if not force_new:
-        try:
-            ui_state = await get_user_ui_state(int(tg_id))
-            updated_at_raw = ui_state.get("updated_at")
-            if updated_at_raw:
-                updated_at = (
-                    updated_at_raw
-                    if isinstance(updated_at_raw, datetime)
-                    else datetime.fromisoformat(str(updated_at_raw))
-                )
-                if str(updated_at.date()) != str(get_moscow_today()):
-                    force_new = True
-        except Exception:
-            pass
-
-    kb = build_section_menu(section=section, lang=lang)
     return await ensure_giraffe_banner(
         bot=bot,
         chat_id=chat_id,
         tg_id=tg_id,
         text="🦒",
-        reply_markup=kb,
-        force_new=force_new,
+        reply_markup=ReplyKeyboardRemove(),
+        force_new=False,
         send_if_missing=True,
-        reason=f"section_nav:{section}",
+        reason=f"section_hide_kb:{section}",
     )

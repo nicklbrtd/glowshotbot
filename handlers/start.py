@@ -130,7 +130,6 @@ async def _send_fresh_menu(
     user_id: int,
     state: FSMContext,
     lang_hint: str | None = None,
-    force_new_banner: bool = False,
 ) -> None:
     """Унифицированная выдача главного меню.
     Сначала отправляем новое меню, затем удаляем старое (если было), чтобы не было пустоты."""
@@ -223,7 +222,7 @@ async def _send_fresh_menu(
             user_id,
             text="🦒",
             reply_markup=main_kb,
-            force_new=force_new_banner,
+            force_new=True,
             send_if_missing=True,
             reason="main_menu",
         )
@@ -656,7 +655,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             user_id=message.from_user.id,
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
-            force_new_banner=True,
         )
     elif key == "myphoto":
         await sync_giraffe_section_nav(
@@ -665,7 +663,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             message.from_user.id,
             section="myphoto",
             lang=lang,
-            force_new=False,
         )
         await my_photo_menu(pseudo_cb, state)
     elif key == "rate":
@@ -675,7 +672,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             message.from_user.id,
             section="rate",
             lang=lang,
-            force_new=False,
         )
         await rate_root(pseudo_cb, state=state, replace_message=True)
     elif key == "profile":
@@ -685,7 +681,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             message.from_user.id,
             section="profile",
             lang=lang,
-            force_new=True,
         )
         await profile_menu(pseudo_cb, state)
     elif key == "results":
@@ -695,7 +690,6 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             message.from_user.id,
             section="results",
             lang=lang,
-            force_new=False,
         )
         await results_menu(pseudo_cb, state)
 
@@ -776,7 +770,6 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             user_id=message.from_user.id,
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
-            force_new_banner=True,
         )
 
         # Убираем сам /start, чтобы не плодить сообщения
@@ -910,7 +903,6 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             user_id=message.from_user.id,
             state=state,
             lang_hint=getattr(message.from_user, "language_code", None),
-            force_new_banner=True,
         )
         # при включённом режиме обновления показываем уведомление один раз, но не блокируем
         try:

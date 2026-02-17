@@ -1127,7 +1127,6 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
             callback.from_user.id,
             section="results",
             lang=lang,
-            force_new=False,
         )
     except Exception:
         pass
