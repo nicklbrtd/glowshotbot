@@ -142,6 +142,23 @@ async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> N
         pass
 
 
+async def _hide_reply_keyboard_once(bot, chat_id: int) -> None:
+    """Скрыть reply-клавиатуру без видимого сообщения в чате."""
+    try:
+        tmp = await bot.send_message(
+            chat_id=chat_id,
+            text="\u2060",
+            reply_markup=ReplyKeyboardRemove(),
+            disable_notification=True,
+        )
+    except Exception:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
+    except Exception:
+        pass
+
+
 async def _send_fresh_menu(
     *,
     bot,
@@ -678,14 +695,16 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
 
     pseudo_cb = _MessageAsCallback(message)
     # При переходе в разделы — удаляем текущее меню, чтобы не мешало
-    if key != "menu" and current_menu_id:
-        await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
-        data["menu_msg_id"] = None
-        try:
-            await db.set_user_menu_msg_id(message.from_user.id, None)
-        except Exception:
-            pass
-        await state.set_data(data)
+    if key != "menu":
+        await _hide_reply_keyboard_once(message.bot, message.chat.id)
+        if current_menu_id:
+            await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
+            data["menu_msg_id"] = None
+            try:
+                await db.set_user_menu_msg_id(message.from_user.id, None)
+            except Exception:
+                pass
+            await state.set_data(data)
 
     if key == "menu":
         await _send_fresh_menu(
