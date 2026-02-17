@@ -106,6 +106,193 @@ async def _edit_or_replace_text(
         return None
 
 
+def _upload_processing_error_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:open"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+async def _edit_or_replace_progress_message(
+    *,
+    bot,
+    chat_id: int,
+    message_id: int | None,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    prefer_caption: bool = False,
+) -> tuple[int | None, bool]:
+    """
+    Обновляет один progress-экран.
+    prefer_caption=True: сначала пробуем edit_caption (для сообщения с фото).
+    """
+    if message_id:
+        if prefer_caption:
+            try:
+                await bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                    caption=text,
+                    reply_markup=reply_markup,
+                )
+                return int(message_id), True
+            except Exception:
+                pass
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                    text=text,
+                    reply_markup=reply_markup,
+                )
+                return int(message_id), False
+            except Exception:
+                pass
+        else:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                    text=text,
+                    reply_markup=reply_markup,
+                )
+                return int(message_id), False
+            except Exception:
+                pass
+            try:
+                await bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                    caption=text,
+                    reply_markup=reply_markup,
+                )
+                return int(message_id), True
+            except Exception:
+                pass
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(message_id))
+        except Exception:
+            pass
+
+    try:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            disable_notification=True,
+        )
+        return int(sent.message_id), False
+    except Exception:
+        return None, False
+
+
+async def _replace_or_send_progress_photo(
+    *,
+    bot,
+    chat_id: int,
+    message_id: int | None,
+    image_bytes: bytes,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> tuple[int | None, str | None, bool]:
+    """
+    Подменяет медиа в текущем progress-сообщении (или пересоздаёт одно сообщение при фоллбэке).
+    Возвращает: (message_id, public_file_id, is_photo_message).
+    """
+    payload = BufferedInputFile(image_bytes, filename="watermarked.jpg")
+    if message_id:
+        try:
+            edited = await bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=int(message_id),
+                media=InputMediaPhoto(media=payload, caption=caption),
+                reply_markup=reply_markup,
+            )
+            if isinstance(edited, Message) and edited.photo:
+                return int(message_id), str(edited.photo[-1].file_id), True
+        except Exception:
+            pass
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(message_id))
+        except Exception:
+            pass
+
+    try:
+        sent = await bot.send_photo(
+            chat_id=chat_id,
+            photo=BufferedInputFile(image_bytes, filename="watermarked.jpg"),
+            caption=caption,
+            reply_markup=reply_markup,
+            disable_notification=True,
+        )
+        file_id = str(sent.photo[-1].file_id) if sent.photo else None
+        return int(sent.message_id), file_id, True
+    except Exception:
+        return None, None, False
+
+
+async def _download_telegram_photo_bytes(bot, file_id: str) -> bytes:
+    f = await bot.get_file(str(file_id))
+    out = io.BytesIO()
+    await bot.download_file(f.file_path, destination=out)
+    return out.getvalue()
+
+
+async def _set_upload_progress(
+    *,
+    state: FSMContext,
+    bot,
+    chat_id: int,
+    message_id: int | None,
+    text: str,
+    is_photo_message: bool,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> tuple[int | None, bool]:
+    msg_id, is_photo = await _edit_or_replace_progress_message(
+        bot=bot,
+        chat_id=int(chat_id),
+        message_id=message_id,
+        text=text,
+        reply_markup=reply_markup,
+        prefer_caption=bool(is_photo_message),
+    )
+    if msg_id is not None:
+        await state.update_data(
+            upload_msg_id=int(msg_id),
+            upload_chat_id=int(chat_id),
+            upload_is_photo=bool(is_photo),
+            upload_progress_msg_id=int(msg_id),
+            upload_progress_is_photo=bool(is_photo),
+        )
+    return msg_id, is_photo
+
+
+async def _show_upload_processing_error(
+    *,
+    state: FSMContext,
+    bot,
+    chat_id: int,
+    message_id: int | None,
+    is_photo_message: bool,
+    text: str = "❌ Не получилось загрузить фото. Попробуй ещё раз.",
+) -> None:
+    await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=int(chat_id),
+        message_id=message_id,
+        text=text,
+        is_photo_message=bool(is_photo_message),
+        reply_markup=_upload_processing_error_kb(),
+    )
+    try:
+        await state.clear()
+    except Exception:
+        pass
+
+
 async def _accept_image_for_upload(message: Message, state: FSMContext, source: str = "photo") -> None:
     """
     Унифицированная обработка входящего изображения (photo или document).
@@ -125,11 +312,14 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
         return
 
     photo_bytes = None
-    file_id_to_save = None
-    converted = False
+    file_id_to_preview = None
+    file_id_to_process = None
     if source == "photo":
-        file_id_to_save = message.photo[-1].file_id
+        file_id_to_preview = message.photo[-1].file_id
+        file_id_to_process = file_id_to_preview
     else:
+        if message.document:
+            file_id_to_process = str(message.document.file_id)
         try:
             buf = await message.bot.download(message.document)
             raw_bytes = buf.read()
@@ -140,7 +330,6 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
                 out = io.BytesIO()
                 img.save(out, format="JPEG", quality=95, subsampling=0, optimize=True)
                 photo_bytes = out.getvalue()
-                converted = True
             except Exception:
                 # если не смогли конвертировать — используем как есть, может пройти
                 photo_bytes = raw_bytes
@@ -154,11 +343,16 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
             sent_photo = await message.bot.send_photo(
                 chat_id=upload_chat_id,
                 photo=BufferedInputFile(photo_bytes, filename="upload.jpg"),
-                caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
+                caption=(
+                    "Фотография получена ✅\n\n"
+                    "Теперь напиши название этой работы.\n"
+                    "<b>Поменять название после загрузки нельзя.</b>\n\n"
+                    "Для максимального качества можно отправлять фото как файл (JPEG/PNG)."
+                ),
                 reply_markup=build_upload_wizard_kb(back_to="photo"),
                 disable_notification=True,
             )
-            file_id_to_save = sent_photo.photo[-1].file_id if sent_photo and sent_photo.photo else file_id_to_save
+            file_id_to_preview = sent_photo.photo[-1].file_id if sent_photo and sent_photo.photo else file_id_to_preview
         else:
             # Заменяем старое служебное сообщение на новое с фотографией
             try:
@@ -167,8 +361,13 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
                 pass
             sent_photo = await message.bot.send_photo(
                 chat_id=upload_chat_id,
-                photo=file_id_to_save,
-                caption="Фотография получена ✅\n\nТеперь напиши название этой работы.\n<b>Поменять название после загрузки нельзя.</b>\n\n",
+                photo=file_id_to_preview,
+                caption=(
+                    "Фотография получена ✅\n\n"
+                    "Теперь напиши название этой работы.\n"
+                    "<b>Поменять название после загрузки нельзя.</b>\n\n"
+                    "Для максимального качества можно отправлять фото как файл (JPEG/PNG)."
+                ),
                 reply_markup=build_upload_wizard_kb(back_to="photo"),
                 disable_notification=True,
             )
@@ -195,7 +394,7 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
         return
 
     await state.update_data(
-        file_id=file_id_to_save,
+        file_id=file_id_to_process or file_id_to_preview,
         upload_msg_id=sent_photo.message_id,
         upload_chat_id=upload_chat_id,
         upload_is_photo=True,
@@ -3139,13 +3338,12 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     Завершить процесс создания фото: сохранить в БД и показать карточку пользователю.
     event: Message или CallbackQuery
     """
-    # поддерживаем вызов как из callback, так и из message
     if isinstance(event, CallbackQuery):
         bot = event.message.bot
-        fallback_chat_id = event.message.chat.id
+        fallback_chat_id = int(event.message.chat.id)
     else:
         bot = event.bot
-        fallback_chat_id = event.chat.id
+        fallback_chat_id = int(event.chat.id)
 
     data = await state.get_data()
     user_id = data.get("upload_user_id")
@@ -3154,144 +3352,204 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     upload_msg_id = data.get("upload_msg_id")
     upload_chat_id = data.get("upload_chat_id")
 
-    # Basic guards (do not crash on broken state)
+    sent_msg_id: int | None = int(upload_msg_id) if upload_msg_id else None
+    chat_id = int(upload_chat_id or fallback_chat_id)
+    progress_is_photo = bool(data.get("upload_is_photo"))
+
     if not user_id or not file_id or not title:
-        await bot.send_message(
-            chat_id=upload_chat_id or fallback_chat_id,
-            text="Сессия загрузки сбилась. Открой «Моя фотография» и попробуй загрузить заново.",
-            disable_notification=True,
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+            text="❌ Сессия загрузки сбилась. Открой «Моя фотография» и попробуй загрузить заново.",
         )
-        try:
-            await state.clear()
-        except Exception:
-            pass
         return
 
-    chat_id = upload_chat_id or fallback_chat_id
+    sent_msg_id, progress_is_photo = await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=chat_id,
+        message_id=sent_msg_id,
+        text="🖊 Название принято",
+        is_photo_message=progress_is_photo,
+    )
+    if sent_msg_id is None:
+        return
 
-    # Готовим авторский код
-    try:
-        author_code = await ensure_user_author_code(int(event.from_user.id))
-    except Exception:
-        author_code = "GS-UNKNOWN"
-
-    # Временный быстрый путь: не обрабатываем фото, сразу используем оригинальный file_id
-    # TODO: вернуть водяной знак и проверку качества (GlowShot • {author_code}, 2026 All rights Reserved)
-    file_id_public = file_id
-    sent_msg_id: int | None = upload_msg_id or None
-    is_unlimited_actor = False
-    try:
-        actor = await get_user_by_tg_id(int(event.from_user.id))
-        is_unlimited_actor = bool(actor and is_unlimited_upload_user(actor))
-    except Exception:
-        is_unlimited_actor = False
+    tg_id = int(getattr(event.from_user, "id", 0) or 0)
+    actor = await get_user_by_tg_id(tg_id) if tg_id else None
+    is_unlimited_actor = bool(actor and is_unlimited_upload_user(actor))
 
     if not is_unlimited_actor:
         can_upload_now, denied_reason = await check_can_upload_today(int(user_id))
         if not can_upload_now:
-            deny_text = denied_reason or "Сегодня новая публикация недоступна. Завтра можно."
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text=HOME, callback_data="menu:back")]
-                ]
+            await _show_upload_processing_error(
+                state=state,
+                bot=bot,
+                chat_id=chat_id,
+                message_id=sent_msg_id,
+                is_photo_message=progress_is_photo,
+                text=denied_reason or "❌ Сегодня новая публикация недоступна. Завтра можно.",
             )
-            if sent_msg_id:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=sent_msg_id,
-                        text=deny_text,
-                        reply_markup=kb,
-                    )
-                except Exception:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=deny_text,
-                        reply_markup=kb,
-                        disable_notification=True,
-                    )
-            else:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=deny_text,
-                    reply_markup=kb,
-                    disable_notification=True,
-                )
-            await state.clear()
             return
 
-    # Сохраняем фото в БД, handle unique violation
+    try:
+        author_code = await ensure_user_author_code(int(tg_id))
+    except Exception:
+        author_code = "GS-UNKNOWN"
+
+    is_author_user = bool(actor and actor.get("is_author"))
+    try:
+        is_premium_user = await is_user_premium_active(int(tg_id)) if tg_id else False
+    except Exception:
+        is_premium_user = bool(actor and actor.get("is_premium"))
+
+    author_name = ((actor or {}).get("name") or "").strip() or author_code
+    wm_highlight: str | None = None
+    if is_author_user:
+        year_text = str(get_moscow_now().year)
+        watermark_text = f"Ⓒ {year_text} {author_name}. ALL RIGHTS RESERVED"
+        wm_highlight = year_text
+    elif is_premium_user:
+        watermark_text = f"Ⓒ {author_code} · GlowShot™"
+    else:
+        watermark_text = f"GlowShot™ · {author_code}"
+
+    sent_msg_id, progress_is_photo = await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=chat_id,
+        message_id=sent_msg_id,
+        text="🎨 Рисуем водяной знак…",
+        is_photo_message=progress_is_photo,
+    )
+    if sent_msg_id is None:
+        return
+
+    try:
+        original_bytes = await _download_telegram_photo_bytes(bot, str(file_id))
+    except Exception:
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+        )
+        return
+
+    watermarked_bytes = apply_text_watermark(
+        original_bytes,
+        watermark_text,
+        highlight_text=wm_highlight,
+        max_side=4096,
+    )
+    if not watermarked_bytes:
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+        )
+        return
+
+    sent_msg_id, file_id_public, progress_is_photo = await _replace_or_send_progress_photo(
+        bot=bot,
+        chat_id=chat_id,
+        message_id=sent_msg_id,
+        image_bytes=watermarked_bytes,
+        caption="☁️ Загружаем фото…",
+    )
+    if sent_msg_id is None or not file_id_public:
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+        )
+        return
+    await state.update_data(
+        upload_msg_id=int(sent_msg_id),
+        upload_chat_id=int(chat_id),
+        upload_is_photo=True,
+        upload_progress_msg_id=int(sent_msg_id),
+        upload_progress_is_photo=True,
+    )
+
+    sent_msg_id, progress_is_photo = await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=chat_id,
+        message_id=sent_msg_id,
+        text="📦 Сохраняем и добавляем в ленту…",
+        is_photo_message=True,
+    )
+    if sent_msg_id is None:
+        return
+
     try:
         photo_id = await create_today_photo(
             user_id=user_id,
-            file_id=file_id_public or file_id,
-            file_id_public=file_id_public or file_id,
+            file_id=file_id_public,
+            file_id_public=file_id_public,
             file_id_original=file_id,
             title=title,
         )
-
-        # За каждую публикацию: +2 credits.
         try:
             await add_credits(int(user_id), 2)
         except Exception:
             pass
-
-        # 🔥 streak: successful upload counts as activity
         try:
-            tg_id = int(event.from_user.id)
-            await streak_record_action_by_tg_id(tg_id, "upload")
+            if tg_id:
+                await streak_record_action_by_tg_id(tg_id, "upload")
         except Exception:
-            # Never break upload flow because of streak
             pass
-
     except UniqueViolationError:
-        text = "Ты уже загружал(а) фотографию сегодня. Новая публикация будет доступна завтра."
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=HOME, callback_data="menu:back")]
-            ]
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+            text="❌ Ты уже загружал(а) фотографию сегодня. Новая публикация будет доступна завтра.",
         )
-        if sent_msg_id:
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=sent_msg_id,
-                    text=text,
-                    reply_markup=kb,
-                )
-            except Exception:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=kb,
-                    disable_notification=True,
-                )
-        else:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=kb,
-                disable_notification=True,
-            )
-        await state.clear()
+        return
+    except Exception:
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+        )
         return
 
-    # Get photo object from DB
     photo = await get_photo_by_id(photo_id)
     if not photo:
-        # fallback error
-        await bot.send_message(
-            chat_id=upload_chat_id or fallback_chat_id,
-            text="Ошибка при сохранении фотографии. Попробуйте ещё раз.",
-            disable_notification=True,
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+            text="❌ Ошибка при сохранении фотографии. Попробуй ещё раз.",
         )
-        await state.clear()
         return
 
-    # Финальная карточка: стараемся НЕ плодить сообщения.
-    caption = await build_my_photo_main_text(photo)
+    sent_msg_id, progress_is_photo = await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=chat_id,
+        message_id=sent_msg_id,
+        text="🏁 Готово! Фото участвует в оценивании",
+        is_photo_message=True,
+    )
 
-    # Контекст навигации и лимитов
+    caption = await build_my_photo_main_text(photo)
     try:
         active_photos_after = await get_active_photos_for_user(int(user_id), limit=2)
         active_photos_after = sorted(active_photos_after, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
@@ -3305,22 +3563,9 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     nav_prev = current_idx > 0
     nav_next = current_idx < len(photo_ids_after) - 1
 
-    actor = None
-    is_premium_user = False
-    try:
-        if hasattr(event, "from_user") and getattr(event.from_user, "id", None):
-            is_premium_user = await is_user_premium_active(int(event.from_user.id))
-    except Exception:
-        is_premium_user = False
     lang = "ru"
-    try:
-        if hasattr(event, "from_user") and getattr(event.from_user, "id", None):
-            actor = await get_user_by_tg_id(int(event.from_user.id))
-            if actor:
-                lang = (actor.get("lang") or "ru").split("-")[0]
-    except Exception:
-        lang = "ru"
-        actor = None
+    if actor:
+        lang = (actor.get("lang") or "ru").split("-")[0]
 
     can_upload_today = True
     if actor and not is_unlimited_upload_user(actor):
@@ -3337,22 +3582,17 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         lang=lang,
     )
 
-    # Обновляем отправленную ватермаркнутую карточку
     final_msg_id: int | None = None
-
-    try:
-        if sent_msg_id:
-            await bot.edit_message_caption(
-                chat_id=chat_id,
-                message_id=sent_msg_id,
-                caption=caption,
-                reply_markup=kb,
-            )
-            await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
-            final_msg_id = sent_msg_id
-        else:
-            raise ValueError("no message to edit")
-    except Exception:
+    if sent_msg_id:
+        final_msg_id = await _edit_or_replace_caption_with_photo(
+            bot=bot,
+            chat_id=chat_id,
+            message_id=int(sent_msg_id),
+            file_id=_photo_public_id(photo),
+            caption=caption,
+            reply_markup=kb,
+        )
+    else:
         sent_photo = await bot.send_photo(
             chat_id=chat_id,
             photo=_photo_public_id(photo),
@@ -3360,10 +3600,11 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             reply_markup=kb,
             disable_notification=True,
         )
-        await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
-        final_msg_id = sent_photo.message_id
+        final_msg_id = int(sent_photo.message_id)
+
+    await _store_photo_message_id(state, int(final_msg_id), photo_id=photo["id"])
+
     await state.clear()
-    # Сохраняем контекст навигации после очистки мастера
     await state.update_data(
         myphoto_ids=photo_ids_after,
         myphoto_current_idx=current_idx,
@@ -3373,8 +3614,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         myphoto_locked_ids=[],
     )
     try:
-        if final_msg_id and hasattr(event, "from_user") and getattr(event.from_user, "id", None):
-            await remember_screen(int(event.from_user.id), int(final_msg_id), state=state)
+        if final_msg_id and tg_id:
+            await remember_screen(int(tg_id), int(final_msg_id), state=state)
     except Exception:
         pass
-    return
