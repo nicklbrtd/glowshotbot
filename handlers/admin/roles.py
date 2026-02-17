@@ -7,6 +7,7 @@ from __future__ import annotations
 # • модераторы
 # • помощники
 # • поддержка
+# • авторы
 #
 # Файл самодостаточный: не зависит от admin.py.
 
@@ -28,9 +29,11 @@ from database import (
     get_moderators,
     get_helpers,
     get_support_users,
+    get_authors,
     set_user_moderator_by_tg_id,
     set_user_helper_by_tg_id,
     set_user_support_by_tg_id,
+    set_user_author_status_by_tg_id,
 )
 
 from .common import (
@@ -108,6 +111,7 @@ def build_roles_menu_kb() -> InlineKeyboardMarkup:
     kb.button(text="🛡 Модераторы", callback_data="admin:roles:moderator")
     kb.button(text="🤝 Помощники", callback_data="admin:roles:helper")
     kb.button(text="👨‍💻 Поддержка", callback_data="admin:roles:support")
+    kb.button(text="🧑‍🎨 Авторы", callback_data="admin:roles:author")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
     kb.adjust(1)
     return kb.as_markup()
@@ -225,6 +229,12 @@ ROLE_CONFIG = {
         "get_list": get_support_users,  # -> list[int]
         "set_func": set_user_support_by_tg_id,
     },
+    "author": {
+        "title": "Авторы",
+        "name_single": "автора",
+        "get_list": get_authors,  # -> list[int]
+        "set_func": set_user_author_status_by_tg_id,
+    },
 }
 
 
@@ -246,6 +256,7 @@ async def admin_roles_menu(callback: CallbackQuery, state: FSMContext):
         "• 🛡 Модераторы — следят за контентом и жалобами\n"
         "• 🤝 Помощники — помогают с ручными задачами, тестами и проверками\n"
         "• 👨‍💻 Поддержка — отвечают пользователям в саппорт-боте\n"
+        "• 🧑‍🎨 Авторы — подтверждённые авторы с авторским статусом\n"
         "Выбери роль ниже."
     )
 

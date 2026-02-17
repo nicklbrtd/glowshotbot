@@ -309,6 +309,7 @@ EN = {
     "kb.admin.users": "🙍‍♂️ Users",
     "kb.admin.logs": "🧾 Logs",
     "kb.admin.premium": "💎 Premium",
+    "kb.admin.credits": "💳 Credits",
     "kb.admin.settings": "⚙️ Settings",
 
     # Rate section buttons

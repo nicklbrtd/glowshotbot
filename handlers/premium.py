@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest
 from datetime import datetime, timedelta
 
 from utils.time import get_moscow_now
@@ -14,10 +15,53 @@ from database import get_user_premium_status, is_user_premium_active
 from utils.i18n import t
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import html
+from utils.ui import remember_screen
 
 router = Router(name="premium")
 
 _PREMIUM_EXPIRY_CACHE: dict[int, str] = {}
+
+
+async def _safe_edit_or_send(
+    callback: CallbackQuery,
+    *,
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+    parse_mode: str = "HTML",
+) -> None:
+    """Edit current message; if it no longer exists, send a fresh screen."""
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        return
+    except TelegramBadRequest as e:
+        msg = str(e).lower()
+        if "message is not modified" in msg:
+            return
+        recoverable = (
+            "message to edit not found" in msg
+            or "message can't be edited" in msg
+            or "there is no text in the message to edit" in msg
+        )
+        if not recoverable:
+            raise
+    except Exception:
+        pass
+
+    sent = await callback.message.bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+        disable_notification=True,
+    )
+    try:
+        await remember_screen(callback.from_user.id, sent.message_id)
+    except Exception:
+        pass
 
 
 def _get_lang(user: object | None) -> str:
@@ -186,8 +230,9 @@ async def premium_expiry_benefits(callback: CallbackQuery):
     lang = _get_lang(user)
     text = await build_premium_benefits_text(lang)
     try:
-        await callback.message.edit_text(
-            text,
+        await _safe_edit_or_send(
+            callback,
+            text=text,
             reply_markup=_build_expiry_benefits_kb(),
             parse_mode="HTML",
         )
@@ -201,8 +246,9 @@ async def premium_expiry_back(callback: CallbackQuery):
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
     try:
-        await callback.message.edit_text(
-            _build_expiry_warning_text(lang),
+        await _safe_edit_or_send(
+            callback,
+            text=_build_expiry_warning_text(lang),
             reply_markup=_build_expiry_warning_kb(),
             parse_mode="HTML",
         )
@@ -298,11 +344,20 @@ async def _render_premium_menu(callback: CallbackQuery, back_cb: str = "menu:pro
             disable_notification=True,
         )
         try:
+            await remember_screen(callback.from_user.id, sent.message_id)
+        except Exception:
+            pass
+        try:
             await callback.message.delete()
         except Exception:
             pass
     else:
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+        await _safe_edit_or_send(
+            callback,
+            text=text,
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML",
+        )
     await callback.answer()
 
 
@@ -333,8 +388,9 @@ async def premium_benefits(callback: CallbackQuery):
     kb.button(text=t("premium.btn.back", lang), callback_data=f"premium:open:{'menu' if back_cb=='menu:back' else 'profile'}")
     kb.adjust(1)
 
-    await callback.message.edit_text(
-        await build_premium_benefits_text(lang),
+    await _safe_edit_or_send(
+        callback,
+        text=await build_premium_benefits_text(lang),
         reply_markup=kb.as_markup(),
         parse_mode="HTML",
     )

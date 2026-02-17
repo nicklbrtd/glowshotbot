@@ -261,6 +261,93 @@ async def add_credits(user_id: int, amount: int = 1) -> dict:
     return await add_credits_on_vote(int(user_id), delta=int(amount), now=get_bot_now())
 
 
+async def admin_add_credits(user_id: int, amount: int) -> dict:
+    """Admin helper: add credits to a user by internal user_id."""
+    delta = int(amount)
+    if delta <= 0:
+        raise ValueError("amount must be positive")
+
+    p = _assert_pool()
+    now_dt = get_bot_now()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        row = await conn.fetchrow(
+            """
+            UPDATE user_stats
+            SET credits = credits + $2,
+                last_active_at = $3
+            WHERE user_id=$1
+            RETURNING credits, show_tokens
+            """,
+            int(user_id),
+            int(delta),
+            now_dt,
+        )
+    return {
+        "credits": int((row or {}).get("credits") or 0),
+        "show_tokens": int((row or {}).get("show_tokens") or 0),
+        "added": int(delta),
+    }
+
+
+async def admin_remove_credits(user_id: int, amount: int) -> dict:
+    """Admin helper: remove credits from a user by internal user_id (not below zero)."""
+    delta = int(amount)
+    if delta <= 0:
+        raise ValueError("amount must be positive")
+
+    p = _assert_pool()
+    now_dt = get_bot_now()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        async with conn.transaction():
+            before_row = await conn.fetchrow(
+                "SELECT credits, show_tokens FROM user_stats WHERE user_id=$1 FOR UPDATE",
+                int(user_id),
+            )
+            before_credits = int((before_row or {}).get("credits") or 0)
+            new_credits = max(0, before_credits - int(delta))
+            row = await conn.fetchrow(
+                """
+                UPDATE user_stats
+                SET credits = $2,
+                    last_active_at = $3
+                WHERE user_id=$1
+                RETURNING credits, show_tokens
+                """,
+                int(user_id),
+                int(new_credits),
+                now_dt,
+            )
+
+    return {
+        "credits": int((row or {}).get("credits") or 0),
+        "show_tokens": int((row or {}).get("show_tokens") or 0),
+        "removed": int(before_credits - new_credits),
+    }
+
+
+async def admin_reset_all_credits() -> int:
+    """Admin helper: reset credits and show tokens for all users."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE user_stats
+            SET credits=0,
+                show_tokens=0,
+                last_active_at=$1
+            WHERE COALESCE(credits,0) <> 0
+               OR COALESCE(show_tokens,0) <> 0
+            """,
+            get_bot_now(),
+        )
+    try:
+        return int(str(res).split()[-1])
+    except Exception:
+        return 0
+
+
 async def consume_credits_on_show(author_user_id: int, *, now: datetime | None = None) -> bool:
     """
     Spend author's credits into show tokens and consume one token per show.
@@ -7564,6 +7651,16 @@ async def get_support_users() -> list[int]:
     async with p.acquire() as conn:
         rows = await conn.fetch(
             "SELECT tg_id FROM users WHERE is_support=1 AND is_deleted=0"
+        )
+    return [int(r["tg_id"]) for r in rows]
+
+
+async def get_authors() -> list[int]:
+    """Telegram IDs of verified authors."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tg_id FROM users WHERE is_author=1 AND is_deleted=0 AND tg_id IS NOT NULL"
         )
     return [int(r["tg_id"]) for r in rows]
 

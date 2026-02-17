@@ -309,6 +309,7 @@ RU = {
     "kb.admin.users": "🙍‍♂️ Пользователи",
     "kb.admin.logs": "🧾 Логи",
     "kb.admin.premium": "💎 Премиум",
+    "kb.admin.credits": "💳 Кредиты",
     "kb.admin.settings": "⚙️ Настройки",
 
     # Rate section buttons
