@@ -9,9 +9,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from datetime import datetime
 from handlers.streak import (
-    get_profile_streak_badge_and_line,
     get_profile_streak_status,
-    toggle_profile_streak_notify_and_status,
 )
 from handlers.premium import _render_premium_menu
 
@@ -23,11 +21,8 @@ from database import (
     update_user_bio,
     update_user_channel_link,
     soft_delete_user,
-    count_photos_by_user,
-    count_active_photos_by_user,
-    get_user_rating_summary,
+    get_user_stats_overview,
     get_user_rank_by_tg_id,
-    get_most_popular_photo_for_user,
     get_user_premium_status,
     is_user_premium_active,
     get_awards_for_user,
@@ -145,6 +140,111 @@ def _credits_line(stats: dict | None) -> str:
     return f"💳 Credits: {credits} (≈ {approx} показов)"
 
 
+def _fmt_avg_stat(v: float | None) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "—"
+
+
+def _profile_status_label(*, premium_active: bool, is_author: bool, lang: str) -> str:
+    if lang == "en":
+        if premium_active and is_author:
+            return "💎 Premium + Author"
+        if premium_active:
+            return "💎 Premium"
+        if is_author:
+            return "✍️ Author"
+        return "🟢 Member"
+
+    if premium_active and is_author:
+        return "💎 Premium + Автор"
+    if premium_active:
+        return "💎 Premium"
+    if is_author:
+        return "✍️ Автор"
+    return "🟢 Участник"
+
+
+def _build_profile_stats_lines(
+    *,
+    stats: dict | None,
+    premium_active: bool,
+    is_author: bool,
+    lang: str,
+) -> list[str]:
+    s = stats or {}
+    votes_given = int(s.get("votes_given") or 0)
+    photos_uploaded = int(s.get("photos_uploaded") or 0)
+    my_avg_score = _fmt_avg_stat(s.get("my_avg_score"))
+    best_rank = s.get("best_rank")
+    my_votes_total = int(s.get("my_votes_total") or 0)
+    my_views_total = int(s.get("my_views_total") or 0)
+    credits = int(s.get("credits") or 0)
+
+    best_rank_text = f"#{int(best_rank)}" if best_rank is not None else "—"
+    status_text = _profile_status_label(premium_active=premium_active, is_author=is_author, lang=lang)
+
+    if lang == "en":
+        lines = [
+            "👤 Your stats",
+            f"🗳 Votes given: {votes_given}",
+            f"📸 Photos published: {photos_uploaded}",
+            f"⭐ Avg score of your photos: {my_avg_score}",
+            f"🏆 Best place: {best_rank_text}",
+            f"💳 Credits now: {credits}",
+            f"📌 Status: {status_text}",
+        ]
+        if my_votes_total > 0:
+            lines.append(f"📊 Votes on your photos: {my_votes_total}")
+        if my_views_total > 0:
+            lines.append(f"👁 Views of your photos: {my_views_total}")
+    else:
+        lines = [
+            "👤 Твоя статистика",
+            f"🗳 Оценок поставлено: {votes_given}",
+            f"📸 Фото опубликовано: {photos_uploaded}",
+            f"⭐ Средняя оценка твоих фото: {my_avg_score}",
+            f"🏆 Лучшее место: {best_rank_text}",
+            f"💳 Кредиты сейчас: {credits}",
+            f"📌 Статус: {status_text}",
+        ]
+        if my_votes_total > 0:
+            lines.append(f"📊 Голосов на твои фото: {my_votes_total}")
+        if my_views_total > 0:
+            lines.append(f"👁 Показов твоих фото: {my_views_total}")
+
+    if premium_active:
+        votes_7d = int(s.get("votes_7d") or 0)
+        active_days_7d = int(s.get("active_days_7d") or 0)
+        if lang == "en":
+            lines.append(f"📈 Votes in 7 days: {votes_7d}")
+            lines.append(f"🎯 Active days in 7: {active_days_7d}/7")
+        else:
+            lines.append(f"📈 Оценок за 7 дней: {votes_7d}")
+            lines.append(f"🎯 Активных дней за 7: {active_days_7d}/7")
+
+    if is_author:
+        avg_rank = s.get("avg_rank")
+        top10_count = int(s.get("top10_count") or 0)
+        positive_percent = s.get("positive_percent")
+        avg_rank_text = f"#{_fmt_avg_stat(avg_rank)}" if avg_rank is not None else "—"
+        top10_text = str(top10_count) if top10_count > 0 else "—"
+        positive_text = f"{int(positive_percent)}%" if positive_percent is not None else "—"
+        if lang == "en":
+            lines.append(f"📌 Avg place in finals: {avg_rank_text}")
+            lines.append(f"🏆 Top-10 entries: {top10_text}")
+            lines.append(f"🎯 Positive ratings: {positive_text}")
+        else:
+            lines.append(f"📌 Среднее место в итогах: {avg_rank_text}")
+            lines.append(f"🏆 Попаданий в топ-10: {top10_text}")
+            lines.append(f"🎯 Положительных оценок: {positive_text}")
+
+    return lines
+
+
 def _pick_rated_verb(user: dict | None, lang: str) -> str:
     """Выбирает форму глагола для строки «Ты оценил/оценила»."""
     if lang == "en":
@@ -254,46 +354,16 @@ async def build_profile_view(user: dict):
         except Exception:
             author_code = "—"
 
-    # Реальная статистика по фото
-    total_photos = "—"
-    avg_rating_text = "—"
-    popular_photo_line = "—"
-    weekly_top_position = "—"
-    rated_by_me_text = "—"
-
     user_id = user.get("id")
-    safe_user_id_int = None
-    safe_tg_id_int = None
-    try:
-        safe_user_id_int = int(user_id) if user_id is not None else None
-    except Exception:
-        safe_user_id_int = None
-    try:
-        safe_tg_id_int = int(tg_id) if tg_id is not None else None
-    except Exception:
-        safe_tg_id_int = None
+    safe_user_id_int = int(user_id) if user_id is not None else None
 
     try:
         stats = await get_user_stats(int(user_id))
     except Exception:
         stats = {}
 
-    rater_ids_for_given: list[int] = []
-    for rid in (safe_user_id_int, safe_tg_id_int):
-        if rid is None:
-            continue
-        if rid not in rater_ids_for_given:
-            rater_ids_for_given.append(rid)
-    ratings_given_count: int | None = 0 if rater_ids_for_given else None
-
     lang = _get_lang(user)
-    rated_verb = _pick_rated_verb(user, lang)
-
-    # Streak badge (optional)
-    streak_badge = ""
-    streak_short_line = ""
-    if tg_id:
-        streak_badge, streak_short_line = await get_profile_streak_badge_and_line(int(tg_id))
+    is_author = bool(user.get("is_author"))
 
     # Rank (cached)
     rank_label = None
@@ -357,109 +427,6 @@ async def build_profile_view(user: dict):
     # Полоска прогресса рядом с рангом
     progress_bar = rank_progress_bar(rank_points_value or 0)
     rank_display = f"{rank_label or format_rank(0, lang=lang)} ({progress_bar})"
-
-    if user_id:
-        # Всего загружено фото
-        try:
-            total = await count_photos_by_user(user_id)          # теперь “всё время”
-            active = await count_active_photos_by_user(user_id)  # “сейчас”
-            total_photos = t("profile.stats.total_photos.value", lang, total=total, active=active)
-        except Exception:
-            total_photos = "—"
-
-        # Средняя оценка и количество оценок (умная/байесовская)
-        try:
-            summary = await get_user_rating_summary(user_id) or {}
-            if ratings_given_count is not None:
-                try:
-                    if safe_user_id_int in rater_ids_for_given:
-                        rater_ids_for_given.remove(safe_user_id_int)
-                except Exception:
-                    pass
-                try:
-                    ratings_given_count += int(summary.get("ratings_given") or 0)
-                except Exception:
-                    pass
-
-            cnt = int(summary.get("ratings_received") or 0)
-            avg_raw = summary.get("avg_received")
-            bayes_raw = summary.get("bayes_received")
-
-            avg_val = float(avg_raw) if avg_raw is not None else None
-            bayes_val = float(bayes_raw) if bayes_raw is not None else None
-
-            if cnt <= 0:
-                avg_rating_text = "—"
-            else:
-                # Show only the smart (Bayesian) average
-                if bayes_val is not None:
-                    bayes_str = f"{bayes_val:.2f}".rstrip("0").rstrip(".")
-                    avg_rating_text = t("profile.stats.avg_rating.value", lang, score=bayes_str, count=cnt)
-                elif avg_val is not None:
-                    avg_str = f"{avg_val:.2f}".rstrip("0").rstrip(".")
-                    avg_rating_text = t("profile.stats.avg_rating.value", lang, score=avg_str, count=cnt)
-                else:
-                    avg_rating_text = t("profile.stats.avg_rating.value", lang, score="—", count=cnt)
-        except Exception:
-            avg_rating_text = "—"
-
-        # Самое популярное фото (по умному скору)
-        try:
-            popular = await get_most_popular_photo_for_user(user_id)
-            # Fallback: some legacy rows or callers may require tg_id matching
-            if not popular and tg_id:
-                try:
-                    popular = await get_most_popular_photo_for_user(int(tg_id))
-                except Exception:
-                    popular = None
-
-            if popular:
-                title = html.escape(str(popular.get("title") or "Без названия"), quote=False)
-                is_deleted = bool(popular.get("is_deleted") or 0)
-                if is_deleted:
-                    title = f"{title} (архив)"
-
-                ratings_count = int(popular.get("ratings_count") or 0)
-                avg_pop_raw = popular.get("avg_rating")
-                bayes_pop_raw = popular.get("bayes_score")
-
-                avg_pop = float(avg_pop_raw) if avg_pop_raw is not None else None
-                bayes_pop = float(bayes_pop_raw) if bayes_pop_raw is not None else None
-
-                metric_parts: list[str] = []
-                if bayes_pop is not None:
-                    metric_parts.append(f"{f'{bayes_pop:.2f}'.rstrip('0').rstrip('.')}★")
-                elif avg_pop is not None:
-                    metric_parts.append(f"{f'{avg_pop:.2f}'.rstrip('0').rstrip('.')}★")
-
-                if ratings_count > 0:
-                    metric_parts.append(t("profile.stats.popular_photo.ratings", lang, count=ratings_count))
-                else:
-                    metric_parts.append(t("profile.stats.popular_photo.no_ratings", lang))
-
-                metric = ", ".join(metric_parts) if metric_parts else t("profile.stats.popular_photo.no_ratings", lang)
-                popular_photo_line = f"{title} ({metric})"
-            else:
-                popular_photo_line = "—"
-        except Exception as e:
-            popular_photo_line = "—"
-            print("POPULAR PHOTO ERROR:", repr(e))
-
-        # Позиция в топе недели
-        weekly_top_position = "—"
-
-    # Добавляем оценки, поставленные с альтернативного ID (например, tg_id)
-    if ratings_given_count is not None and rater_ids_for_given:
-        for rid in list(rater_ids_for_given):
-            try:
-                extra_summary = await get_user_rating_summary(rid) or {}
-                ratings_given_count += int(extra_summary.get("ratings_given") or 0)
-            except Exception:
-                pass
-        rater_ids_for_given.clear()
-
-    if ratings_given_count is not None:
-        rated_by_me_text = str(ratings_given_count)
 
     # GlowShot Premium status
     if lang == "en":
@@ -541,7 +508,7 @@ async def build_profile_view(user: dict):
             pass
 
     text_lines = [
-        f"{t('profile.title', lang)}{premium_badge}{streak_badge}",
+        f"{t('profile.title', lang)}{premium_badge}",
         t("profile.name_age", lang, name=name, age=age) if age else t("profile.name", lang, name=name),
         t("profile.rank", lang, rank=rank_display),
         t("profile.gender_line", lang, gender=gender_icon),
@@ -603,15 +570,29 @@ async def build_profile_view(user: dict):
         "",
     ])
 
-    # --- "Свернутая" статистика  ---
-    stats_lines = [
-        t("profile.stats.total_photos", lang, value=total_photos),
-        t("profile.stats.days_in_bot", lang, value=days_in_bot),
-        t("menu.rated_by_me", lang, verb=rated_verb, value=rated_by_me_text),
-        streak_short_line or t("profile.stats.streak", lang, value="—"),
-        t("profile.stats.avg_rating", lang, value=avg_rating_text),
-        t("profile.stats.popular_photo", lang, value=popular_photo_line),
-    ]
+    # --- "Свернутая" статистика: теперь полный блок статистики пользователя ---
+    overview: dict | None = None
+    if safe_user_id_int is not None:
+        try:
+            overview = await get_user_stats_overview(
+                safe_user_id_int,
+                include_premium_metrics=premium_active,
+                include_author_metrics=is_author,
+            )
+        except Exception:
+            overview = None
+
+    stats_lines = _build_profile_stats_lines(
+        stats=overview,
+        premium_active=premium_active,
+        is_author=is_author,
+        lang=lang,
+    )
+    if days_in_bot != "—":
+        if lang == "en":
+            stats_lines.append(f"📅 Days in bot: {days_in_bot}")
+        else:
+            stats_lines.append(f"📅 Дней в боте: {days_in_bot}")
 
     # --- Статистика как цитата ---
     stats_body = "\n".join([html.escape(line, quote=False) for line in stats_lines])
@@ -638,13 +619,12 @@ async def build_profile_view(user: dict):
     kb.row(InlineKeyboardButton(text=author_button, callback_data=author_cb))
     kb.row(
         InlineKeyboardButton(text=t("profile.btn.awards", lang), callback_data="profile:awards"),
-        InlineKeyboardButton(text=t("profile.btn.streak", lang), callback_data="profile:streak"),
+        InlineKeyboardButton(text="📚 Архив", callback_data="myphoto:archive:0"),
     )
     kb.row(
         InlineKeyboardButton(text=t("profile.btn.edit", lang), callback_data="profile:edit"),
         InlineKeyboardButton(text=t("profile.btn.settings", lang), callback_data="profile:settings"),
     )
-    kb.row(InlineKeyboardButton(text="📚 Мой архив", callback_data="myphoto:archive:0"))
     kb.row(
         InlineKeyboardButton(text=t("profile.btn.menu", lang), callback_data="menu:back"),
         InlineKeyboardButton(text=premium_button_text, callback_data="profile:premium"),
@@ -1864,20 +1844,16 @@ def _render_notifications_settings(
 ) -> str:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
-    streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
 
     likes_line = "❤️ " + (t("settings.state.on", lang) if likes_enabled else t("settings.state.off", lang))
     comm_line = "💬 " + (t("settings.state.on", lang) if comments_enabled else t("settings.state.off", lang))
-    streak_line = "🔥 " + (t("settings.state.on", lang) if streak_enabled else t("settings.state.off", lang))
 
     return (
         f"🔔 <b>{t('settings.notifications.title', lang)}</b>\n\n"
         f"{likes_line}\n"
         f"{t('settings.likes.hint', lang)}\n\n"
         f"{comm_line}\n"
-        f"{t('settings.comments.hint', lang)}\n\n"
-        f"{streak_line}\n"
-        f"{t('settings.streak.hint', lang)}"
+        f"{t('settings.comments.hint', lang)}"
     )
 
 
@@ -1888,7 +1864,6 @@ def _kb_notifications_settings(
 ) -> InlineKeyboardMarkup:
     likes_enabled = bool((notify or {}).get("likes_enabled", True))
     comments_enabled = bool((notify or {}).get("comments_enabled", True))
-    streak_enabled = bool((streak_status or {}).get("notify_enabled", True))
 
     kb = InlineKeyboardBuilder()
     kb.button(
@@ -1899,12 +1874,8 @@ def _kb_notifications_settings(
         text=t("settings.btn.comments", lang) + (" ✅" if comments_enabled else " ❌"),
         callback_data="profile:settings:toggle:comments",
     )
-    kb.button(
-        text=t("settings.btn.streak", lang) + (" ✅" if streak_enabled else " ❌"),
-        callback_data="profile:settings:toggle:streak",
-    )
     kb.button(text=t("common.back", lang), callback_data="profile:settings")
-    kb.adjust(2, 1, 1)
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -2129,12 +2100,13 @@ async def profile_settings_toggle_comments(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:settings:toggle:streak")
 async def profile_settings_toggle_streak(callback: CallbackQuery):
+    # Streak controls are hidden in UI; keep callback for old messages.
     user = await get_user_by_tg_id(callback.from_user.id)
     tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
 
-    streak_status = await toggle_profile_streak_notify_and_status(tg_id)
     notify = await get_notify_settings_by_tg_id(tg_id)
     lang = _get_lang(user)
+    streak_status = await get_profile_streak_status(tg_id)
 
     try:
         await callback.message.edit_text(
@@ -2154,7 +2126,7 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
         if "message is not modified" not in str(e):
             raise
 
-    await callback.answer(t("settings.toast.ok", lang))
+    await callback.answer("Streak скрыт в интерфейсе." if lang != "en" else "Streak is hidden in UI.")
 
 
 @router.callback_query(F.data == "profile:delete")

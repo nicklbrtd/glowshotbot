@@ -506,6 +506,51 @@ def build_upload_intro_kb(
     return kb.as_markup()
 
 
+async def _render_upload_intro_screen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+    *,
+    second: bool = False,
+) -> None:
+    """Render upload intro with ideas (used by upload cancel/back flows)."""
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    limit, _current, remaining = await _idea_counters(user, is_premium_user)
+    can_upload_today = True
+    denied_reason = None
+    if not is_unlimited_upload_user(user):
+        can_upload_today, denied_reason = await check_can_upload_today(int(user["id"]))
+
+    idea_title, idea_hint = _get_daily_idea()
+    text = _build_upload_intro_text(
+        user,
+        idea_label="Идея дня",
+        idea_title=idea_title,
+        idea_hint=idea_hint,
+        second=second,
+        publish_notice=(
+            denied_reason or "Публикация сегодня недоступна. Завтра можно."
+            if not can_upload_today
+            else None
+        ),
+    )
+    kb = build_upload_intro_kb(
+        remaining=remaining,
+        limit=limit,
+        idea_cb="myphoto:idea:extra" if second else "myphoto:idea",
+        upload_cb="myphoto:add:extra" if second else "myphoto:add",
+    )
+    sent_id = await _edit_or_replace_text(callback, text, kb)
+    if sent_id is not None:
+        await remember_screen(callback.from_user.id, sent_id, state=state)
+
+
 def _photo_ratings_enabled(photo: dict) -> bool:
     return bool(photo.get("ratings_enabled", True))
 
@@ -646,11 +691,13 @@ EDIT_TAGS: list[tuple[str, str]] = [
 def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="⭐️ Оценки", callback_data=f"myphoto:ratings:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="📷 Устройство", callback_data=f"myphoto:edit:device:{photo_id}"))
-    kb.row(InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"))
     kb.row(
-        InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text="📷 Устройство", callback_data=f"myphoto:edit:device:{photo_id}"),
+        InlineKeyboardButton(text="🏷 Тег", callback_data=f"myphoto:edit:tag:{photo_id}"),
+    )
+    kb.row(
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
     )
     return kb.as_markup()
 
@@ -785,10 +832,9 @@ async def _render_myphoto_edit_menu(
 
 def build_my_photo_stats_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"))
     kb.row(
-        InlineKeyboardButton(text="📚 Архив", callback_data="myphoto:archive:0"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
     )
     return kb.as_markup()
 
@@ -922,18 +968,20 @@ def build_upload_wizard_kb(*, back_to: str = "menu") -> InlineKeyboardMarkup:
     """Inline keyboard for upload wizard.
 
     back_to:
-      - "menu": go back to "Моя фотография" section
-      - "photo": go back to photo step (re-upload)
+      - "menu": photo step (buttons: "В меню" + "Отмена")
+      - "photo": title step (buttons: "В меню" + "Назад")
     """
     kb = InlineKeyboardBuilder()
-
-    kb.button(text="❌ Отмена", callback_data="myphoto:upload_cancel")
     if back_to == "photo":
-        kb.button(text="↩️ К шагу фото", callback_data="myphoto:upload_back")
+        kb.row(
+            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:upload_back"),
+        )
     else:
-        kb.button(text="📸 К разделу", callback_data="myphoto:open")
-    kb.button(text=HOME, callback_data="menu:back")
-    kb.adjust(1, 2)
+        kb.row(
+            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="myphoto:upload_cancel"),
+        )
     return kb.as_markup()
 
 
@@ -1695,7 +1743,10 @@ def _build_my_archive_kb(page: int, has_prev: bool, has_next: bool) -> InlineKey
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:archive:{page+1}"))
     if nav_row:
         kb.row(*nav_row)
-    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    kb.row(
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="profile:open"),
+    )
     return kb.as_markup()
 
 
@@ -2073,14 +2124,19 @@ async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "myphoto:upload_cancel")
 async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
-    """Cancel upload wizard and return to My Photo section."""
+    """Cancel upload wizard and return to upload intro with ideas."""
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    data = await state.get_data()
+    is_extra = bool(data.get("upload_is_extra"))
     try:
         await state.clear()
     except Exception:
         pass
 
-    # Reuse existing My Photo entry handler to render proper UI.
-    await my_photo_menu(callback, state)
+    await _render_upload_intro_screen(callback, state, user, second=is_extra)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "myphoto:upload_back")
@@ -2093,25 +2149,44 @@ async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
         await state.set_state(MyPhotoStates.waiting_photo)
         await state.update_data(file_id=None, title=None)
 
-        text = "Окей, вернёмся назад. Теперь отправь фотографию (1 шт.), которую хочешь выложить."
+        text = "Отправь фотографию (1 шт.), которую хочешь добавить."
         kb = build_upload_wizard_kb(back_to="menu")
+        new_msg_id = int(callback.message.message_id)
+        chat_id = int(callback.message.chat.id)
 
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=kb)
-            else:
-                await callback.message.edit_text(text, reply_markup=kb)
-        except Exception:
+        if callback.message.photo:
             try:
                 await callback.message.delete()
             except Exception:
                 pass
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
+            sent = await callback.message.bot.send_message(
+                chat_id=chat_id,
                 text=text,
                 reply_markup=kb,
                 disable_notification=True,
             )
+            new_msg_id = int(sent.message_id)
+        else:
+            try:
+                await callback.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    pass
+                sent = await callback.message.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
+                new_msg_id = int(sent.message_id)
+
+        await state.update_data(
+            upload_msg_id=new_msg_id,
+            upload_chat_id=chat_id,
+            upload_is_photo=False,
+        )
 
         await callback.answer()
         return
@@ -2225,6 +2300,7 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(MyPhotoStates.waiting_photo)
+    is_extra = (callback.data or "") == "myphoto:add:extra"
     await state.update_data(
         upload_msg_id=callback.message.message_id,
         upload_chat_id=callback.message.chat.id,
@@ -2232,13 +2308,10 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         upload_user_id=user_id,
         file_id=None,
         title=None,
+        upload_is_extra=is_extra,
     )
 
-    is_extra = (callback.data or "") == "myphoto:add:extra"
-    if is_extra:
-        text = "Отправь фотографию (1 шт.), которую хочешь добавить."
-    else:
-        text = "Теперь отправь фотографию (1 шт.), которую хочешь выложить."
+    text = "Отправь фотографию (1 шт.), которую хочешь добавить."
     kb = build_upload_wizard_kb(back_to="menu")
 
     sent_msg_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
@@ -2430,10 +2503,10 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
     )
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Да, удалить", callback_data=f"myphoto:delete_confirm:{photo_id}")
-    kb.button(text="❌ Отмена", callback_data=f"myphoto:delete_cancel:{photo_id}")
-    kb.button(text=HOME, callback_data="menu:back")
-    kb.adjust(1)
+    kb.row(
+        InlineKeyboardButton(text="Удалить", callback_data=f"myphoto:delete_confirm:{photo_id}"),
+        InlineKeyboardButton(text="Отмена", callback_data=f"myphoto:delete_cancel:{photo_id}"),
+    )
 
     try:
         if callback.message.photo:

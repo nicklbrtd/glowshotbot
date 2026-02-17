@@ -7111,6 +7111,110 @@ async def get_user_rating_summary(user_id: int) -> dict:
     }
 
 
+async def get_user_stats_overview(
+    user_id: int,
+    *,
+    include_premium_metrics: bool = False,
+    include_author_metrics: bool = False,
+) -> dict:
+    """Compact profile stats overview for the "Моя статистика" screen."""
+    p = _assert_pool()
+    uid = int(user_id)
+    since_7d = get_bot_now() - timedelta(days=7)
+
+    async with p.acquire() as conn:
+        stats_row = await _ensure_user_stats_row(conn, uid)
+        credits = int((stats_row or {}).get("credits") or 0)
+
+        photos_row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*)::int AS photos_uploaded,
+                COALESCE(SUM(votes_count), 0)::int AS my_votes_total,
+                COALESCE(SUM(views_count), 0)::int AS my_views_total,
+                CASE
+                    WHEN COALESCE(SUM(votes_count), 0) > 0
+                        THEN COALESCE(SUM(sum_score), 0)::float / NULLIF(SUM(votes_count), 0)::float
+                    ELSE NULL
+                END AS my_avg_score
+            FROM photos
+            WHERE user_id=$1
+              AND COALESCE(is_deleted,0)=0
+            """,
+            uid,
+        )
+
+        votes_given = await conn.fetchval(
+            "SELECT COUNT(*)::int FROM votes WHERE voter_id=$1",
+            uid,
+        )
+
+        ranks_row = await conn.fetchrow(
+            """
+            SELECT
+                MIN(rr.final_rank)::int AS best_rank,
+                AVG(rr.final_rank)::float AS avg_rank,
+                COUNT(*) FILTER (WHERE rr.final_rank <= 10)::int AS top10_count
+            FROM result_ranks rr
+            JOIN photos p ON p.id = rr.photo_id
+            WHERE p.user_id=$1
+            """,
+            uid,
+        )
+
+        votes_7d = 0
+        active_days_7d = 0
+        if include_premium_metrics:
+            v7_row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::int AS votes_7d,
+                    COUNT(DISTINCT (created_at AT TIME ZONE 'Europe/Moscow')::date)::int AS active_days_7d
+                FROM votes
+                WHERE voter_id=$1
+                  AND created_at >= $2
+                """,
+                uid,
+                since_7d,
+            )
+            votes_7d = int((v7_row or {}).get("votes_7d") or 0)
+            active_days_7d = int((v7_row or {}).get("active_days_7d") or 0)
+
+        positive_percent = None
+        if include_author_metrics:
+            pos_row = await conn.fetchrow(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN v.score BETWEEN 6 AND 10 THEN 1 ELSE 0 END), 0)::int AS positive_votes,
+                    COUNT(v.*)::int AS total_votes
+                FROM photos p
+                LEFT JOIN votes v ON v.photo_id = p.id
+                WHERE p.user_id=$1
+                  AND COALESCE(p.is_deleted,0)=0
+                """,
+                uid,
+            )
+            pos_votes = int((pos_row or {}).get("positive_votes") or 0)
+            total_votes = int((pos_row or {}).get("total_votes") or 0)
+            if total_votes > 0:
+                positive_percent = int(round((pos_votes / total_votes) * 100))
+
+    return {
+        "votes_given": int(votes_given or 0),
+        "photos_uploaded": int((photos_row or {}).get("photos_uploaded") or 0),
+        "my_avg_score": float((photos_row or {}).get("my_avg_score")) if (photos_row and photos_row.get("my_avg_score") is not None) else None,
+        "best_rank": int((ranks_row or {}).get("best_rank") or 0) or None,
+        "my_votes_total": int((photos_row or {}).get("my_votes_total") or 0),
+        "my_views_total": int((photos_row or {}).get("my_views_total") or 0),
+        "credits": int(credits),
+        "votes_7d": int(votes_7d),
+        "active_days_7d": int(active_days_7d),
+        "avg_rank": float((ranks_row or {}).get("avg_rank")) if (ranks_row and ranks_row.get("avg_rank") is not None) else None,
+        "top10_count": int((ranks_row or {}).get("top10_count") or 0),
+        "positive_percent": positive_percent,
+    }
+
+
 async def get_most_popular_photo_for_user(user_id: int) -> dict | None:
     """Return user's best photo for profile.
 

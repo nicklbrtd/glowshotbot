@@ -12,24 +12,19 @@ Integration points for other handlers:
 
 from __future__ import annotations
 
-import html
-import traceback
-
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
 from database import (
     get_user_by_tg_id,
+    get_user_stats_overview,
+    is_user_premium_active,
     streak_get_status_by_tg_id,
     streak_rollover_if_needed_by_tg_id,
-    streak_record_action_by_tg_id,
     streak_toggle_notify_by_tg_id,
-    streak_toggle_visibility_by_tg_id,
-    streak_use_freeze_today,
 )
-from keyboards.common import build_back_kb
 from utils.i18n import t
 from config import (
     STREAK_DAILY_RATINGS,
@@ -200,164 +195,187 @@ async def toggle_profile_streak_notify_and_status(tg_id: int) -> dict | None:
 
 @router.callback_query(F.data == "profile:streak")
 async def profile_streak_open(callback: CallbackQuery):
+    await _open_profile_stats(callback)
+
+
+def _stats_screen_kb(lang: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    back_text = "⬅️ Back" if lang == "en" else "⬅️ Назад"
+    home_text = "🏠 Home" if lang == "en" else "🏠 В меню"
+    kb.row(
+        InlineKeyboardButton(text=back_text, callback_data="menu:profile"),
+        InlineKeyboardButton(text=home_text, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def _fmt_avg(v: float | None) -> str:
+    if v is None:
+        return "—"
+    try:
+        return f"{float(v):.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "—"
+
+
+def _status_label(*, premium_active: bool, is_author: bool, lang: str) -> str:
+    if lang == "en":
+        if premium_active and is_author:
+            return "💎 Premium + Author"
+        if premium_active:
+            return "💎 Premium"
+        if is_author:
+            return "✍️ Author"
+        return "🟢 Member"
+
+    if premium_active and is_author:
+        return "💎 Premium + Автор"
+    if premium_active:
+        return "💎 Premium"
+    if is_author:
+        return "✍️ Автор"
+    return "🟢 Участник"
+
+
+def _render_profile_stats_text(stats: dict, *, premium_active: bool, is_author: bool, lang: str) -> str:
+    votes_given = int(stats.get("votes_given") or 0)
+    photos_uploaded = int(stats.get("photos_uploaded") or 0)
+    my_avg_score = stats.get("my_avg_score")
+    best_rank = stats.get("best_rank")
+    my_votes_total = int(stats.get("my_votes_total") or 0)
+    my_views_total = int(stats.get("my_views_total") or 0)
+    credits = int(stats.get("credits") or 0)
+
+    lines: list[str] = []
+    if lang == "en":
+        lines.append("👤 <b>Your Stats</b>")
+        lines.append("")
+        lines.append(f"🗳 Votes given: <b>{votes_given}</b>")
+        lines.append(f"📸 Photos published: <b>{photos_uploaded}</b>")
+        lines.append(f"⭐ Avg score of your photos: <b>{_fmt_avg(my_avg_score)}</b>")
+        lines.append("")
+        lines.append(f"🏆 Best place: <b>{('#' + str(int(best_rank))) if best_rank is not None else '—'}</b>")
+        if my_votes_total > 0:
+            lines.append(f"📊 Votes on your photos: <b>{my_votes_total}</b>")
+        if my_views_total > 0:
+            lines.append(f"👁 Views of your photos: <b>{my_views_total}</b>")
+        lines.append("")
+        lines.append(f"💳 Credits now: <b>{credits}</b>")
+        lines.append(f"📌 Status: <b>{_status_label(premium_active=premium_active, is_author=is_author, lang=lang)}</b>")
+    else:
+        lines.append("👤 <b>Твоя статистика</b>")
+        lines.append("")
+        lines.append(f"🗳 Оценок поставлено: <b>{votes_given}</b>")
+        lines.append(f"📸 Фото опубликовано: <b>{photos_uploaded}</b>")
+        lines.append(f"⭐ Средняя оценка твоих фото: <b>{_fmt_avg(my_avg_score)}</b>")
+        lines.append("")
+        lines.append(f"🏆 Лучшее место: <b>{('#' + str(int(best_rank))) if best_rank is not None else '—'}</b>")
+        if my_votes_total > 0:
+            lines.append(f"📊 Голосов на твои фото: <b>{my_votes_total}</b>")
+        if my_views_total > 0:
+            lines.append(f"👁 Показов твоих фото: <b>{my_views_total}</b>")
+        lines.append("")
+        lines.append(f"💳 Кредиты сейчас: <b>{credits}</b>")
+        lines.append(f"📌 Статус: <b>{_status_label(premium_active=premium_active, is_author=is_author, lang=lang)}</b>")
+
+    if premium_active:
+        votes_7d = int(stats.get("votes_7d") or 0)
+        active_days_7d = int(stats.get("active_days_7d") or 0)
+        lines.append("")
+        if lang == "en":
+            lines.append(f"📈 Votes in 7 days: <b>{votes_7d}</b>")
+            lines.append(f"🎯 Active days in 7: <b>{active_days_7d}/7</b>")
+        else:
+            lines.append(f"📈 Оценок за 7 дней: <b>{votes_7d}</b>")
+            lines.append(f"🎯 Активных дней за 7: <b>{active_days_7d}/7</b>")
+
+    if is_author:
+        avg_rank = stats.get("avg_rank")
+        top10_count = int(stats.get("top10_count") or 0)
+        positive_percent = stats.get("positive_percent")
+        avg_rank_text = f"#{_fmt_avg(avg_rank)}" if avg_rank is not None else "—"
+        top10_text = str(top10_count) if top10_count > 0 else "—"
+        positive_text = f"{int(positive_percent)}%" if positive_percent is not None else "—"
+
+        lines.append("")
+        if lang == "en":
+            lines.append(f"📌 Avg place in finals: <b>{avg_rank_text}</b>")
+            lines.append(f"🏆 Top-10 entries: <b>{top10_text}</b>")
+            lines.append(f"🎯 Positive ratings: <b>{positive_text}</b>")
+        else:
+            lines.append(f"📌 Среднее место в итогах: <b>{avg_rank_text}</b>")
+            lines.append(f"🏆 Попаданий в топ-10: <b>{top10_text}</b>")
+            lines.append(f"🎯 Положительных оценок: <b>{positive_text}</b>")
+
+    return "\n".join(lines)
+
+
+async def _open_profile_stats(callback: CallbackQuery, *, toast: str | None = None) -> None:
     user = await get_user_by_tg_id(callback.from_user.id)
+    fallback_lang = "ru" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("ru") else "en"
     if user is None:
-        fallback_lang = "ru" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("ru") else "en"
         await callback.answer(t("streak.user_missing", fallback_lang), show_alert=True)
         return
 
-    tg_id = int(user.get("tg_id") or callback.from_user.id)
     lang = _get_lang(user)
+    tg_id = int(user.get("tg_id") or callback.from_user.id)
+    is_author = bool(user.get("is_author"))
+    premium_active = bool(user.get("is_premium"))
+    try:
+        premium_active = premium_active or bool(await is_user_premium_active(int(tg_id)))
+    except Exception:
+        pass
 
     try:
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status, lang)
-        kb = build_streak_kb_from_dict(
-            status,
-            lang,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            toggle_visibility_cb="profile:streak:toggle_visibility",
-            freeze_cb="profile:streak:freeze",
-            back_cb="menu:profile",
+        stats = await get_user_stats_overview(
+            int(user["id"]),
+            include_premium_metrics=premium_active,
+            include_author_metrics=is_author,
         )
+        text = _render_profile_stats_text(stats, premium_active=premium_active, is_author=is_author, lang=lang)
+        kb = _stats_screen_kb(lang)
         try:
             await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 raise
-    except Exception as e:
-        err_name = type(e).__name__
-        err_text = str(e)[:180]
-        print("[PROFILE_STREAK_ERROR]", err_name, err_text)
-        print(traceback.format_exc())
-
-        await callback.message.edit_text(
-            f"{t('streak.error.title', lang)}\n\n"
-            f"{t('streak.error.text', lang)}\n"
-            f"{t('streak.error.err', lang, value=html.escape(err_name + ': ' + err_text))}\n\n"
-            f"{t('streak.error.hint', lang)}",
-            reply_markup=build_back_kb(callback_data="menu:profile", text=t("streak.back_profile", lang)),
-            parse_mode="HTML",
-        )
-
-    await callback.answer()
+    except Exception:
+        err_text = "Не удалось загрузить статистику." if lang != "en" else "Failed to load stats."
+        kb = _stats_screen_kb(lang)
+        try:
+            await callback.message.edit_text(err_text, reply_markup=kb)
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+    finally:
+        if toast:
+            await callback.answer(toast)
+        else:
+            await callback.answer()
 
 
 @router.callback_query(F.data == "profile:streak:refresh")
 async def profile_streak_refresh(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    lang = _get_lang(user)
-    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
-
-    try:
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status, lang)
-        kb = build_streak_kb_from_dict(
-            status,
-            lang,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            toggle_visibility_cb="profile:streak:toggle_visibility",
-            freeze_cb="profile:streak:freeze",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-    finally:
-        await callback.answer(t("streak.toast.refreshed", lang))
+    toast = "Updated" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("en") else "Обновлено"
+    await _open_profile_stats(callback, toast=toast)
 
 
 @router.callback_query(F.data == "profile:streak:toggle_notify")
 async def profile_streak_toggle_notify(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    lang = _get_lang(user)
-    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
-
-    try:
-        await streak_toggle_notify_by_tg_id(int(tg_id))
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status, lang)
-        kb = build_streak_kb_from_dict(
-            status,
-            lang,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            toggle_visibility_cb="profile:streak:toggle_visibility",
-            freeze_cb="profile:streak:freeze",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-    finally:
-        await callback.answer(t("streak.toast.ok", lang))
+    # Streak screen is hidden in UI; keep callback for backward compatibility.
+    toast = "Stats opened" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("en") else "Открыта статистика"
+    await _open_profile_stats(callback, toast=toast)
 
 
 @router.callback_query(F.data == "profile:streak:toggle_visibility")
 async def profile_streak_toggle_visibility(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    lang = _get_lang(user)
-    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
-
-    try:
-        await streak_toggle_visibility_by_tg_id(int(tg_id))
-        status = await load_streak_status_dict(int(tg_id))
-        text = render_streak_text_from_dict(status, lang)
-        kb = build_streak_kb_from_dict(
-            status,
-            lang,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            toggle_visibility_cb="profile:streak:toggle_visibility",
-            freeze_cb="profile:streak:freeze",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-    finally:
-        await callback.answer()
+    # Streak screen is hidden in UI; keep callback for backward compatibility.
+    toast = "Stats opened" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("en") else "Открыта статистика"
+    await _open_profile_stats(callback, toast=toast)
 
 
 @router.callback_query(F.data == "profile:streak:freeze")
 async def profile_streak_freeze(callback: CallbackQuery):
-    user = await get_user_by_tg_id(callback.from_user.id)
-    lang = _get_lang(user)
-    tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
-
-    try:
-        status = await streak_use_freeze_today(int(tg_id))
-        text = render_streak_text_from_dict(status, lang)
-        kb = build_streak_kb_from_dict(
-            status,
-            lang,
-            refresh_cb="profile:streak:refresh",
-            toggle_notify_cb="profile:streak:toggle_notify",
-            toggle_visibility_cb="profile:streak:toggle_visibility",
-            freeze_cb="profile:streak:freeze",
-            back_cb="menu:profile",
-        )
-        try:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-
-        used = bool(status.get("goal_done_today"))
-        if used:
-            await callback.answer("Заморозка применена.")
-        else:
-            await callback.answer("Сегодня уже закрыто или нет заморозок.", show_alert=True)
-    except Exception:
-        try:
-            await callback.answer("Не удалось применить заморозку.", show_alert=True)
-        except Exception:
-            pass
+    # Streak screen is hidden in UI; keep callback for backward compatibility.
+    toast = "Stats opened" if (getattr(callback.from_user, "language_code", "") or "").lower().startswith("en") else "Открыта статистика"
+    await _open_profile_stats(callback, toast=toast)
