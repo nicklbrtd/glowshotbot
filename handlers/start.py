@@ -29,7 +29,7 @@ from config import (
     REQUIRED_CHANNEL_LINK,
 )
 from utils.time import is_happy_hour
-from utils.banner import ensure_giraffe_banner, sync_giraffe_section_nav
+from utils.banner import ensure_giraffe_banner
 from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
 from utils.ui import cleanup_previous_screen
 
@@ -657,40 +657,12 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             lang_hint=getattr(message.from_user, "language_code", None),
         )
     elif key == "myphoto":
-        await sync_giraffe_section_nav(
-            message.bot,
-            message.chat.id,
-            message.from_user.id,
-            section="myphoto",
-            lang=lang,
-        )
         await my_photo_menu(pseudo_cb, state)
     elif key == "rate":
-        await sync_giraffe_section_nav(
-            message.bot,
-            message.chat.id,
-            message.from_user.id,
-            section="rate",
-            lang=lang,
-        )
         await rate_root(pseudo_cb, state=state, replace_message=True)
     elif key == "profile":
-        await sync_giraffe_section_nav(
-            message.bot,
-            message.chat.id,
-            message.from_user.id,
-            section="profile",
-            lang=lang,
-        )
         await profile_menu(pseudo_cb, state)
     elif key == "results":
-        await sync_giraffe_section_nav(
-            message.bot,
-            message.chat.id,
-            message.from_user.id,
-            section="results",
-            lang=lang,
-        )
         await results_menu(pseudo_cb, state)
 
     # После успешного перехода удаляем сообщение пользователя и старое меню

@@ -213,13 +213,29 @@ async def sync_giraffe_section_nav(
     """
     Для внутренних разделов: скрыть reply-клавиатуру и удержать один баннер «🦒».
     """
-    return await ensure_giraffe_banner(
+    # В разделах баннер только редактируем, но не создаём новый.
+    banner_id = await ensure_giraffe_banner(
         bot=bot,
         chat_id=chat_id,
         tg_id=tg_id,
         text="🦒",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=None,
         force_new=False,
-        send_if_missing=True,
-        reason=f"section_hide_kb:{section}",
+        send_if_missing=False,
+        reason=f"section_touch:{section}",
     )
+    # Клавиатуру закрываем отдельным служебным пингом без создания/переноса баннера.
+    try:
+        tmp = await bot.send_message(
+            chat_id=chat_id,
+            text="\u2060",
+            reply_markup=ReplyKeyboardRemove(),
+            disable_notification=True,
+        )
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(tmp.message_id))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return banner_id

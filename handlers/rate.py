@@ -46,6 +46,7 @@ from database import (
     get_notify_settings_by_tg_id,
     increment_likes_daily_for_tg_id,
     get_photo_stats,
+    get_photo_ratings_stats,
     get_moderation_message_for_photo,
     upsert_moderation_message_for_photo,
     get_user_block_status_by_tg_id,
@@ -862,24 +863,11 @@ async def _send_rate_kb_message(
             text=text,
             reply_markup=reply_markup,
             force_new=False,
+            send_if_missing=False,
             reason=f"rate_kb:{mode}",
         )
     except Exception:
         banner_id = None
-
-    if banner_id is None:
-        try:
-            banner_id = await ensure_giraffe_banner(
-                bot,
-                chat_id,
-                chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                force_new=True,
-                reason=f"rate_kb:{mode}:force_new",
-            )
-        except Exception:
-            banner_id = None
 
     if banner_id is None:
         return
@@ -1081,6 +1069,7 @@ async def _show_rate_block_banner(
             text=f"🦒\n\n{text}",
             reply_markup=None,
             force_new=False,
+            send_if_missing=False,
             reason="rate_block",
         )
     except Exception:
@@ -1435,6 +1424,54 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
             return ""
         return f"<blockquote>{escape(text)}</blockquote>"
 
+    def _fmt_score(value: float | int | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return f"{float(value):.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(value)
+
+    def _human_date(value: object) -> str:
+        if not value:
+            return "—"
+        try:
+            if isinstance(value, datetime):
+                dt = value
+            else:
+                raw = str(value).strip()
+                if not raw:
+                    return "—"
+                try:
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except Exception:
+                    dt = datetime.fromisoformat(raw.split("T", 1)[0])
+            return dt.strftime("%d.%m.%Y")
+        except Exception:
+            s = str(value).strip()
+            return s[:10] if s else "—"
+
+    def _human_time_left(value: object) -> str:
+        if not value:
+            return "—"
+        try:
+            if isinstance(value, datetime):
+                dt = value
+            else:
+                dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            now = get_moscow_now()
+            total_sec = int(max(0, dt.timestamp() - now.timestamp()))
+            days = total_sec // 86400
+            hours = (total_sec % 86400) // 3600
+            minutes = (total_sec % 3600) // 60
+            if days > 0:
+                return f"{days}д {hours}ч"
+            if hours > 0:
+                return f"{hours}ч {minutes}м"
+            return f"{max(1, minutes)}м"
+        except Exception:
+            return "—"
+
     title = (photo.get("title") or "").strip() or "Без названия"
 
     # author tg_id
@@ -1499,65 +1536,111 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
         verified_badge = ""
 
     if show_details:
-        # Показ "Еще": скрываем название/параметры, оставляем только детали.
-        if bool(photo.get("has_beta_award")):
-            lines.append("··· Бета-тестер бота ···")
-
-        rating_str = "—"
-        good_cnt = 0
-        bad_cnt = 0
-        rated_users = 0
-        ratings_total = 0
-        published = photo.get("day_key") or ""
-        if published:
-            try:
-                pd = datetime.fromisoformat(published.split("T")[0])
-                published = pd.strftime("%d.%m.%Y")
-            except Exception:
-                published = published
-
-        try:
-            ps = await get_photo_stats(int(photo["id"]))
-            v = ps.get("bayes_score")
-            ratings_total = int(ps.get("ratings_count") or 0)
-            rated_users = int(ps.get("rated_users") or 0)
-            if v is not None:
-                rating_str = f"{float(v):.2f}".rstrip("0").rstrip(".")
-        except Exception:
-            pass
-
-        try:
-            from database import get_photo_ratings_stats  # type: ignore
-            rs = await get_photo_ratings_stats(int(photo["id"]))
-            good_cnt = int(rs.get("good_count") or 0)
-            bad_cnt = int(rs.get("bad_count") or 0)
-        except Exception:
-            pass
-
-        admin_extras: list[str] = []
         try:
             viewer = await get_user_by_tg_id(int(viewer_tg_id))
-            if viewer and (viewer.get("is_admin") or viewer.get("is_moderator")):
-                if username:
-                    admin_extras.append(f"Аккаунт автора: @{username}")
-                created_at = photo.get("created_at") or ""
-                if published:
-                    admin_extras.append(f"Дата публикации: {published}")
-                if created_at:
-                    admin_extras.append(f"created_at: {created_at}")
+        except Exception:
+            viewer = None
+        is_admin_mod = bool(viewer and (viewer.get("is_admin") or viewer.get("is_moderator")))
+        is_author_viewer = bool(viewer and viewer.get("is_author"))
+        viewer_is_premium = False
+        try:
+            viewer_is_premium = await is_user_premium_active(int(viewer_tg_id))
+        except Exception:
+            viewer_is_premium = False
+
+        bayes_score = None
+        raw_avg = None
+        votes_count = 0
+        try:
+            ps = await get_photo_stats(int(photo["id"]))
+            bayes_score = ps.get("bayes_score")
+            raw_avg = ps.get("avg_rating")
+            votes_count = int(ps.get("ratings_count") or 0)
         except Exception:
             pass
 
-        details_lines = [
-            "📊 Детали:",
-            f"Рейтинг: {rating_str}",
-            f"Оценок всего: {ratings_total}",
-            f"Уникальных оценщиков: {rated_users}",
-            f"6–10: {good_cnt} • 1–5: {bad_cnt}",
-            f"Дата публикации: {published or '—'}",
-        ] + admin_extras
+        good_cnt = 0
+        bad_cnt = 0
+        if is_author_viewer or is_admin_mod:
+            try:
+                rs = await get_photo_ratings_stats(int(photo["id"]))
+                good_cnt = int(rs.get("good_count") or 0)
+                bad_cnt = int(rs.get("bad_count") or 0)
+            except Exception:
+                pass
 
-        lines.append(quote("\n".join(details_lines)))
+        reports_count = 0
+        if is_admin_mod:
+            try:
+                rep = await get_photo_report_stats(int(photo["id"]))
+                reports_count = int(rep.get("total") or rep.get("total_all") or 0)
+            except Exception:
+                reports_count = 0
+
+        rating_or_forming = _fmt_score(bayes_score) or "формируется"
+        published_human = _human_date(photo.get("submit_day") or photo.get("day_key") or photo.get("created_at"))
+        created_at_human = _human_date(photo.get("created_at"))
+        time_left_human = _human_time_left(photo.get("expires_at"))
+
+        lines.append(f"📊 <code>{escape(title)}</code>")
+        lines.append("━━━━━━━━━━━━")
+
+        if is_admin_mod:
+            lines.append(f"⭐ Bayes: {rating_or_forming}")
+            raw_avg_s = _fmt_score(raw_avg)
+            if raw_avg_s is not None:
+                lines.append(f"🧮 Raw avg: {raw_avg_s}")
+            lines.append(f"👥 Votes: {votes_count}")
+            if good_cnt > 0 or bad_cnt > 0:
+                lines.append(f"📊 6–10: {good_cnt} | 1–5: {bad_cnt}")
+            lines.append("━━━━━━━━━━━━")
+            author_line = f"👤 Автор: {escape(display_name)}"
+            if username:
+                author_line += f" (@{escape(str(username))})"
+            lines.append(author_line)
+            lines.append(f"🆔 Photo ID: {int(photo.get('id') or 0)}")
+            lines.append(f"🕒 created_at: {created_at_human}")
+            if reports_count > 0:
+                lines.append(f"🚩 Жалобы: {reports_count}")
+            return "\n".join(lines)
+
+        lines.append(f"⭐ Рейтинг: {rating_or_forming}")
+        lines.append(f"👥 Оценок: {votes_count}")
+
+        if is_author_viewer:
+            if good_cnt > 0:
+                lines.append(f"📊 6–10: {good_cnt}")
+            if bad_cnt > 0:
+                lines.append(f"📊 1–5: {bad_cnt}")
+        elif viewer_is_premium:
+            delta_line = None
+            try:
+                if bayes_score is not None and raw_avg is not None:
+                    delta_line = f"📈 Динамика: {float(bayes_score) - float(raw_avg):+0.2f}"
+            except Exception:
+                delta_line = None
+            if delta_line:
+                lines.append(delta_line)
+
+        lines.append("━━━━━━━━━━━━")
+        lines.append(f"📅 Опубликовано: {published_human}")
+        lines.append(f"👤 Автор: {escape(display_name)}")
+        lines.append(f"⏳ До итогов: {time_left_human}")
+
+        if is_author_viewer:
+            lines.append("🎓 Авторский режим")
+        elif viewer_is_premium:
+            potential = None
+            try:
+                if bayes_score is not None and votes_count >= 10 and float(bayes_score) >= 7.5:
+                    potential = "🏆 Потенциал: ТОП-10"
+                elif bayes_score is not None and votes_count >= 6 and float(bayes_score) >= 7.0:
+                    potential = "🏆 Потенциал: Близко к топу"
+            except Exception:
+                potential = None
+            if potential:
+                lines.append(potential)
+
         return "\n".join(lines)
 
     # Обычный режим: название и параметры
