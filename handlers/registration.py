@@ -160,7 +160,7 @@ async def registration_start(callback: CallbackQuery, state: FSMContext):
     prev_reg_msg_id = prev_data.get("reg_msg_id")
 
     prompt = (
-        "Как тебя будут видеть в GlowShot?\n\n"
+        "Как тебя будут видеть в глоушот?\n\n"
         "Это имя будет отображаться над твоими фотографиями\n"
         "и в результатах партий.\n\n"
         "Можно использовать настоящее имя\n"

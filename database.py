@@ -7213,23 +7213,52 @@ async def get_user_stats_overview(
     async with p.acquire() as conn:
         stats_row = await _ensure_user_stats_row(conn, uid)
         credits = int((stats_row or {}).get("credits") or 0)
+        u = await conn.fetchrow(
+            """
+            SELECT id, tg_id
+            FROM users
+            WHERE id=$1 OR tg_id=$1
+            LIMIT 1
+            """,
+            uid,
+        )
+        candidate_user_ids: list[int] = [uid]
+        if u:
+            try:
+                db_uid = int(u.get("id"))
+                if db_uid not in candidate_user_ids:
+                    candidate_user_ids.append(db_uid)
+            except Exception:
+                pass
+            try:
+                db_tg = int(u.get("tg_id"))
+                if db_tg not in candidate_user_ids:
+                    candidate_user_ids.append(db_tg)
+            except Exception:
+                pass
 
         photos_row = await conn.fetchrow(
             """
             SELECT
                 COUNT(*)::int AS photos_uploaded,
-                COALESCE(SUM(votes_count), 0)::int AS my_votes_total,
-                COALESCE(SUM(views_count), 0)::int AS my_views_total,
-                CASE
-                    WHEN COALESCE(SUM(votes_count), 0) > 0
-                        THEN COALESCE(SUM(sum_score), 0)::float / NULLIF(SUM(votes_count), 0)::float
-                    ELSE NULL
-                END AS my_avg_score
+                COALESCE(SUM(votes_count) FILTER (WHERE COALESCE(is_deleted,0)=0), 0)::int AS my_votes_total,
+                COALESCE(SUM(views_count) FILTER (WHERE COALESCE(is_deleted,0)=0), 0)::int AS my_views_total,
+                COALESCE(SUM(sum_score), 0)::float AS rating_sum_all,
+                COALESCE(SUM(votes_count), 0)::float AS rating_votes_all
             FROM photos
-            WHERE user_id=$1
-              AND COALESCE(is_deleted,0)=0
+            WHERE user_id = ANY($1::bigint[])
             """,
-            uid,
+            candidate_user_ids,
+        )
+        global_mean, _ = await _get_global_rating_mean(conn)
+        prior = _bayes_prior_weight()
+        rating_sum_all = float((photos_row or {}).get("rating_sum_all") or 0.0)
+        rating_votes_all = float((photos_row or {}).get("rating_votes_all") or 0.0)
+        my_bayes_score = _bayes_score(
+            sum_values=rating_sum_all,
+            n=rating_votes_all,
+            global_mean=global_mean,
+            prior=prior,
         )
 
         votes_given = await conn.fetchval(
@@ -7245,9 +7274,9 @@ async def get_user_stats_overview(
                 COUNT(*) FILTER (WHERE rr.final_rank <= 10)::int AS top10_count
             FROM result_ranks rr
             JOIN photos p ON p.id = rr.photo_id
-            WHERE p.user_id=$1
+            WHERE p.user_id = ANY($1::bigint[])
             """,
-            uid,
+            candidate_user_ids,
         )
 
         votes_7d = 0
@@ -7277,10 +7306,10 @@ async def get_user_stats_overview(
                     COUNT(v.*)::int AS total_votes
                 FROM photos p
                 LEFT JOIN votes v ON v.photo_id = p.id
-                WHERE p.user_id=$1
+                WHERE p.user_id = ANY($1::bigint[])
                   AND COALESCE(p.is_deleted,0)=0
                 """,
-                uid,
+                candidate_user_ids,
             )
             pos_votes = int((pos_row or {}).get("positive_votes") or 0)
             total_votes = int((pos_row or {}).get("total_votes") or 0)
@@ -7290,7 +7319,7 @@ async def get_user_stats_overview(
     return {
         "votes_given": int(votes_given or 0),
         "photos_uploaded": int((photos_row or {}).get("photos_uploaded") or 0),
-        "my_avg_score": float((photos_row or {}).get("my_avg_score")) if (photos_row and photos_row.get("my_avg_score") is not None) else None,
+        "my_avg_score": float(my_bayes_score) if my_bayes_score is not None else None,
         "best_rank": int((ranks_row or {}).get("best_rank") or 0) or None,
         "my_votes_total": int((photos_row or {}).get("my_votes_total") or 0),
         "my_views_total": int((photos_row or {}).get("my_views_total") or 0),

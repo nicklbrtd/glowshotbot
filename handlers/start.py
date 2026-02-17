@@ -156,10 +156,7 @@ async def _send_fresh_menu(
     # Если у пользователя нет имени — не даём меню, принуждаем регистрацию
     user_name = (user.get("name") or "").strip() if user else ""
     if not user_name:
-        kb = InlineKeyboardBuilder()
-        kb.button(text="Добавить имя", callback_data="auth:start")
-        kb.adjust(1)
-        prompt_text = "Чтобы перейти в этот раздел вам нужно добавить свое имя."
+        prompt_text, prompt_kb = _registration_intro_payload()
 
         sent_msg_id = None
         if prev_menu_id:
@@ -168,7 +165,7 @@ async def _send_fresh_menu(
                     chat_id=chat_id,
                     message_id=int(prev_menu_id),
                     text=prompt_text,
-                    reply_markup=kb.as_markup(),
+                    reply_markup=prompt_kb,
                     parse_mode="HTML",
                 )
                 sent_msg_id = int(prev_menu_id)
@@ -179,7 +176,7 @@ async def _send_fresh_menu(
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=prompt_text,
-                reply_markup=kb.as_markup(),
+                reply_markup=prompt_kb,
                 disable_notification=True,
                 parse_mode="HTML",
             )
@@ -374,6 +371,26 @@ async def _build_dynamic_main_menu(
         has_photo=has_photo,
         has_rate_targets=has_rate_targets,
     )
+
+
+def _registration_intro_payload() -> tuple[str, InlineKeyboardMarkup]:
+    welcome_text = (
+        "Добро пожаловать в GlowShot.\n\n"
+        "Это место, где фотографии живут.\n"
+        "Где каждый кадр оценивают.\n"
+        "Где ты можешь вырасти.\n\n"
+        "Здесь всё просто:\n"
+        "• Публикуешь фото\n"
+        "• Оцениваешь других\n"
+        "• Получаешь оценки на свои\n"
+        "• Попадаешь в итоги дня\n\n"
+        "Чем активнее ты — тем больше тебя видят.\n\n"
+        "Готов начать?"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Начать регистрацию 📸", callback_data="auth:start")
+    kb.adjust(1)
+    return welcome_text, kb.as_markup()
 
 async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, lang: str) -> str:
     """Формирует текст главного меню по новым сценариям."""
@@ -584,10 +601,7 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
     except Exception:
         u = None
     if u is not None and not (u.get("name") or "").strip():
-        kb = InlineKeyboardBuilder()
-        kb.button(text="Добавить имя", callback_data="auth:start")
-        kb.adjust(1)
-        prompt_text = "Чтобы перейти в этот раздел вам нужно добавить свое имя."
+        prompt_text, prompt_kb = _registration_intro_payload()
         try:
             data = await state.get_data()
             menu_msg_id = data.get("menu_msg_id")
@@ -599,14 +613,14 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
                     chat_id=message.chat.id,
                     message_id=int(menu_msg_id),
                     text=prompt_text,
-                    reply_markup=kb.as_markup(),
+                    reply_markup=prompt_kb,
                     parse_mode="HTML",
                 )
             except Exception:
                 try:
                     await message.answer(
                         prompt_text,
-                        reply_markup=kb.as_markup(),
+                        reply_markup=prompt_kb,
                         disable_notification=True,
                     )
                 except Exception:
@@ -615,7 +629,7 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             try:
                 await message.answer(
                     prompt_text,
-                    reply_markup=kb.as_markup(),
+                    reply_markup=prompt_kb,
                     disable_notification=True,
                 )
             except Exception:
@@ -810,28 +824,12 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
             pass
 
         # Приветственный экран для новых пользователей
-        welcome_text = (
-            "Добро пожаловать в глоушот.\n\n"
-            "Это место, где фотографии живут.\n"
-            "Где каждый кадр оценивают.\n"
-            "Где ты можешь вырасти как фотограф.\n\n"
-            "Здесь всё просто:\n"
-            "• Публикуешь фото\n"
-            "• Оцениваешь других\n"
-            "• Получаешь оценки на свои\n"
-            "• Попадаешь в итоги дня\n\n"
-            "Чем активнее ты — тем больше тебя видят.\n\n"
-            "Начнём?"
-        )
-
-        kb = InlineKeyboardBuilder()
-        kb.button(text="Начнём!", callback_data="auth:start")
-        kb.adjust(1)
+        welcome_text, welcome_kb = _registration_intro_payload()
 
         try:
             await message.answer(
                 welcome_text,
-                reply_markup=kb.as_markup(),
+                reply_markup=welcome_kb,
                 disable_notification=True,
                 parse_mode="HTML",
             )
@@ -850,14 +848,13 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
 
     # Если пользователь есть, но имя не заполнено — принуждаем завершить регистрацию
     if not (user.get("name") or "").strip():
-        kb = InlineKeyboardBuilder()
-        kb.button(text="Добавить имя", callback_data="auth:start")
-        kb.adjust(1)
+        welcome_text, welcome_kb = _registration_intro_payload()
         try:
             await message.answer(
-                "Чтобы перейти в этот раздел вам нужно добавить свое имя.",
-                reply_markup=kb.as_markup(),
+                welcome_text,
+                reply_markup=welcome_kb,
                 disable_notification=True,
+                parse_mode="HTML",
             )
         except Exception:
             pass

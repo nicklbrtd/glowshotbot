@@ -252,7 +252,7 @@ def _render_profile_stats_text(stats: dict, *, premium_active: bool, is_author: 
         lines.append("")
         lines.append(f"🗳 Votes given: <b>{votes_given}</b>")
         lines.append(f"📸 Photos published: <b>{photos_uploaded}</b>")
-        lines.append(f"⭐ Avg score of your photos: <b>{_fmt_avg(my_avg_score)}</b>")
+        lines.append(f"⭐ Your rating: <b>{_fmt_avg(my_avg_score)}</b>")
         lines.append("")
         lines.append(f"🏆 Best place: <b>{('#' + str(int(best_rank))) if best_rank is not None else '—'}</b>")
         if my_votes_total > 0:
@@ -267,7 +267,7 @@ def _render_profile_stats_text(stats: dict, *, premium_active: bool, is_author: 
         lines.append("")
         lines.append(f"🗳 Оценок поставлено: <b>{votes_given}</b>")
         lines.append(f"📸 Фото опубликовано: <b>{photos_uploaded}</b>")
-        lines.append(f"⭐ Средняя оценка твоих фото: <b>{_fmt_avg(my_avg_score)}</b>")
+        lines.append(f"⭐ Твой рейтинг: <b>{_fmt_avg(my_avg_score)}</b>")
         lines.append("")
         lines.append(f"🏆 Лучшее место: <b>{('#' + str(int(best_rank))) if best_rank is not None else '—'}</b>")
         if my_votes_total > 0:

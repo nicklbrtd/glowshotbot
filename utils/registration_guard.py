@@ -6,7 +6,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import get_user_by_tg_id, get_user_ui_state
 
 
-def _build_add_name_kb(text: str = "Добавить имя"):
+REGISTRATION_INTRO_TEXT = (
+    "Добро пожаловать в глоушот.\n\n"
+    "Это место, где фотографии живут.\n"
+    "Где каждый кадр оценивают.\n"
+    "Где ты можешь вырасти как фотограф.\n\n"
+    "Здесь всё просто:\n"
+    "• Публикуешь фото\n"
+    "• Оцениваешь других\n"
+    "• Получаешь оценки на свои\n"
+    "• Попадаешь в итоги дня\n\n"
+    "Чем активнее ты — тем больше тебя видят.\n\n"
+    "Начнём?"
+)
+
+
+def _build_add_name_kb(text: str = "Начнём!"):
     kb = InlineKeyboardBuilder()
     kb.button(text=text, callback_data="auth:start")
     kb.adjust(1)
@@ -17,7 +32,7 @@ async def require_user_name(
     event: Message | CallbackQuery,
     *,
     prompt_text: str | None = None,
-    button_text: str = "Добавить имя",
+    button_text: str = "Начать регистрацию 📸",
 ) -> bool:
     """
     Ensure user has a non-empty name.
@@ -28,7 +43,7 @@ async def require_user_name(
     if user and (user.get("name") or "").strip():
         return True
 
-    text = prompt_text or "Чтобы перейти в этот раздел вам нужно добавить свое имя."
+    text = prompt_text or REGISTRATION_INTRO_TEXT
     kb = _build_add_name_kb(button_text)
 
     if isinstance(event, CallbackQuery) and event.message:

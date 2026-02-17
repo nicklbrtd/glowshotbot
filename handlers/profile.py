@@ -49,7 +49,7 @@ from utils.antispam import should_throttle
 from utils.places import validate_city_and_country_full
 from utils.flags import country_to_flag, country_display
 from utils.ranks import rank_from_points, format_rank, RANK_BEGINNER, RANK_AMATEUR, RANK_EXPERT, rank_progress_bar
-from utils.time import get_moscow_now, is_happy_hour
+from utils.time import get_moscow_now
 from utils.ui import cleanup_previous_screen, remember_screen
 
 router = Router()
@@ -132,14 +132,6 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def _credits_line(stats: dict | None) -> str:
-    credits = int((stats or {}).get("credits") or 0)
-    tokens = int((stats or {}).get("show_tokens") or 0)
-    mult = 4 if is_happy_hour() else 2
-    approx = credits * mult + tokens
-    return f"💳 Credits: {credits} (≈ {approx} показов)"
-
-
 def _fmt_avg_stat(v: float | None) -> str:
     if v is None:
         return "—"
@@ -191,7 +183,7 @@ def _build_profile_stats_lines(
         lines = [
             f"🗳 Votes given: {votes_given}",
             f"📸 Photos published: {photos_uploaded}",
-            f"⭐ Avg score of your photos: {my_avg_score}",
+            f"⭐ Your rating: {my_avg_score}",
             f"🏆 Best place: {best_rank_text}",
             f"💳 Credits now: {credits}",
             f"📌 Status: {status_text}",
@@ -204,13 +196,13 @@ def _build_profile_stats_lines(
         lines = [
             f"🗳 Оценок поставлено: {votes_given}",
             f"📸 Фото опубликовано: {photos_uploaded}",
-            f"⭐ Средняя оценка твоих фото: {my_avg_score}",
+            f"⭐ Твой рейтинг: {my_avg_score}",
             f"🏆 Лучшее место: {best_rank_text}",
             f"💳 Кредиты сейчас: {credits}",
             f"📌 Статус: {status_text}",
         ]
         if my_votes_total > 0:
-            lines.append(f"📊 Голосов на твои фото: {my_votes_total}")
+            lines.append(f"📊 Оценок на твои фото: {my_votes_total}")
         if my_views_total > 0:
             lines.append(f"👁 Показов твоих фото: {my_views_total}")
 
@@ -218,11 +210,11 @@ def _build_profile_stats_lines(
         votes_7d = int(s.get("votes_7d") or 0)
         active_days_7d = int(s.get("active_days_7d") or 0)
         if lang == "en":
-            lines.append(f"📈 Votes in 7 days: {votes_7d}")
-            lines.append(f"🎯 Active days in 7: {active_days_7d}/7")
+            lines.append(f"📈 Votes in a week: {votes_7d}")
+            lines.append(f"🎯 Active days: {active_days_7d}/7")
         else:
-            lines.append(f"📈 Оценок за 7 дней: {votes_7d}")
-            lines.append(f"🎯 Активных дней за 7: {active_days_7d}/7")
+            lines.append(f"📈 Оценок за неделю: {votes_7d}")
+            lines.append(f"🎯 Активных дней: {active_days_7d}/7")
 
     if is_author:
         avg_rank = s.get("avg_rank")
@@ -511,7 +503,6 @@ async def build_profile_view(user: dict):
         t("profile.rank", lang, rank=rank_display),
         t("profile.gender_line", lang, gender=gender_icon),
         f"🧾 Код автора: <code>{html.escape(str(author_code), quote=False)}</code>",
-        _credits_line(stats),
     ]
 
     # Локация (опционально + можно скрыть)
