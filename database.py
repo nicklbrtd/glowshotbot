@@ -1749,6 +1749,192 @@ async def get_photo_stats(photo_id: int) -> dict:
     }
 
 
+async def get_photo_stats_snapshot(photo_id: int, *, include_author_metrics: bool = False) -> dict:
+    """Lightweight snapshot for photo stats UI.
+
+    Uses counters from `photos` plus compact indexed aggregates for daily/extra metrics.
+    """
+    p = _assert_pool()
+    now = get_bot_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    async with p.acquire() as conn:
+        photo = await conn.fetchrow(
+            """
+            SELECT
+              p.id,
+              p.user_id,
+              p.submit_day,
+              p.day_key,
+              p.status,
+              p.created_at,
+              p.expires_at,
+              COALESCE(p.avg_score, 0)::float AS avg_score,
+              COALESCE(p.votes_count, 0)::int AS votes_count,
+              COALESCE(p.views_count, 0)::int AS views_total
+            FROM photos p
+            WHERE p.id=$1
+            LIMIT 1
+            """,
+            int(photo_id),
+        )
+        if not photo:
+            return {}
+
+        votes_row = await conn.fetchrow(
+            """
+            SELECT
+              COALESCE(SUM(CASE WHEN score BETWEEN 6 AND 10 THEN 1 ELSE 0 END), 0)::int AS positive_votes,
+              COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0)::int AS votes_today,
+              COUNT(*)::int AS votes_rows
+            FROM votes
+            WHERE photo_id=$1
+            """,
+            int(photo_id),
+            today_start,
+        )
+        positive_votes = int((votes_row or {}).get("positive_votes") or 0)
+        votes_today = int((votes_row or {}).get("votes_today") or 0)
+        votes_rows = int((votes_row or {}).get("votes_rows") or 0)
+
+        # Backward compatibility for old rows where votes mirror could be empty.
+        votes_count = int(photo.get("votes_count") or 0)
+        if votes_count > 0 and votes_rows <= 0:
+            rating_row = await conn.fetchrow(
+                """
+                SELECT
+                  COALESCE(SUM(CASE WHEN value BETWEEN 6 AND 10 THEN 1 ELSE 0 END), 0)::int AS positive_votes
+                FROM ratings
+                WHERE photo_id=$1
+                """,
+                int(photo_id),
+            )
+            if rating_row:
+                positive_votes = int(rating_row.get("positive_votes") or 0)
+
+        comments_count = 0
+        link_clicks = 0
+        if include_author_metrics:
+            comments_count = int(
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM comments WHERE photo_id=$1",
+                    int(photo_id),
+                )
+                or 0
+            )
+            link_clicks = int(
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ratings WHERE photo_id=$1 AND source='link'",
+                    int(photo_id),
+                )
+                or 0
+            )
+
+        status = str(photo.get("status") or "active")
+        submit_day = photo.get("submit_day")
+        day_key = str(photo.get("day_key") or "")
+        rank: int | None = None
+        total_in_party: int | None = None
+
+        if status == "archived":
+            rank_row = await conn.fetchrow(
+                """
+                SELECT
+                  rr.final_rank::int AS rank,
+                  COALESCE(
+                    drc.participants_count::int,
+                    (SELECT COUNT(*)::int FROM result_ranks rr2 WHERE rr2.submit_day=rr.submit_day)
+                  )::int AS total_in_party
+                FROM result_ranks rr
+                LEFT JOIN daily_results_cache drc ON drc.submit_day = rr.submit_day
+                WHERE rr.photo_id=$1
+                ORDER BY rr.submit_day DESC, rr.final_rank ASC
+                LIMIT 1
+                """,
+                int(photo_id),
+            )
+            if rank_row:
+                rank = int(rank_row.get("rank") or 0) or None
+                total_in_party = int(rank_row.get("total_in_party") or 0) or None
+        else:
+            rank_row = await conn.fetchrow(
+                """
+                WITH party AS (
+                    SELECT
+                      p.id,
+                      ROW_NUMBER() OVER (
+                        ORDER BY
+                          COALESCE(p.avg_score, 0) DESC,
+                          COALESCE(p.votes_count, 0) DESC,
+                          p.created_at ASC,
+                          p.id ASC
+                      )::int AS rank,
+                      COUNT(*) OVER ()::int AS total_in_party
+                    FROM photos p
+                    WHERE COALESCE(p.is_deleted,0)=0
+                      AND COALESCE(p.moderation_status,'active') IN ('active','good')
+                      AND COALESCE(p.status,'active')='active'
+                      AND (
+                           ($1::date IS NOT NULL AND p.submit_day=$1::date)
+                        OR ($1::date IS NULL AND p.day_key=$2)
+                      )
+                )
+                SELECT rank, total_in_party
+                FROM party
+                WHERE id=$3
+                LIMIT 1
+                """,
+                submit_day,
+                day_key,
+                int(photo_id),
+            )
+            if rank_row:
+                rank = int(rank_row.get("rank") or 0) or None
+                total_in_party = int(rank_row.get("total_in_party") or 0) or None
+
+    return {
+        "photo_id": int(photo_id),
+        "user_id": int(photo.get("user_id") or 0),
+        "submit_day": photo.get("submit_day"),
+        "day_key": str(photo.get("day_key") or ""),
+        "status": str(photo.get("status") or "active"),
+        "created_at": photo.get("created_at"),
+        "expires_at": photo.get("expires_at"),
+        "avg_score": float(photo.get("avg_score") or 0.0),
+        "votes_count": int(photo.get("votes_count") or 0),
+        "views_total": int(photo.get("views_total") or 0),
+        "positive_votes": int(positive_votes),
+        "votes_today": int(votes_today),
+        "comments_count": int(comments_count),
+        "link_clicks": int(link_clicks),
+        "rank": int(rank) if rank is not None else None,
+        "total_in_party": int(total_in_party) if total_in_party is not None else None,
+    }
+
+
+async def get_user_spend_today_stats(user_id: int) -> dict:
+    """Return today's approximate spend stats for author's shows."""
+    p = _assert_pool()
+    now = get_bot_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    async with p.acquire() as conn:
+        views_today = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM photo_views pv
+            JOIN photos p ON p.id = pv.photo_id
+            WHERE p.user_id=$1
+              AND pv.created_at >= $2
+            """,
+            int(user_id),
+            today_start,
+        )
+    views_today_i = int(views_today or 0)
+    return {
+        "views_today": views_today_i,
+        "credits_spent_today": views_today_i / 2.0,
+    }
+
+
 async def count_super_ratings_for_photo(photo_id: int) -> int:
     p = _assert_pool()
     async with p.acquire() as conn:

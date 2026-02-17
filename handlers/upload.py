@@ -34,13 +34,8 @@ from database import (
     get_latest_photos_for_user,
     get_archived_photos_for_user,
     get_comment_counts_for_photo,
-    get_photo_ratings_stats,
-    count_super_ratings_for_photo,
-    count_comments_for_photo,
-    count_active_users,
-    count_photo_reports_for_photo,
-    get_link_ratings_count_for_photo,
-    get_photo_skip_count_for_photo,
+    get_photo_stats_snapshot,
+    get_user_spend_today_stats,
     get_comments_for_photo_sorted,
     streak_record_action_by_tg_id,
     ensure_user_author_code,
@@ -790,8 +785,9 @@ async def _render_myphoto_edit_menu(
 
 def build_my_photo_stats_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"))
     kb.row(
-        InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"),
+        InlineKeyboardButton(text="📚 Архив", callback_data="myphoto:archive:0"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
     )
     return kb.as_markup()
@@ -805,7 +801,86 @@ def _fmt_avg(v: float | None) -> str:
         return f"{float(v):.2f}".rstrip("0").rstrip(".")
     except Exception:
         return "—"
-    
+
+
+def _parse_dt(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        pass
+    try:
+        if " " in s and "T" not in s:
+            return datetime.fromisoformat(s.replace(" ", "T"))
+    except Exception:
+        pass
+    return None
+
+
+def _fmt_num(v: float | int) -> str:
+    try:
+        return f"{float(v):.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(v)
+
+
+def _hours_alive(created_at: object) -> float:
+    created_dt = _parse_dt(created_at)
+    if not created_dt:
+        return 0.0
+    now = get_moscow_now()
+    if created_dt.tzinfo is None and now.tzinfo is not None:
+        created_dt = created_dt.replace(tzinfo=now.tzinfo)
+    diff_hours = (now - created_dt).total_seconds() / 3600.0
+    return max(diff_hours, 1 / 60)
+
+
+def _format_time_left(expires_at: object) -> str:
+    exp_dt = _parse_dt(expires_at)
+    if not exp_dt:
+        return "—"
+    now = get_moscow_now()
+    if exp_dt.tzinfo is None and now.tzinfo is not None:
+        exp_dt = exp_dt.replace(tzinfo=now.tzinfo)
+    delta = exp_dt - now
+    seconds = int(delta.total_seconds())
+    if seconds <= 0:
+        return "архивируется сейчас"
+
+    minutes = seconds // 60
+    days = minutes // (24 * 60)
+    minutes %= (24 * 60)
+    hours = minutes // 60
+    minutes %= 60
+
+    parts: list[str] = []
+    if days > 0:
+        parts.append(f"{days} {_plural_ru(days, 'день', 'дня', 'дней')}")
+    if hours > 0:
+        parts.append(f"{hours} {_plural_ru(hours, 'час', 'часа', 'часов')}")
+    if minutes > 0 and days == 0:
+        parts.append(f"{minutes} {_plural_ru(minutes, 'минута', 'минуты', 'минут')}")
+    return " ".join(parts) if parts else "меньше минуты"
+
+
+def _compute_photo_status(*, rank: int | None, votes_count: int, avg_score: float) -> str:
+    if rank is not None and rank <= 10:
+        return "🔥 В зоне топа"
+    if rank is not None and rank <= 15:
+        return "📌 Близко к топу"
+    if votes_count < 10:
+        return "🌱 Набирает оценки"
+    if avg_score < 6:
+        return "📉 Нужны оценки"
+    return "✅ Стабильная позиция"
 
 def _esc_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1710,145 +1785,129 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
             is_premium_user = await is_user_premium_active(int(user["tg_id"]))
     except Exception:
         is_premium_user = False
+    is_author_user = bool(user.get("is_author"))
 
-    # Base stats
     try:
-        r = await get_photo_ratings_stats(photo_id)
+        snapshot = await get_photo_stats_snapshot(photo_id, include_author_metrics=is_author_user)
     except Exception:
+        snapshot = {}
+    if not snapshot:
         await callback.answer("⚠️ Не удалось загрузить статистику. Попробуй ещё раз через пару секунд.", show_alert=True)
         return
-    ratings_count = int(r.get("ratings_count") or 0)
-    last_rating = r.get("last_rating")
-    # Показываем Bayes-рейтинг вместо средней
-    smart_score = None
-    try:
-        smart_score = (await get_photo_stats(photo_id)).get("bayes_score")
-    except Exception:
-        smart_score = None
 
-    super_count = 0
-    try:
-        super_count = await count_super_ratings_for_photo(photo_id)
-    except Exception:
-        super_count = 0
+    votes_count = int(snapshot.get("votes_count") or 0)
+    avg_score = float(snapshot.get("avg_score") or 0.0)
+    rank = snapshot.get("rank")
+    total_in_party = snapshot.get("total_in_party")
+    views_total = int(snapshot.get("views_total") or 0)
+    votes_today = int(snapshot.get("votes_today") or 0)
+    positive_votes = int(snapshot.get("positive_votes") or 0)
+    positive_percent = int(round((positive_votes / votes_count) * 100)) if votes_count > 0 else 0
 
-    comments_count = 0
-    try:
-        comments_count = await count_comments_for_photo(photo_id)
-    except Exception:
-        comments_count = 0
+    life_hours = _hours_alive(snapshot.get("created_at") or photo.get("created_at"))
+    votes_per_hour = (votes_count / life_hours) if life_hours > 0 else 0.0
 
-    link_ratings = 0
-    try:
-        link_ratings = await get_link_ratings_count_for_photo(photo_id)
-    except Exception:
-        link_ratings = 0
+    rank_str = "—"
+    if rank is not None and total_in_party is not None:
+        rank_str = f"{int(rank)} / {int(total_in_party)}"
+    elif rank is not None:
+        rank_str = f"{int(rank)} / —"
+    elif total_in_party is not None:
+        rank_str = f"— / {int(total_in_party)}"
+
+    status_raw = str(snapshot.get("status") or photo.get("status") or "active").lower()
+    computed_status = _compute_photo_status(rank=rank, votes_count=votes_count, avg_score=avg_score)
+    time_left = _format_time_left(snapshot.get("expires_at") or photo.get("expires_at"))
 
     lines: list[str] = []
-    lines.append("📊 <b>Статистика твоей фотографии:</b>")
-    lines.append("")
-    lines.append(f"⭐️ Оценок всего: <b>{ratings_count}</b>")
-    lines.append(f"🕒 Последняя оценка: <b>{last_rating if last_rating is not None else '—'}</b>")
-    lines.append(f"📈 Рейтинг: <b>{_fmt_avg(smart_score)}</b>")
-    lines.append(f"🔥 Супер-оценок: <b>{super_count}</b>")
-    lines.append(f"💬 Комментариев: <b>{comments_count}</b>")
-    lines.append(f"🔗⭐️ Оценки по ссылке: <b>{link_ratings}</b>")
-
-    lines.append("")
-
-    if is_premium_user:
-        # Rank in today's top based on results_v2 cache
-        dk = str(photo.get("day_key") or "")
-        if dk:
-            try:
-                top_items = await _get_daily_top_photos_v2(dk, limit=50)
-                place_now = None
-                for i, p in enumerate(top_items, start=1):
-                    if int(p.get("id") or 0) == int(photo_id):
-                        place_now = i
-                        break
-            except Exception:
-                place_now = None
-        else:
-            place_now = None
-
-        total_users = 0
-        try:
-            total_users = await count_active_users()
-        except Exception:
-            total_users = 0
-
-        rated_users = int(r.get("rated_users") or 0)
-        not_rated = max(total_users - rated_users - 1, 0)
-
-        good_cnt = int(r.get("good_count") or 0)  # >= 6
-        bad_cnt = int(r.get("bad_count") or 0)    # <= 5
-
-        skip_cnt = 0
-        try:
-            skip_cnt = await get_photo_skip_count_for_photo(photo_id)
-        except Exception:
-            skip_cnt = 0
-
-        reports_cnt = 0
-        try:
-            reports_cnt = await count_photo_reports_for_photo(photo_id)
-        except Exception:
-            reports_cnt = 0
-
-        # Activity days based on day_key (Moscow date)
-        activity_days = "—"
-        try:
-            dk = (photo.get("day_key") or "").strip()
-            if dk:
-                d = datetime.fromisoformat(dk).date()
-                days = (get_moscow_now().date() - d).days + 1
-                if days < 1:
-                    days = 1
-                activity_days = str(days)
-        except Exception:
-            activity_days = "—"
-
-        lines.append(f"🏆 Место в топ (сейчас): <b>{place_now if place_now is not None else '—'}</b>")
-        lines.append(f"🙈 Не оценившие: <b>{not_rated}</b>")
-        lines.append(f"✅ Хорошие (6–10): <b>{good_cnt}</b>")
-        lines.append(f"⚠️ Плохие (1–5): <b>{bad_cnt}</b>")
-        lines.append(f"⏭ Скип: <b>{skip_cnt}</b>")
-        lines.append(f"🚨 Жалобы: <b>{reports_cnt}</b>")
-        if str(activity_days).isdigit():
-            d_int = int(activity_days)
-            lines.append(f"📅 Активность: <b>{d_int}</b> {_plural_ru(d_int, 'день', 'дня', 'дней')}")
-        else:
-            lines.append(f"📅 Активность: <b>{activity_days}</b>")
+    if status_raw == "archived":
+        lines.append("📊 <b>Итоги фото</b>")
+        lines.append("")
+        if avg_score > 0:
+            lines.append(f"⭐ Финальный рейтинг: <b>{_fmt_avg(avg_score)}</b>")
+        lines.append(f"🏆 Итоговое место: <b>{rank_str}</b>")
+        lines.append(f"🗳 Голосов: <b>{votes_count}</b>")
+        if positive_percent > 0:
+            lines.append(f"🎯 Положительных: <b>{positive_percent}%</b>")
+        lines.append("")
+        lines.append("📦 Фото в архиве")
     else:
-        lines.append("🏆 Место в топ (сейчас): 💎 <b>Премиум</b>")
-        lines.append("🙈 Не оценившие: 💎 <b>Премиум</b>")
-        lines.append("✅ Хорошие (6–10): 💎 <b>Премиум</b>")
-        lines.append("⚠️ Плохие (1–5): 💎 <b>Премиум</b>")
-        lines.append("⏭ Скип: 💎 <b>Премиум</b>")
-        lines.append("🚨 Жалобы: 💎 <b>Премиум</b>")
-        lines.append("📅 Активность: 💎 <b>Премиум</b>")
+        lines.append("📊 <b>Статистика фото</b>")
+        lines.append("")
+        if avg_score > 0:
+            lines.append(f"⭐ Рейтинг: <b>{_fmt_avg(avg_score)}</b>")
+        lines.append(f"🏆 Место: <b>{rank_str}</b>")
+        lines.append(f"🗳 Голосов: <b>{votes_count}</b>")
+        lines.append("")
+
+        if positive_percent > 0:
+            lines.append(f"🎯 Положительных: <b>{positive_percent}%</b>")
+        if votes_per_hour > 0:
+            lines.append(f"📈 <b>{_fmt_num(votes_per_hour)}</b> оценки в час")
+        if views_total > 0:
+            lines.append(f"👁 Показов: <b>{views_total}</b>")
+        if votes_today > 0:
+            lines.append(f"🔥 За сегодня: <b>{votes_today}</b>")
+
+        lines.append("")
+        lines.append(f"📌 Статус: <b>{_esc_html(computed_status)}</b>")
+        lines.append(f"⏳ До архивирования: <b>{_esc_html(time_left)}</b>")
+
+        if is_premium_user:
+            credits = 0
+            try:
+                user_stats = await get_user_stats(int(user["id"]))
+                credits = int(user_stats.get("credits") or 0)
+            except Exception:
+                credits = 0
+            spent_today = 0.0
+            try:
+                spend_stats = await get_user_spend_today_stats(int(user["id"]))
+                spent_today = float(spend_stats.get("credits_spent_today") or 0.0)
+            except Exception:
+                spent_today = 0.0
+            predicted_views = int(max(credits, 0) * 2)
+
+            premium_lines: list[str] = []
+            if credits > 0:
+                premium_lines.append(f"💳 Кредиты: <b>{credits}</b>")
+            if spent_today > 0:
+                premium_lines.append(f"⚡ Потрачено сегодня: <b>{_fmt_num(spent_today)}</b>")
+            if predicted_views > 0:
+                premium_lines.append(f"🔮 Прогноз показов: <b>{predicted_views}</b>")
+            if premium_lines:
+                lines.append("")
+                lines.extend(premium_lines)
+
+        if is_author_user:
+            saves = int(photo.get("saves_count") or photo.get("saves") or 0)
+            shares = int(photo.get("shares_count") or photo.get("shares") or 0)
+            comments = int(snapshot.get("comments_count") or 0)
+            link_clicks = int(
+                photo.get("link_clicks_count")
+                or photo.get("link_clicks")
+                or snapshot.get("link_clicks")
+                or 0
+            )
+
+            author_lines: list[str] = []
+            if saves > 0:
+                author_lines.append(f"📥 Сохранений: <b>{saves}</b>")
+            if comments > 0:
+                author_lines.append(f"💬 Комментариев: <b>{comments}</b>")
+            if shares > 0:
+                author_lines.append(f"🔁 Репостов: <b>{shares}</b>")
+            if link_clicks > 0:
+                author_lines.append(f"📎 Переходов по ссылке: <b>{link_clicks}</b>")
+            if author_lines:
+                lines.append("")
+                lines.extend(author_lines)
 
     text = "\n".join(lines)
     kb = build_my_photo_stats_keyboard(photo_id)
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
-            disable_notification=True,
-        )
-
+    sent_id = await _edit_or_replace_text(callback, text, kb)
+    if sent_id is not None:
+        await remember_screen(callback.from_user.id, sent_id, state=state)
     await callback.answer()
 
 
