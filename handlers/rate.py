@@ -950,7 +950,6 @@ async def _send_tutorial_reply_keyboard(bot, chat_id: int, state: FSMContext, la
 async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> None:
     data = await state.get_data()
     msg_id = data.get("rate_kb_msg_id")
-    banner_id = None
     ui_state = {}
     try:
         ui_state = await get_user_ui_state(chat_id)
@@ -969,55 +968,26 @@ async def _delete_rate_reply_keyboard(bot, chat_id: int, state: FSMContext) -> N
     except Exception:
         pass
 
-    new_banner_id: int | None = None
+    if msg_id and (banner_id is None or int(msg_id) != int(banner_id)):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(msg_id))
+        except Exception:
+            pass
+
+    # В новом UX не скрываем reply-клавиатуру полностью: держим навигацию раздела "Оценивать".
+    user = await get_user_by_tg_id(int(chat_id))
+    lang = _lang(user)
     try:
-        new_banner_id = await ensure_giraffe_banner(
+        await sync_giraffe_section_nav(
             bot,
             chat_id,
-            chat_id,
-            text="🦒",
-            reply_markup=ReplyKeyboardRemove(),
+            int(chat_id),
+            section="rate",
+            lang=lang,
             force_new=False,
-            reason="remove_reply_kb",
         )
-    except Exception as e:
-        logger.info(
-            "rate.banner.remove_reply_kb.failed_edit",
-            extra={"chat_id": chat_id, "error": str(e)},
-        )
-        new_banner_id = None
-
-    if new_banner_id is None:
-        # Fallback: отправляем невидимое сообщение для применения remove и тут же удаляем
-        try:
-            tmp = await bot.send_message(
-                chat_id=chat_id,
-                text="\u2060",  # невидимый символ
-                reply_markup=ReplyKeyboardRemove(),
-                disable_notification=True,
-            )
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
-            except Exception as e:
-                logger.info(
-                    "rate.banner.remove_reply_kb.delete_tmp_failed",
-                    extra={"chat_id": chat_id, "tmp_id": tmp.message_id, "error": str(e)},
-                )
-        except Exception as e:
-            logger.info(
-                "rate.banner.remove_reply_kb.tmp_send_failed",
-                extra={"chat_id": chat_id, "error": str(e)},
-            )
-
-    # Дедупликация: удаляем старые баннеры/клавы, не совпадающие с текущим
-    keep = new_banner_id if new_banner_id is not None else banner_id
-    await _dedupe_banner_messages(
-        bot,
-        chat_id,
-        keep,
-        [msg_id, banner_id],
-        reason="remove_reply_kb:dedupe",
-    )
+    except Exception:
+        pass
 
 
 async def _clear_rate_comment_draft(state: FSMContext) -> None:
@@ -1110,7 +1080,7 @@ async def _show_rate_block_banner(
             chat_id,
             chat_id,
             text=f"🦒\n\n{text}",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=None,
             force_new=False,
             reason="rate_block",
         )
@@ -1137,6 +1107,19 @@ async def _show_rate_block_banner(
             [old_msg_id],
             reason="rate_block:dedupe",
         )
+        try:
+            user = await get_user_by_tg_id(int(chat_id))
+            lang = _lang(user)
+            await sync_giraffe_section_nav(
+                bot,
+                chat_id,
+                int(chat_id),
+                section="rate",
+                lang=lang,
+                force_new=False,
+            )
+        except Exception:
+            pass
     else:
         await _delete_rate_reply_keyboard(bot, chat_id, state)
 
@@ -3194,57 +3177,6 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
     except Exception:
         pass
     text = (message.text or "").strip()
-    if text == RATE_TUTORIAL_OK_TEXT:
-        if should_throttle(message.from_user.id, "rate:tutorial:ok", 0.6):
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            return
-
-        user = await get_user_by_tg_id(message.from_user.id)
-        if user is None:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            return
-
-        try:
-            await set_user_rate_tutorial_seen(message.from_user.id, True)
-        except Exception:
-            pass
-
-        data = await state.get_data()
-        tut_msg_id = data.get("rate_tutorial_msg_id")
-        if tut_msg_id is None:
-            try:
-                ui_state = await get_user_ui_state(message.from_user.id)
-                tut_msg_id = ui_state.get("screen_msg_id")
-            except Exception:
-                tut_msg_id = None
-        if tut_msg_id:
-            try:
-                await message.bot.delete_message(chat_id=message.chat.id, message_id=int(tut_msg_id))
-            except Exception:
-                pass
-
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
-        try:
-            data = await state.get_data()
-            data["rate_kb_msg_id"] = None
-            data["rate_kb_mode"] = "none"
-            await state.set_data(data)
-            await set_user_rate_kb_msg_id(message.from_user.id, None)
-        except Exception:
-            pass
-
-        await show_next_photo_for_rating(message, user["id"], state=state, replace_message=False)
-        return
     if text.startswith("/"):
         raise SkipHandler
     if text == t("rate.btn.next", "ru") or text == t("rate.btn.next", "en"):
@@ -3729,15 +3661,6 @@ async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, re
         )
     except Exception:
         pass
-
-    if state is not None:
-        try:
-            ui_state = await get_user_ui_state(callback.from_user.id)
-            if not bool(ui_state.get("rate_tutorial_seen")):
-                await _show_rate_tutorial(callback, state)
-                return
-        except Exception:
-            pass
 
     await show_next_photo_for_rating(callback, user["id"], replace_message=replace_message, state=state)
 @router.callback_query(F.data == "comment:seen")

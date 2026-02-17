@@ -31,6 +31,7 @@ from config import (
 from utils.time import is_happy_hour
 from utils.banner import ensure_giraffe_banner, sync_giraffe_section_nav
 from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
+from utils.ui import cleanup_previous_screen
 
 router = Router()
 
@@ -229,9 +230,13 @@ async def _send_fresh_menu(
     except Exception:
         pass
     # Reply-клавиатура применяется на баннере «🦒», здесь отправляем только текст меню.
+    premium_kb = InlineKeyboardBuilder()
+    premium_kb.button(text=t("profile.btn.premium.my", lang), callback_data="premium:open:menu")
+    premium_kb.adjust(1)
     sent = await bot.send_message(
         chat_id=chat_id,
         text=menu_text,
+        reply_markup=premium_kb.as_markup(),
         disable_notification=True,
         link_preview_options=NO_PREVIEW,
         parse_mode="HTML",
@@ -623,6 +628,15 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
         return
 
     pseudo_cb = _MessageAsCallback(message)
+    try:
+        await cleanup_previous_screen(
+            message.bot,
+            message.chat.id,
+            message.from_user.id,
+            state=state,
+        )
+    except Exception:
+        pass
     # При переходе в разделы — удаляем текущее меню, чтобы не мешало
     if key != "menu" and current_menu_id:
         await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
