@@ -2876,10 +2876,12 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_expires_at ON photos(expires_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status_expires ON photos(status, expires_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_submit_status ON photos(submit_day, status);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_user_status_submit_created ON photos(user_id, status, submit_day, created_at DESC);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_photo_created ON votes(photo_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_created ON votes(voter_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_views_viewer ON photo_views(viewer_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_result_ranks_submit_day ON result_ranks(submit_day, final_rank);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_result_ranks_photo_submit ON result_ranks(photo_id, submit_day DESC);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_results_cache_published ON daily_results_cache(published_at DESC, submit_day DESC);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_notification_queue_status_run ON notification_queue(status, run_after);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id);")
@@ -5079,26 +5081,118 @@ async def get_latest_photos_for_user(user_id: int, limit: int = 2) -> list[dict]
     return await get_active_photos_for_user(user_id, limit=limit)
 
 
-async def get_archived_photos_for_user(user_id: int, *, limit: int = 50, offset: int = 0, min_votes: int = 0) -> list[dict]:
+async def get_archived_photos_for_user(
+    user_id: int,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    min_votes: int = 0,
+) -> list[dict]:
+    """
+    Archived photos for user with final rank metadata.
+
+    Returns photo fields +:
+      - final_rank
+      - total_in_party
+      - archived_at (from finalization timestamp if present)
+    """
     p = _assert_pool()
     async with p.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT *
+            WITH archived AS (
+                SELECT p.*
+                FROM photos p
+                WHERE p.user_id=$1
+                  AND p.is_deleted=0
+                  AND p.status='archived'
+                  AND p.votes_count >= $4
+                ORDER BY COALESCE(p.submit_day, DATE(p.created_at::timestamptz)) DESC, p.created_at DESC, p.id DESC
+                LIMIT $2 OFFSET $3
+            )
+            SELECT
+                a.*,
+                rr.final_rank,
+                totals.total_in_party,
+                COALESCE(rr.finalized_at, a.expires_at) AS archived_at
+            FROM archived a
+            LEFT JOIN LATERAL (
+                SELECT r.submit_day, r.final_rank, r.finalized_at
+                FROM result_ranks r
+                WHERE r.photo_id = a.id
+                ORDER BY r.submit_day DESC
+                LIMIT 1
+            ) rr ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS total_in_party
+                FROM result_ranks r2
+                WHERE rr.submit_day IS NOT NULL
+                  AND r2.submit_day = rr.submit_day
+            ) totals ON TRUE
+            ORDER BY COALESCE(rr.submit_day, a.submit_day, DATE(a.created_at::timestamptz)) DESC,
+                     a.created_at DESC,
+                     a.id DESC
+            """,
+            int(user_id),
+            int(limit),
+            int(offset),
+            int(min_votes),
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_archived_photos_count(user_id: int, *, min_votes: int = 0) -> int:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        value = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
             FROM photos
             WHERE user_id=$1
               AND is_deleted=0
               AND status='archived'
-              AND votes_count >= $3
-            ORDER BY avg_score DESC, votes_count DESC, created_at DESC
-            LIMIT $2 OFFSET $4
+              AND votes_count >= $2
             """,
             int(user_id),
-            int(limit),
             int(min_votes),
-            int(offset),
         )
-    return [dict(r) for r in rows]
+    return int(value or 0)
+
+
+async def get_archived_photo_details(photo_id: int, user_id: int) -> dict | None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                p.*,
+                rr.final_rank,
+                totals.total_in_party,
+                COALESCE(rr.finalized_at, p.expires_at) AS archived_at
+            FROM photos p
+            LEFT JOIN LATERAL (
+                SELECT r.submit_day, r.final_rank, r.finalized_at
+                FROM result_ranks r
+                WHERE r.photo_id = p.id
+                ORDER BY r.submit_day DESC
+                LIMIT 1
+            ) rr ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS total_in_party
+                FROM result_ranks r2
+                WHERE rr.submit_day IS NOT NULL
+                  AND r2.submit_day = rr.submit_day
+            ) totals ON TRUE
+            WHERE p.id=$1
+              AND p.user_id=$2
+              AND p.is_deleted=0
+              AND p.status='archived'
+            LIMIT 1
+            """,
+            int(photo_id),
+            int(user_id),
+        )
+    return dict(row) if row else None
 
 
 async def set_public_portfolio(user_id: int, enabled: bool) -> None:

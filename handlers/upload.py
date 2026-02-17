@@ -2,7 +2,7 @@ import io
 import random
 from PIL import Image  # type: ignore
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from asyncpg.exceptions import UniqueViolationError
 
 from aiogram import Router, F
@@ -33,6 +33,7 @@ from database import (
     get_active_photos_for_user,
     get_latest_photos_for_user,
     get_archived_photos_for_user,
+    get_archived_photos_count,
     get_comment_counts_for_photo,
     get_photo_stats_snapshot,
     get_user_spend_today_stats,
@@ -1124,6 +1125,23 @@ def _format_time_left(expires_at: object) -> str:
     return " ".join(parts) if parts else "меньше минуты"
 
 
+def _is_photo_active_for_myphoto(photo: dict | None) -> bool:
+    if not photo:
+        return False
+    if bool(photo.get("is_deleted")):
+        return False
+    status = str(photo.get("status") or "active").strip().lower()
+    if status != "active":
+        return False
+    exp_dt = _parse_dt(photo.get("expires_at"))
+    if not exp_dt:
+        return True
+    now = get_moscow_now()
+    if exp_dt.tzinfo is None and now.tzinfo is not None:
+        exp_dt = exp_dt.replace(tzinfo=now.tzinfo)
+    return exp_dt > now
+
+
 def _compute_photo_status(*, rank: int | None, votes_count: int, avg_score: float) -> str:
     if rank is not None and rank <= 10:
         return "🔥 В зоне топа"
@@ -1664,7 +1682,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         last_pid = data.get("myphoto_last_id")
         if last_pid:
             candidate = await get_photo_by_id(last_pid)
-            if candidate is not None and not candidate.get("is_deleted"):
+            if _is_photo_active_for_myphoto(candidate):
                 photo = candidate
 
     # Если сегодняшняя работа помечена как удалённая, но ты админ —
@@ -1674,10 +1692,42 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         last_pid = data.get("myphoto_last_id")
         if last_pid:
             candidate = await get_photo_by_id(last_pid)
-            if candidate is not None and not candidate.get("is_deleted"):
+            if _is_photo_active_for_myphoto(candidate):
                 photo = candidate
 
     if photo is None:
+        archived_count = 0
+        try:
+            archived_count = await get_archived_photos_count(int(user_id))
+        except Exception:
+            archived_count = 0
+
+        if archived_count > 0:
+            text = "Активной фотографии сейчас нет. Она уже в архиве 📚"
+            kb = _build_no_active_myphoto_kb()
+            await state.update_data(
+                myphoto_ids=[],
+                myphoto_current_idx=0,
+                myphoto_last_id=None,
+                myphoto_is_premium=is_premium_user,
+                myphoto_locked_ids=[],
+            )
+            sent_id = None
+            if opened_from_menu:
+                sent = await callback.message.bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text=text,
+                    reply_markup=kb,
+                    disable_notification=True,
+                )
+                sent_id = sent.message_id
+            else:
+                sent_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
+            if sent_id is not None:
+                await remember_screen(callback.from_user.id, sent_id, state=state)
+            await callback.answer()
+            return
+
         can_upload_today = True
         denied_reason = None
         if not is_unlimited:
@@ -1943,18 +1993,104 @@ async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
 _MY_ARCHIVE_PAGE_SIZE = 5
 
 
+def _build_no_active_myphoto_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="📚 Архив", callback_data="myphoto:archive:0"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+_MONTHS_RU_SHORT = {
+    1: "янв",
+    2: "фев",
+    3: "мар",
+    4: "апр",
+    5: "мая",
+    6: "июн",
+    7: "июл",
+    8: "авг",
+    9: "сен",
+    10: "окт",
+    11: "ноя",
+    12: "дек",
+}
+
+
+def _format_archive_day(value: object) -> str:
+    if value is None:
+        return "—"
+    try:
+        if isinstance(value, date):
+            dt = value
+        else:
+            raw = str(value).strip()
+            if not raw:
+                return "—"
+            dt = date.fromisoformat(raw[:10])
+        return f"{dt.day} {_MONTHS_RU_SHORT.get(dt.month, dt.month)} {dt.year}"
+    except Exception:
+        return str(value)
+
+
+def _format_archive_rating(value: object) -> str:
+    try:
+        score = float(value or 0.0)
+    except Exception:
+        score = 0.0
+    if score <= 0:
+        return "—"
+    return f"{score:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_archive_rank_line(photo: dict) -> str:
+    rank = photo.get("final_rank")
+    total = photo.get("total_in_party")
+    if rank is None and total is None:
+        return "—"
+    if rank is None:
+        return f"#—/{int(total)}"
+    if total is None:
+        return f"#{int(rank)}/—"
+    return f"#{int(rank)}/{int(total)}"
+
+
+def _format_archive_item(photo: dict) -> list[str]:
+    submit_day = _format_archive_day(photo.get("submit_day") or photo.get("archived_at") or photo.get("day_key"))
+    title = _esc_html(str(photo.get("title") or "Без названия"))
+    rating = _format_archive_rating(photo.get("avg_score"))
+    rank_line = _format_archive_rank_line(photo)
+    votes = int(photo.get("votes_count") or 0)
+
+    return [
+        f"{submit_day} · <code>{title}</code>",
+        f"⭐ {rating} · 🏆 {rank_line} · 🗳 {votes}",
+    ]
+
+
+def _build_my_archive_text(items: list[dict], page: int, pages_total: int) -> str:
+    lines: list[str] = ["📚 <b>Мой архив</b>", ""]
+    if not items:
+        lines.append("Архив пока пуст.")
+    else:
+        for idx, photo in enumerate(items):
+            if idx > 0:
+                lines.append("")
+            lines.extend(_format_archive_item(photo))
+    lines.extend(["", f"Страница: {page + 1} / {pages_total}"])
+    return "\n".join(lines)
+
+
 def _build_my_archive_kb(page: int, has_prev: bool, has_next: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    nav_row: list[InlineKeyboardButton] = []
-    if has_prev:
-        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:archive:{page-1}"))
-    if has_next:
-        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:archive:{page+1}"))
-    if nav_row:
-        kb.row(*nav_row)
+    kb.row(
+        InlineKeyboardButton(text="◀️", callback_data=f"myphoto:archive:{page-1}" if has_prev else "noop"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="profile:open"),
+        InlineKeyboardButton(text="▶️", callback_data=f"myphoto:archive:{page+1}" if has_next else "noop"),
+    )
     kb.row(
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="profile:open"),
     )
     return kb.as_markup()
 
@@ -1970,35 +2106,21 @@ async def myphoto_archive(callback: CallbackQuery, state: FSMContext):
     except Exception:
         page = 0
 
+    total_count = await get_archived_photos_count(int(user["id"]))
+    pages_total = max(1, (total_count + _MY_ARCHIVE_PAGE_SIZE - 1) // _MY_ARCHIVE_PAGE_SIZE)
+    page = min(page, pages_total - 1)
     offset = page * _MY_ARCHIVE_PAGE_SIZE
-    rows = await get_archived_photos_for_user(
+
+    items = await get_archived_photos_for_user(
         int(user["id"]),
-        limit=_MY_ARCHIVE_PAGE_SIZE + 1,
+        limit=_MY_ARCHIVE_PAGE_SIZE,
         offset=offset,
     )
-    has_next = len(rows) > _MY_ARCHIVE_PAGE_SIZE
-    items = rows[:_MY_ARCHIVE_PAGE_SIZE]
     has_prev = page > 0
-
-    lines: list[str] = ["📚 <b>Мой архив</b>", ""]
-    if not items:
-        lines.append("Архив пока пуст.")
-    else:
-        for idx, photo in enumerate(items, start=1 + offset):
-            title = _esc_html(str(photo.get("title") or "Без названия"))
-            submit_day = str(photo.get("submit_day") or photo.get("day_key") or "—")
-            try:
-                avg = f"{float(photo.get('avg_score') or 0):.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                avg = "0"
-            votes = int(photo.get("votes_count") or 0)
-            lines.append(f"{idx}. <b>{title}</b>")
-            lines.append(f"   📅 {submit_day} · 📊 {avg} · 💖 {votes}")
-        lines.append("")
-        lines.append(f"Страница {page + 1}")
+    has_next = page < (pages_total - 1)
 
     kb = _build_my_archive_kb(page=page, has_prev=has_prev, has_next=has_next)
-    sent_id = await _edit_or_replace_text(callback, "\n".join(lines), kb)
+    sent_id = await _edit_or_replace_text(callback, _build_my_archive_text(items, page, pages_total), kb)
     if sent_id is not None:
         await remember_screen(callback.from_user.id, sent_id, state=state)
     await callback.answer()
