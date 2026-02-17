@@ -1,16 +1,19 @@
-import random
 import html
-import hashlib
 from utils.i18n import t
-from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, LinkPreviewOptions, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    LinkPreviewOptions,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import SkipHandler
-from aiogram.types import InlineKeyboardMarkup
 
 import database as db
 from keyboards.common import build_main_menu
@@ -25,9 +28,8 @@ from config import (
     SUBSCRIPTION_GATE_ENABLED,
     REQUIRED_CHANNEL_ID,
     REQUIRED_CHANNEL_LINK,
-    AD_CHANNEL_LINK,
 )
-from utils.time import get_moscow_now, get_moscow_today, is_happy_hour
+from utils.time import is_happy_hour
 from utils.banner import ensure_giraffe_banner
 from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
 
@@ -81,27 +83,6 @@ def _pick_lang(user: dict | None, tg_lang_code: str | None) -> str:
     return "ru" if code.startswith("ru") else "en"
 
 
-# Рандом-строки для рекламного блока (вторая строка)
-AD_LINES_RU: list[str] = [
-    "Хочешь халявный премиум? приглашай друзей и получай премиум на 2 дня",
-    "Оценивай больше — чаще попадаешь в топы 🏁",
-    "Публикуй свой лучший кадр и проси друзей оценить через ссылку 🔗⭐️",
-]
-
-AD_LINES_EN: list[str] = [
-    "Want free Premium? Invite friends and get 2 days of Premium",
-    "Rate more — show up in results more often 🏁",
-    "Post your best shot and ask friends to rate via a link 🔗⭐️",
-]
-
-def _is_premium_promo_day(now_dt: datetime | None = None) -> bool:
-    """
-    Цикл 6 дней: 2 дня кнопки нет, 4 дня — есть.
-    """
-    dt = now_dt or get_moscow_now()
-    day_num = (dt.date().toordinal() - 737791)  # anchor 2025-01-01 approx
-    return (day_num % 6) >= 2
-
 def _get_flag(user, key: str) -> bool:
     if user is None:
         return False
@@ -133,6 +114,7 @@ def _normalize_chat_id(value: str) -> str:
     return v
 
 
+
 async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> None:
     if not message_id:
         return
@@ -142,19 +124,22 @@ async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> N
         pass
 
 
-async def _hide_reply_keyboard_once(bot, chat_id: int) -> None:
-    """Скрыть reply-клавиатуру без видимого сообщения в чате."""
+# --- Хелпер для скрытия reply‑клавиатуры при выходе из главного меню ---
+async def _hide_reply_keyboard(bot, chat_id: int) -> None:
+    """Скрывает reply‑клавиатуру (показывает обычный ввод текста).
+
+    Telegram не умеет «убрать клавиатуру» без отправки сообщения, поэтому отправляем
+    очень короткое сообщение с ReplyKeyboardRemove и сразу удаляем его.
+    """
     try:
-        tmp = await bot.send_message(
+        # Нельзя отправить пустой текст — используем невидимый символ
+        ping = await bot.send_message(
             chat_id=chat_id,
             text="\u2060",
             reply_markup=ReplyKeyboardRemove(),
             disable_notification=True,
         )
-    except Exception:
-        return
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=tmp.message_id)
+        await _delete_message_safely(bot, chat_id, ping.message_id)
     except Exception:
         pass
 
@@ -535,46 +520,6 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
     tagline = "Публикуй · Оценивай · Побеждай"
     lines.append(f"💎 {tagline}" if is_premium else tagline)
     return "\n".join(lines)
-    if ratings_count > 0 or comments_count > 0:
-        lines.append("🔔 На твою фотографию уже приходили оценки/комментарии.")
-    else:
-        lines.append("🌿 Пока новых оценок нет — это ок, система подберёт зрителей.")
-
-    # --- Блок подсказок (макс 2) ---
-    hints: list[str] = []
-    if not active_photo:
-        hints.append("💡 Загрузи фотографию, чтобы начать получать оценки.")
-    else:
-        if ratings_count < 20:
-            hints.append("💡 Поделись ссылкой на фото — оценки по ссылке учитываются.")
-        hints.append("💡 Пригласи двоих друзей через /ref — после этого сможешь участвовать в итогах дня.")
-        hints.append("💡 Оценивай работы других — система подберёт больше зрителей для твоего кадра.")
-    # Настройка рекламы: подсказка для премиум и непремиум
-    if is_premium:
-        hints.append("💡 Рекламу в оценках можно выключить в настройках профиля.")
-    else:
-        hints.append("💡 Premium позволяет отключить рекламу в оценках.")
-        # список советов в коде можно расширять здесь
-
-    if hints:
-        lines.append("")
-        # детерминированный выбор до 2 подсказок (по пользователю и дате)
-        seed_str = f"{tg_id}-{get_moscow_today()}"
-        seed = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16)
-        pool = list(hints)
-        selected: list[str] = []
-        while pool and len(selected) < 2:
-            idx = seed % len(pool)
-            selected.append(pool.pop(idx))
-            seed = seed // 7 or 1
-        for h in selected:
-            lines.append(h)
-
-    # --- Опциональная бренд-строка ---
-    lines.append("")
-    lines.append("Публикуй · Оценивай · Побеждай")
-
-    return "\n".join(lines)
 
 
 @router.message(Command("chatid"))
@@ -688,23 +633,26 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             except Exception:
                 pass
         try:
+            await _hide_reply_keyboard(message.bot, message.chat.id)
+        except Exception:
+            pass
+        try:
             await message.delete()
         except Exception:
             pass
         return
 
     pseudo_cb = _MessageAsCallback(message)
-    # При переходе в разделы — удаляем текущее меню, чтобы не мешало
-    if key != "menu":
-        await _hide_reply_keyboard_once(message.bot, message.chat.id)
-        if current_menu_id:
-            await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
-            data["menu_msg_id"] = None
-            try:
-                await db.set_user_menu_msg_id(message.from_user.id, None)
-            except Exception:
-                pass
-            await state.set_data(data)
+    # При переходе в разделы — скрываем reply‑клавиатуру и удаляем текущее меню, чтобы не мешало
+    if key != "menu" and current_menu_id:
+        await _hide_reply_keyboard(message.bot, message.chat.id)
+        await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
+        data["menu_msg_id"] = None
+        try:
+            await db.set_user_menu_msg_id(message.from_user.id, None)
+        except Exception:
+            pass
+        await state.set_data(data)
 
     if key == "menu":
         await _send_fresh_menu(
@@ -782,17 +730,6 @@ async def _cmd_start_inner(message: Message, state: FSMContext):
                 payment_note = t("start.payment.success_pending", lang)
         else:
             payment_note = t("start.payment.fail", lang)
-
-        # Пытаемся обновить уже существующее сообщение меню (не спамим чат)
-        data = await state.get_data()
-        menu_msg_id = data.get("menu_msg_id")
-
-        if user:
-            is_admin = _get_flag(user, "is_admin")
-            is_moderator = _get_flag(user, "is_moderator")
-        else:
-            is_admin = False
-            is_moderator = False
 
         # Отправляем статус оплаты отдельным сообщением (не мешаем меню)
         try:
@@ -1010,7 +947,6 @@ async def menu_back(callback: CallbackQuery, state: FSMContext):
         pass
     chat_id = callback.message.chat.id
     data = await state.get_data()
-    photo_msg_id = data.get("myphoto_photo_msg_id")
     # Сбрасываем контекст оценивания, чтобы цифры не считались оценкой вне раздела
     if "rate_current_photo_id" in data or "rate_show_details" in data:
         data.pop("rate_current_photo_id", None)

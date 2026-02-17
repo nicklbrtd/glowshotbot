@@ -28,7 +28,6 @@ from database import (
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
     is_user_soft_deleted,
-    reactivate_user_by_tg_id,
     hide_active_photos_for_user,
     restore_photos_from_status,
     get_user_by_tg_id,
