@@ -6,7 +6,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
 from database import upsert_user_profile, get_user_by_tg_id
-from keyboards.common import build_main_menu
 
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.time import get_moscow_today
@@ -26,60 +25,121 @@ async def _get_reg_context(state: FSMContext) -> tuple[int | None, int | None]:
     return data.get("reg_chat_id"), data.get("reg_msg_id")
 
 
-async def _finish_registration_message(*, bot, chat_id: int, msg_id: int) -> None:
-    """Показывает финальное сообщение регистрации с кнопкой «В меню», не удаляя исходное."""
+async def _delete_message_safe(bot, chat_id: int | None, message_id: int | None) -> None:
+    if not chat_id or not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+    except Exception:
+        pass
+
+
+async def _render_reg_screen(
+    *,
+    bot,
+    state: FSMContext,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+    parse_mode: str | None = None,
+    fallback_msg_id: int | None = None,
+) -> int | None:
+    """
+    Пытается обновить текущее сообщение регистрации.
+    Если редактировать нельзя — отправляет новое, удаляет старое и сохраняет новый id в FSM.
+    """
+    data = await state.get_data()
+    reg_msg_id = data.get("reg_msg_id")
+    reg_chat_id = data.get("reg_chat_id") or int(chat_id)
+    if reg_msg_id is None and fallback_msg_id is not None:
+        reg_msg_id = int(fallback_msg_id)
+        data["reg_msg_id"] = int(fallback_msg_id)
+        data["reg_chat_id"] = int(chat_id)
+        await state.set_data(data)
+
+    old_msg_id = int(reg_msg_id) if reg_msg_id else None
+    used_msg_id: int | None = None
+
+    if old_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=int(reg_chat_id),
+                message_id=int(old_msg_id),
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            used_msg_id = int(old_msg_id)
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if "message is not modified" in msg:
+                used_msg_id = int(old_msg_id)
+            elif (
+                "message to edit not found" in msg
+                or "message can't be edited" in msg
+                or "message_id invalid" in msg
+            ):
+                used_msg_id = None
+            else:
+                used_msg_id = None
+        except Exception:
+            used_msg_id = None
+
+    if used_msg_id is None:
+        sent = await bot.send_message(
+            chat_id=int(chat_id),
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_notification=True,
+        )
+        used_msg_id = int(sent.message_id)
+        if old_msg_id and old_msg_id != used_msg_id:
+            await _delete_message_safe(bot, int(reg_chat_id), int(old_msg_id))
+
+    data["reg_msg_id"] = int(used_msg_id)
+    data["reg_chat_id"] = int(chat_id)
+    await state.set_data(data)
+    return used_msg_id
+
+
+async def _finish_registration_message(*, bot, chat_id: int, msg_id: int, state: FSMContext, name: str) -> None:
+    """Показывает финальный экран регистрации в том же сообщении."""
     try:
         day = get_moscow_today()
         try:
-            reg_date = datetime.fromisoformat(day).strftime("%d.%m.%Y %H:%M")
+            reg_date = datetime.fromisoformat(day).strftime("%d.%m.%Y")
         except Exception:
             reg_date = day
     except Exception:
         reg_date = ""
 
-    lines = [
-        "Готово! 🎉",
-        "",
-        f"Дата регистрации: {reg_date}" if reg_date else "Дата регистрации: —",
-        "",
-        "Дальше можно:",
-        "— «Загрузить» фотографию",
-        "— «Оценивать» других",
-        "— Посмотреть «Профиль»",
-        "",
-        "Жми «В меню»",
-    ]
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="В меню", callback_data="afterreg:menu")
-    kb.adjust(1)
-
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text="\n".join(lines),
-            reply_markup=kb.as_markup(),
-        )
-    except Exception:
-        await bot.send_message(chat_id=chat_id, text="\n".join(lines), reply_markup=kb.as_markup())
+    final_text = (
+        "Регистрация завершена.\n\n"
+        f"Добро пожаловать в GlowShot, {name}.\n\n"
+        f"🗓 Дата регистрации: {reg_date or '—'}\n\n"
+        "Теперь ты можешь:\n"
+        "• Публиковать фотографии\n"
+        "• Оценивать других\n"
+        "• Участвовать в ежедневных итогах\n\n"
+        "Совет: оцени несколько фотографий — и твои начнут крутиться чаще.\n\n"
+        "Жми /start, чтобы перейти в главное меню"
+    )
+    await _render_reg_screen(
+        bot=bot,
+        state=state,
+        chat_id=int(chat_id),
+        text=final_text,
+        reply_markup=None,
+        fallback_msg_id=int(msg_id),
+    )
 
 
 @router.callback_query(F.data == "afterreg:menu")
 async def after_registration_menu(callback: CallbackQuery, state: FSMContext):
-    """Оставляем финальный экран и отправляем меню отдельным сообщением."""
+    """Legacy callback для старых финальных сообщений с кнопкой."""
     try:
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text="Вот главное меню:",
-            reply_markup=build_main_menu(),
-        )
-    except Exception:
-        # если сообщение не отправилось — ничего не ломаем
-        pass
-
-    try:
-        await callback.answer("Открываю меню")
+        await callback.answer("Жми /start, чтобы перейти в главное меню", show_alert=True)
     except Exception:
         pass
 
@@ -92,46 +152,46 @@ async def registration_start(callback: CallbackQuery, state: FSMContext):
     existing = await get_user_by_tg_id(callback.from_user.id)
     if existing is not None and (existing.get("name") or "").strip():
         await callback.answer("Ты уже зарегистрирован.", show_alert=True)
-        try:
-            await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text="Ты уже в системе. Вот главное меню:",
-                reply_markup=build_main_menu(),
-                disable_notification=True,
-            )
-        except Exception:
-            pass
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
         return
 
     await state.set_state(RegistrationStates.waiting_name)
+    prev_data = await state.get_data()
+    prev_reg_chat_id = prev_data.get("reg_chat_id")
+    prev_reg_msg_id = prev_data.get("reg_msg_id")
 
     prompt = (
-        "Как тебя здесь показывать?\n"
-        "Имя или псевдоним — его увидят другие."
+        "Как тебя будут видеть в GlowShot?\n\n"
+        "Это имя будет отображаться под твоими фотографиями\n"
+        "и в результатах партий.\n\n"
+        "Можно использовать настоящее имя\n"
+        "или творческий псевдоним.\n\n"
+        "Напиши имя ниже 👇"
     )
 
     # If registration starts from a photo message (e.g., link rating result), delete it so the photo disappears
     # and continue registration in a fresh text message.
     if callback.message.photo:
+        if prev_reg_chat_id and prev_reg_msg_id:
+            await _delete_message_safe(callback.message.bot, int(prev_reg_chat_id), int(prev_reg_msg_id))
         try:
             await callback.message.delete()
         except Exception:
             pass
-        msg = await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=prompt,
-        )
+        msg = await callback.message.bot.send_message(chat_id=callback.message.chat.id, text=prompt)
         await state.update_data(reg_msg_id=msg.message_id, reg_chat_id=msg.chat.id)
     else:
         await state.update_data(
-            reg_msg_id=callback.message.message_id,
-            reg_chat_id=callback.message.chat.id,
+            reg_msg_id=int(callback.message.message_id),
+            reg_chat_id=int(callback.message.chat.id),
         )
-        await callback.message.edit_text(prompt)
+        await _render_reg_screen(
+            bot=callback.message.bot,
+            state=state,
+            chat_id=int(callback.message.chat.id),
+            text=prompt,
+            reply_markup=None,
+            fallback_msg_id=int(callback.message.message_id),
+        )
 
     await callback.answer()
 
@@ -140,44 +200,50 @@ async def registration_start(callback: CallbackQuery, state: FSMContext):
 async def registration_name(message: Message, state: FSMContext):
     reg_chat_id, reg_msg_id = await _get_reg_context(state)
     if not reg_chat_id or not reg_msg_id:
+        try:
+            await message.delete()
+        except Exception:
+            pass
         await state.clear()
         await message.answer(
             "Сессия регистрации сбилась.\n\n"
-            "Отправь /start и нажми «Сыыыыр», чтобы начать заново.",
+            "Отправь /start и начни регистрацию заново.",
         )
         return
 
     name = (message.text or "").strip()
 
     if has_links_or_usernames(name) or has_promo_channel_invite(name):
-        await message.delete()
         try:
-            await message.bot.edit_message_text(
-                chat_id=reg_chat_id,
-                message_id=reg_msg_id,
-                text=(
-                    "В имени нельзя оставлять @username, ссылки на Telegram, соцсети или сайты.\n\n"
-                    "Напиши имя или свой псевдоним <b>без контактов</b>."
-                ),
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+            await message.delete()
+        except Exception:
+            pass
+        await _render_reg_screen(
+            bot=message.bot,
+            state=state,
+            chat_id=int(reg_chat_id),
+            text=(
+                "В имени нельзя оставлять @username, ссылки на Telegram, соцсети или сайты.\n\n"
+                "Напиши имя или свой псевдоним без контактов."
+            ),
+            reply_markup=None,
+            fallback_msg_id=int(reg_msg_id),
+        )
         return
 
     if not name:
-        await message.delete()
         try:
-            await message.bot.edit_message_text(
-                chat_id=reg_chat_id,
-                message_id=reg_msg_id,
-                text=(
-                    "Напиши имя или псевдоним."
-                ),
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+            await message.delete()
+        except Exception:
+            pass
+        await _render_reg_screen(
+            bot=message.bot,
+            state=state,
+            chat_id=int(reg_chat_id),
+            text="Напиши имя или псевдоним.",
+            reply_markup=None,
+            fallback_msg_id=int(reg_msg_id),
+        )
         return
 
     await state.update_data(name=name)
@@ -187,15 +253,24 @@ async def registration_name(message: Message, state: FSMContext):
     kb.adjust(1)
 
     await state.set_state(RegistrationStates.waiting_bio)
-    await message.delete()
-    await message.bot.edit_message_text(
-        chat_id=reg_chat_id,
-        message_id=reg_msg_id,
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await _render_reg_screen(
+        bot=message.bot,
+        state=state,
+        chat_id=int(reg_chat_id),
         text=(
-            "Хочешь — добавь пару слов о себе (одним сообщением).\n"
-            "Можно пропустить."
+            "Расскажи немного о себе.\n\n"
+            "Что ты снимаешь?\n"
+            "На что снимаешь?\n"
+            "Что тебе ближе — свет, люди или улица?\n\n"
+            "Описание поможет другим понять тебя как автора.\n"
+            "Если не хочется — можно пропустить."
         ),
         reply_markup=kb.as_markup(),
+        fallback_msg_id=int(reg_msg_id),
     )
 
 
@@ -203,10 +278,14 @@ async def registration_name(message: Message, state: FSMContext):
 async def registration_bio(message: Message, state: FSMContext):
     reg_chat_id, reg_msg_id = await _get_reg_context(state)
     if not reg_chat_id or not reg_msg_id:
+        try:
+            await message.delete()
+        except Exception:
+            pass
         await state.clear()
         await message.answer(
             "Сессия регистрации сбилась.\n\n"
-            "Отправь /start и нажми «Сыыыыр», чтобы начать заново.",
+            "Отправь /start и начни регистрацию заново.",
             disable_notification=True,
         )
         return
@@ -214,25 +293,26 @@ async def registration_bio(message: Message, state: FSMContext):
     bio = (message.text or "").strip()
 
     if has_links_or_usernames(bio) or has_promo_channel_invite(bio):
-        await message.delete()
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
         kb = InlineKeyboardBuilder()
         kb.button(text="Пропустить", callback_data="bio:skip")
         kb.adjust(1)
 
-        try:
-            await message.bot.edit_message_text(
-                chat_id=reg_chat_id,
-                message_id=reg_msg_id,
-                text=(
-                    "Описание без ссылок и @.\n"
-                    "Или нажми «Пропустить»."
-                ),
-                reply_markup=kb.as_markup(),
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+        await _render_reg_screen(
+            bot=message.bot,
+            state=state,
+            chat_id=int(reg_chat_id),
+            text=(
+                "Описание без ссылок и @.\n"
+                "Или нажми «Пропустить»."
+            ),
+            reply_markup=kb.as_markup(),
+            fallback_msg_id=int(reg_msg_id),
+        )
         return
 
     data = await state.get_data()
@@ -251,11 +331,16 @@ async def registration_bio(message: Message, state: FSMContext):
         bio=bio or None,
     )
 
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await _finish_registration_message(
         bot=message.bot,
         chat_id=reg_chat_id,
         msg_id=reg_msg_id,
+        state=state,
+        name=str(name or "друг"),
     )
 
 
@@ -290,6 +375,8 @@ async def registration_bio_skip(callback: CallbackQuery, state: FSMContext):
         bot=callback.message.bot,
         chat_id=reg_chat_id,
         msg_id=reg_msg_id,
+        state=state,
+        name=str(name or "друг"),
     )
     await callback.answer()
 
