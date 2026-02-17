@@ -189,7 +189,6 @@ def _build_profile_stats_lines(
 
     if lang == "en":
         lines = [
-            "👤 Your stats",
             f"🗳 Votes given: {votes_given}",
             f"📸 Photos published: {photos_uploaded}",
             f"⭐ Avg score of your photos: {my_avg_score}",
@@ -203,7 +202,6 @@ def _build_profile_stats_lines(
             lines.append(f"👁 Views of your photos: {my_views_total}")
     else:
         lines = [
-            "👤 Твоя статистика",
             f"🗳 Оценок поставлено: {votes_given}",
             f"📸 Фото опубликовано: {photos_uploaded}",
             f"⭐ Средняя оценка твоих фото: {my_avg_score}",
@@ -627,7 +625,7 @@ async def build_profile_view(user: dict):
     )
     kb.row(
         InlineKeyboardButton(text=t("profile.btn.menu", lang), callback_data="menu:back"),
-        InlineKeyboardButton(text=premium_button_text, callback_data="profile:premium", style="primary"),
+        InlineKeyboardButton(text=premium_button_text, callback_data="profile:premium", style="success"),
     )
     return text, kb.as_markup()
 

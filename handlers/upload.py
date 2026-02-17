@@ -644,7 +644,7 @@ def build_my_photo_keyboard(
             InlineKeyboardButton(
                 text=t("myphoto.btn.share", lang),
                 callback_data=f"myphoto:share:{photo_id}",
-                style="primary",
+                style="success",
             )
         ])
 
@@ -2512,8 +2512,8 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="Удалить", callback_data=f"myphoto:delete_confirm:{photo_id}"),
-        InlineKeyboardButton(text="Отмена", callback_data=f"myphoto:delete_cancel:{photo_id}"),
+        InlineKeyboardButton(text="Удалить", callback_data=f"myphoto:delete_confirm:{photo_id}", style="danger"),
+        InlineKeyboardButton(text="Отмена", callback_data=f"myphoto:delete_cancel:{photo_id}", style="success"),
     )
 
     try:
@@ -3348,7 +3348,6 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             )
             await _store_photo_message_id(state, sent_msg_id, photo_id=photo["id"])
             final_msg_id = sent_msg_id
-            final_msg_obj = None  # edit_message_caption не возвращает Message, будем использовать event
         else:
             raise ValueError("no message to edit")
     except Exception:
@@ -3361,7 +3360,6 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         )
         await _store_photo_message_id(state, sent_photo.message_id, photo_id=photo["id"])
         final_msg_id = sent_photo.message_id
-        final_msg_obj = sent_photo
     await state.clear()
     # Сохраняем контекст навигации после очистки мастера
     await state.update_data(
@@ -3372,25 +3370,9 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         myphoto_photo_msg_id=final_msg_id,
         myphoto_locked_ids=[],
     )
-    # После успешной загрузки сразу открываем раздел "Моя фотография"
     try:
-        if isinstance(event, CallbackQuery):
-            await my_photo_menu(event, state)
-        else:
-            # Сообщение в роли callback, чтобы переиспользовать существующий хендлер
-            msg_obj = final_msg_obj or event
-
-            class _MsgAsCallback:
-                def __init__(self, message):
-                    self.message = message
-                    self.from_user = message.from_user
-                    self.bot = message.bot
-                    self.data = "myphoto:open"
-
-                async def answer(self, *args, **kwargs):
-                    return None
-
-            await my_photo_menu(_MsgAsCallback(msg_obj), state)
+        if final_msg_id and hasattr(event, "from_user") and getattr(event.from_user, "id", None):
+            await remember_screen(int(event.from_user.id), int(final_msg_id), state=state)
     except Exception:
         pass
     return
