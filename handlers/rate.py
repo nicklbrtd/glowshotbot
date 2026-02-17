@@ -1311,8 +1311,26 @@ def build_rate_keyboard(
         link_text, link_url = link_button
         rows.append([InlineKeyboardButton(text=link_text, url=link_url)])
 
-    rows.append([InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}") for i in range(1, 6)])
-    rows.append([InlineKeyboardButton(text=str(i), callback_data=f"rate:score:{photo_id}:{i}") for i in range(6, 11)])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=str(i),
+                callback_data=f"rate:score:{photo_id}:{i}",
+                style="danger",
+            )
+            for i in range(1, 6)
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=str(i),
+                callback_data=f"rate:score:{photo_id}:{i}",
+                style="success",
+            )
+            for i in range(6, 11)
+        ]
+    )
 
     if show_details:
         rows.append(

@@ -79,6 +79,7 @@ def _rate_kb(
                 InlineKeyboardButton(
                     text=str(i),
                     callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:{flag}",
+                    style="danger",
                 )
                 for i in range(1, 6)
             ]
@@ -88,6 +89,7 @@ def _rate_kb(
                 InlineKeyboardButton(
                     text=str(i),
                     callback_data=f"lr:set:{owner_tg_id}:{photo_id}:{idx}:{i}:{code}:{flag}",
+                    style="success",
                 )
                 for i in range(6, 11)
             ]
@@ -441,8 +443,18 @@ def _share_tgk_kb(photo_id: int) -> InlineKeyboardMarkup:
 
 def _preview_static_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(*[InlineKeyboardButton(text=str(i), callback_data="myphoto:share_preview_noop") for i in range(1, 6)])
-    kb.row(*[InlineKeyboardButton(text=str(i), callback_data="myphoto:share_preview_noop") for i in range(6, 11)])
+    kb.row(
+        *[
+            InlineKeyboardButton(text=str(i), callback_data="myphoto:share_preview_noop", style="danger")
+            for i in range(1, 6)
+        ]
+    )
+    kb.row(
+        *[
+            InlineKeyboardButton(text=str(i), callback_data="myphoto:share_preview_noop", style="success")
+            for i in range(6, 11)
+        ]
+    )
     kb.row(InlineKeyboardButton(text="⬅️ Назад (видно только вам)", callback_data=f"myphoto:share_preview_back:{photo_id}"))
     return kb.as_markup()
 

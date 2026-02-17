@@ -641,7 +641,11 @@ def build_my_photo_keyboard(
 
     if not locked or is_premium_user:
         rows.append([
-            InlineKeyboardButton(text=t("myphoto.btn.share", lang), callback_data=f"myphoto:share:{photo_id}")
+            InlineKeyboardButton(
+                text=t("myphoto.btn.share", lang),
+                callback_data=f"myphoto:share:{photo_id}",
+                style="primary",
+            )
         ])
 
     if not locked:
@@ -668,7 +672,11 @@ def build_my_photo_keyboard(
     rows.append(
         [
             InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-            InlineKeyboardButton(text=t("myphoto.btn.delete", lang), callback_data=f"myphoto:delete:{photo_id}"),
+            InlineKeyboardButton(
+                text=t("myphoto.btn.delete", lang),
+                callback_data=f"myphoto:delete:{photo_id}",
+                style="danger",
+            ),
         ]
     )
 

@@ -627,7 +627,7 @@ async def build_profile_view(user: dict):
     )
     kb.row(
         InlineKeyboardButton(text=t("profile.btn.menu", lang), callback_data="menu:back"),
-        InlineKeyboardButton(text=premium_button_text, callback_data="profile:premium"),
+        InlineKeyboardButton(text=premium_button_text, callback_data="profile:premium", style="primary"),
     )
     return text, kb.as_markup()
 
@@ -791,7 +791,7 @@ async def _build_profile_edit_screen(callback_or_msg, user: dict, state: FSMCont
         if until_dt is not None:
             text_lines.append(f"Блокировка до {until_dt.strftime('%d.%m.%Y %H:%M')} (МСК).")
         text_lines.append("Можно только удалить аккаунт.")
-        kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete")
+        kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete", style="danger")
         kb.button(text=t("common.back", lang), callback_data="menu:profile")
         kb.adjust(1, 1)
     else:
@@ -801,7 +801,7 @@ async def _build_profile_edit_screen(callback_or_msg, user: dict, state: FSMCont
         kb.button(text=t("profile.edit.btn.gender", lang), callback_data="profile:edit_gender")
         kb.button(text=t("profile.edit.btn.channel", lang), callback_data="profile:edit_channel")
         kb.button(text=t("profile.edit.btn.city", lang), callback_data="profile:edit_city")
-        kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete")
+        kb.button(text=t("profile.edit.btn.delete", lang), callback_data="profile:delete", style="danger")
         kb.button(text=t("common.back", lang), callback_data="menu:profile")
         kb.adjust(2, 2, 2, 1, 1)
         text_lines.append("")
