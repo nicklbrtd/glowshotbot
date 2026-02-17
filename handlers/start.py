@@ -114,32 +114,11 @@ def _normalize_chat_id(value: str) -> str:
     return v
 
 
-
 async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> None:
     if not message_id:
         return
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-
-# --- Хелпер для скрытия reply‑клавиатуры при выходе из главного меню ---
-async def _hide_reply_keyboard(bot, chat_id: int) -> None:
-    """Скрывает reply‑клавиатуру (показывает обычный ввод текста).
-
-    Telegram не умеет «убрать клавиатуру» без отправки сообщения, поэтому отправляем
-    очень короткое сообщение с ReplyKeyboardRemove и сразу удаляем его.
-    """
-    try:
-        # Нельзя отправить пустой текст — используем невидимый символ
-        ping = await bot.send_message(
-            chat_id=chat_id,
-            text="\u2060",
-            reply_markup=ReplyKeyboardRemove(),
-            disable_notification=True,
-        )
-        await _delete_message_safely(bot, chat_id, ping.message_id)
     except Exception:
         pass
 
@@ -633,19 +612,14 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
             except Exception:
                 pass
         try:
-            await _hide_reply_keyboard(message.bot, message.chat.id)
-        except Exception:
-            pass
-        try:
             await message.delete()
         except Exception:
             pass
         return
 
     pseudo_cb = _MessageAsCallback(message)
-    # При переходе в разделы — скрываем reply‑клавиатуру и удаляем текущее меню, чтобы не мешало
+    # При переходе в разделы — удаляем текущее меню, чтобы не мешало
     if key != "menu" and current_menu_id:
-        await _hide_reply_keyboard(message.bot, message.chat.id)
         await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
         data["menu_msg_id"] = None
         try:
