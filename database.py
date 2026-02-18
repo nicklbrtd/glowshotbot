@@ -44,6 +44,7 @@ pool: asyncpg.Pool | None = None
 # Stored as (ts, mean, count)
 _GLOBAL_RATING_CACHE: tuple[float, float, int] | None = None
 _GLOBAL_RATING_TTL_SECONDS = 300
+_UPLOAD_RULES_ACK_INTERVAL = timedelta(days=14)
 
 
 def _link_rating_weight() -> float:
@@ -220,6 +221,46 @@ async def get_user_stats(user_id: int) -> dict:
     p = _assert_pool()
     async with p.acquire() as conn:
         return await _ensure_user_stats_row(conn, int(user_id))
+
+
+async def get_upload_rules_ack_at(user_id: int) -> datetime | None:
+    """Return timestamp of last upload-rules confirmation for user."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        value = await conn.fetchval(
+            "SELECT upload_rules_ack_at FROM user_stats WHERE user_id=$1",
+            int(user_id),
+        )
+    return value
+
+
+async def should_show_upload_rules(user_id: int, now: datetime | None = None) -> bool:
+    """Rules are shown at most once per 14 days; reset only after explicit ack."""
+    ack_at = await get_upload_rules_ack_at(int(user_id))
+    if ack_at is None:
+        return True
+    now_dt = now or get_moscow_now()
+    try:
+        if ack_at.tzinfo is None and now_dt.tzinfo is not None:
+            ack_at = ack_at.replace(tzinfo=now_dt.tzinfo)
+    except Exception:
+        pass
+    return now_dt >= (ack_at + _UPLOAD_RULES_ACK_INTERVAL)
+
+
+async def set_upload_rules_ack_at(user_id: int, dt: datetime | None = None) -> datetime:
+    """Store explicit rules acknowledgement timestamp."""
+    p = _assert_pool()
+    ts = dt or get_moscow_now()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        await conn.execute(
+            "UPDATE user_stats SET upload_rules_ack_at=$2 WHERE user_id=$1",
+            int(user_id),
+            ts,
+        )
+    return ts
 
 
 def _happy_hour_multiplier(now: datetime | None = None) -> int:
@@ -2512,6 +2553,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS show_tokens INTEGER NOT NULL DEFAULT 0;")
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS last_daily_grant_day DATE;")
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS migration_notified BOOLEAN NOT NULL DEFAULT FALSE;")
+        await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS upload_rules_ack_at TIMESTAMPTZ;")
 
         await conn.execute(
             """

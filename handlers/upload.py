@@ -1,5 +1,6 @@
 import io
 import random
+import asyncio
 from PIL import Image  # type: ignore
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import date, datetime, timedelta
@@ -45,6 +46,8 @@ from database import (
     get_user_stats,
     add_credits,
     check_can_upload_today,
+    should_show_upload_rules,
+    set_upload_rules_ack_at,
 )
 
 from database_results import (
@@ -124,6 +127,7 @@ async def _edit_or_replace_progress_message(
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
     prefer_caption: bool = False,
+    parse_mode: str | None = None,
 ) -> tuple[int | None, bool]:
     """
     Обновляет один progress-экран.
@@ -137,6 +141,7 @@ async def _edit_or_replace_progress_message(
                     message_id=int(message_id),
                     caption=text,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 return int(message_id), True
             except Exception:
@@ -147,6 +152,7 @@ async def _edit_or_replace_progress_message(
                     message_id=int(message_id),
                     text=text,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 return int(message_id), False
             except Exception:
@@ -158,6 +164,7 @@ async def _edit_or_replace_progress_message(
                     message_id=int(message_id),
                     text=text,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 return int(message_id), False
             except Exception:
@@ -168,6 +175,7 @@ async def _edit_or_replace_progress_message(
                     message_id=int(message_id),
                     caption=text,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 return int(message_id), True
             except Exception:
@@ -182,6 +190,7 @@ async def _edit_or_replace_progress_message(
             chat_id=chat_id,
             text=text,
             reply_markup=reply_markup,
+            parse_mode=parse_mode,
             disable_notification=True,
         )
         return int(sent.message_id), False
@@ -651,16 +660,12 @@ def _build_upload_intro_text(
     idea_label: str,
     idea_title: str,
     idea_hint: str,
-    second: bool = False,
     publish_notice: str | None = None,
 ) -> str:
     ready = _ready_wording(user)
     selfie = _selfie_wording(user)
-    title_line = "📸 <b>Загрузить фотографию!</b>"
-    if second:
-        title_line = "📸 <b>Загрузить вторую фотографию!</b>"
     lines: list[str] = [
-        title_line,
+        "📸 <b>Загрузить фотографию!</b>",
         "",
         f"💡 <b>{idea_label}:</b> {idea_title}",
         f"🔍 <b>Попробуй:</b> {idea_hint}.",
@@ -676,9 +681,7 @@ def _build_upload_intro_text(
     ]
     if publish_notice:
         lines.extend([f"⚠️ {publish_notice}", ""])
-    lines.append(
-        ("Это загрузка второй активной фотографии.\n\n" if second else "") + f"Когда будешь {ready} — жми «Загрузить».",
-    )
+    lines.append(f"Когда будешь {ready} — жми «Загрузить».")
     return "\n".join(lines)
 
 
@@ -706,12 +709,53 @@ def build_upload_intro_kb(
     return kb.as_markup()
 
 
+UPLOAD_RULES_WAIT_SECONDS = 3
+
+
+def _build_upload_rules_text(user: dict) -> str:
+    selfie = _selfie_wording(user)
+    return "\n".join(
+        [
+            "🛑 <b>Правила перед загрузкой</b>",
+            "",
+            f"🚫 <b>Селфи запрещены</b> — {selfie}.",
+            "🚫 Реклама / промо / приглашения в каналы.",
+            "🚫 Чужие фото (репосты/пинтерест) и чужие персонажи без права.",
+            "🚫 NSFW/жесть/триггеры.",
+            "",
+            "✅ Загружай <b>свои</b> фото: стрит, природа, архитектура, детали, идеи.",
+            "",
+            "🛡 Модерация может удалить фото и ограничить доступ при нарушении.",
+            "",
+            "<i>Пожалуйста, прочитай. Кнопка появится через пару секунд.</i>",
+        ]
+    )
+
+
+def build_upload_rules_wait_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⏳ Читаю…", callback_data="myphoto:rules:wait"))
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:rules:back"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def build_upload_rules_ack_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✅ Ознакомился(ась) → дальше", callback_data="myphoto:rules:ack"))
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:rules:back"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
 async def _render_upload_intro_screen(
     callback: CallbackQuery,
     state: FSMContext,
     user: dict,
-    *,
-    second: bool = False,
 ) -> None:
     """Render upload intro with ideas (used by upload cancel/back flows)."""
     is_premium_user = False
@@ -733,19 +777,13 @@ async def _render_upload_intro_screen(
         idea_label="Идея дня",
         idea_title=idea_title,
         idea_hint=idea_hint,
-        second=second,
         publish_notice=(
             denied_reason or "Публикация сегодня недоступна. Завтра можно."
             if not can_upload_today
             else None
         ),
     )
-    kb = build_upload_intro_kb(
-        remaining=remaining,
-        limit=limit,
-        idea_cb="myphoto:idea:extra" if second else "myphoto:idea",
-        upload_cb="myphoto:add:extra" if second else "myphoto:add",
-    )
+    kb = build_upload_intro_kb(remaining=remaining, limit=limit)
     sent_id = await _edit_or_replace_text(callback, text, kb)
     if sent_id is not None:
         await remember_screen(callback.from_user.id, sent_id, state=state)
@@ -815,7 +853,7 @@ def build_my_photo_caption(photo: dict, *, locked: bool = False) -> str:
     ]
 
     if locked:
-        caption_lines.append("💎 Вторая фотография доступна с GlowShot Premium.")
+        caption_lines.append("💎 Доступ к этой функции ограничен.")
 
     if description:
         caption_lines.append("")
@@ -836,19 +874,19 @@ def build_my_photo_keyboard(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
+    if not locked:
+        rows.append([
+            InlineKeyboardButton(text=t("myphoto.btn.stats", lang), callback_data=f"myphoto:stats:{photo_id}"),
+            InlineKeyboardButton(text=t("myphoto.btn.edit", lang), callback_data=f"myphoto:edit:{photo_id}"),
+        ])
     if not locked or is_premium_user:
         rows.append([
             InlineKeyboardButton(
                 text=t("myphoto.btn.share", lang),
                 callback_data=f"myphoto:share:{photo_id}",
                 style="success",
-            )
-        ])
-
-    if not locked:
-        rows.append([
-            InlineKeyboardButton(text=t("myphoto.btn.edit", lang), callback_data=f"myphoto:edit:{photo_id}"),
-            InlineKeyboardButton(text=t("myphoto.btn.stats", lang), callback_data=f"myphoto:stats:{photo_id}"),
+            ),
+            InlineKeyboardButton(text="📨 Комментарии", callback_data=f"myphoto:comments:{photo_id}"),
         ])
 
     if locked and show_premium_cta:
@@ -1154,6 +1192,33 @@ async def _load_active_myphoto_gallery(user_id: int) -> list[dict]:
     return photos[:2]
 
 
+VOTES_STABILITY_THRESHOLD = 10
+
+DAILY_TIPS: list[str] = [
+    "💡 Совет дня: главный объект + чистый фон = моментальный буст оценок",
+    "💡 Совет дня: один сюжет в кадре работает лучше, чем перегруз деталями",
+    "💡 Совет дня: мягкий боковой свет чаще даёт более высокий рейтинг",
+    "💡 Совет дня: оставь немного воздуха вокруг объекта, кадр смотрится чище",
+    "💡 Совет дня: вертикали держи ровно, архитектура это любит",
+    "💡 Совет дня: убери лишнее с краёв кадра перед публикацией",
+    "💡 Совет дня: контрастный акцент по цвету помогает зацепить взгляд",
+    "💡 Совет дня: сначала композиция, потом фильтры",
+    "💡 Совет дня: попробуй снимать на уровне глаз объекта, это усиливает фокус",
+    "💡 Совет дня: один сильный кадр лучше серии похожих",
+]
+
+
+def _daily_tip() -> str:
+    if not DAILY_TIPS:
+        return "💡 Совет дня: чистая композиция почти всегда выигрывает."
+    idx = get_moscow_now().date().toordinal() % len(DAILY_TIPS)
+    return DAILY_TIPS[idx]
+
+
+def _gallery_mission_text() -> str:
+    return "🎯 Миссия дня: оцени 10 фото → +10 credits → твои работы покажут чаще"
+
+
 def _build_myphoto_gallery_kb(
     photos: list[dict],
     *,
@@ -1168,7 +1233,7 @@ def _build_myphoto_gallery_kb(
             )
         )
     if can_add_more:
-        kb.row(InlineKeyboardButton(text="➕ Добавить фото", callback_data="myphoto:add_intro:extra"))
+        kb.row(InlineKeyboardButton(text="➕ Добавить фото", callback_data="myphoto:add"))
     kb.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:back"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
@@ -1193,16 +1258,26 @@ async def _build_myphoto_gallery_text(
             bayes_str = "—"
         else:
             bayes_str = _fmt_avg(float(bayes_raw))
-        votes_count = int(stats.get("ratings_count") or photo.get("votes_count") or 0)
-        time_left = _format_time_left(photo.get("expires_at"))
-        lines.append(f"{idx}. <code>\"{title}\"</code>")
+        votes_count = int(photo.get("votes_count") or stats.get("ratings_count") or 0)
+        time_left = _esc_html(_format_time_left(photo.get("expires_at")))
+        lines.append(f"{idx}) <code>\"{title}\"</code>")
         meta = [f"⭐ {bayes_str}", f"🗳 {votes_count}"]
         if time_left != "—":
-            meta.append(f"⏳ {_esc_html(time_left)}")
+            meta.append(f"⏳ {time_left}")
         lines.append(" · ".join(meta))
+        left_to_stable = max(0, int(VOTES_STABILITY_THRESHOLD) - votes_count)
+        if left_to_stable > 0:
+            lines.append(f"🚀 До “стабильного рейтинга”: ещё {left_to_stable} оценки")
+        else:
+            lines.append("🚀 До “стабильного рейтинга”: ещё 0 (уже ок)")
         lines.append("")
+
     if denied_reason:
         lines.append(f"⚠️ {_esc_html(denied_reason)}")
+        lines.append("")
+    lines.append(_gallery_mission_text())
+    lines.append(_daily_tip())
+
     return "\n".join(lines).strip()
 
 
@@ -1461,49 +1536,61 @@ async def build_my_photo_main_text(photo: dict, *, locked: bool = False) -> str:
     title_safe = _esc_html(title)
 
     tag_key = str(photo.get("tag") or "")
-    tag_text = _tag_label(tag_key)
+    tag_text = _esc_html(_tag_label(tag_key))
 
-    # дата публикации (day_key)
-    day_key = (photo.get("day_key") or "").strip()
-    pub_str = "—"
-    if day_key:
-        try:
-            pub_dt = datetime.fromisoformat(day_key)
-            pub_str = pub_dt.strftime("%d.%m.%Y")
-        except Exception:
-            pub_str = day_key
+    try:
+        stats = await get_photo_stats(int(photo["id"]))
+    except Exception:
+        stats = {}
+    try:
+        snapshot = await get_photo_stats_snapshot(int(photo["id"]), include_author_metrics=False)
+    except Exception:
+        snapshot = {}
 
-    stats = await get_photo_stats(photo["id"])
-    ratings_count = int(stats.get("ratings_count") or 0)
-    score = stats.get("bayes_score")
-
-    score_str = "—"
-    if score is not None:
-        try:
-            f = float(score)
-            score_str = f"{f:.2f}".rstrip("0").rstrip(".")
-        except Exception:
-            score_str = "—"
-
-    if emoji:
-        header = f"<code>\"{title_safe}\"</code> ({emoji})"
+    bayes_raw = stats.get("bayes_score")
+    if bayes_raw is None:
+        bayes_str = "—"
     else:
-        header = f"<code>\"{title_safe}\"</code> (устройство не указано)"
+        bayes_str = _fmt_avg(float(bayes_raw))
 
-    lines: list[str] = []
-    lines.append(f"<b>{header}</b>")
-    lines.append(f"🏷️ Тег: <b>{_esc_html(tag_text)}</b>")
-    lines.append("")
-    lines.append(f"📅 Опубликовано: {pub_str}")
-    def _strike(text: str) -> str:
-        return f"<s>{text}</s>" if not ratings_enabled else text
+    votes_count = int(snapshot.get("votes_count") or photo.get("votes_count") or stats.get("ratings_count") or 0)
+    views_total = int(snapshot.get("views_total") or photo.get("views_count") or 0)
+    rank_raw = snapshot.get("rank")
+    rank = int(rank_raw) if rank_raw is not None else None
+    avg_for_status = float(snapshot.get("avg_score") or 0.0)
+    if avg_for_status <= 0 and bayes_raw is not None:
+        try:
+            avg_for_status = float(bayes_raw)
+        except Exception:
+            avg_for_status = 0.0
+    computed_status = _compute_photo_status(rank=rank, votes_count=votes_count, avg_score=avg_for_status)
+    time_left = _format_time_left(snapshot.get("expires_at") or photo.get("expires_at"))
 
-    lines.append(_strike(f"💖 Оценок: {ratings_count}"))
-    lines.append(_strike(f"📊 Рейтинг: <b>{score_str}</b>"))
+    device_suffix = f" ({emoji})" if emoji else ""
+    header = f"<b><code>\"{title_safe}\"</code>{device_suffix}</b>"
+
+    lines: list[str] = [header, f"🏷️ Тег: <b>{tag_text}</b>", ""]
+    metric_parts = [f"⭐ Bayes: <b>{bayes_str}</b>", f"🗳 Оценок: <b>{votes_count}</b>"]
+    if views_total > 0:
+        metric_parts.append(f"👁 Показов: <b>{views_total}</b>")
+    lines.append(" · ".join(metric_parts))
+    lines.append(f"📌 Статус: <b>{_esc_html(computed_status)}</b>")
+    if time_left != "—":
+        lines.append(f"⏳ До архива: <b>{_esc_html(time_left)}</b>")
+
+    if votes_count < VOTES_STABILITY_THRESHOLD:
+        lines.append(f"🚀 До стабильного рейтинга: ещё <b>{VOTES_STABILITY_THRESHOLD - votes_count}</b> оценок")
+
+    lines.extend(["", "🎯 Оцени 10 фото → +10 credits → твою работу покажут чаще"])
+
+    description = str(photo.get("description") or "").strip()
+    if description and description.lower() not in {"нет", "none", "null"}:
+        lines.extend(["", f"<blockquote>📝 {_esc_html(description)}</blockquote>"])
+
     if not ratings_enabled:
-        lines.append("🚫 Оценки для этой фотографии выключены.")
-        if locked:
-            lines.append("💎 Вторая активная фотография доступна только с Premium.")
+        lines.extend(["", "🚫 Оценки для этой фотографии выключены."])
+    if locked:
+        lines.append("💎 Эта работа сейчас недоступна в обычном режиме.")
 
     return "\n".join(lines)
 
@@ -1542,6 +1629,7 @@ async def _show_my_photo_section(
         photo=_photo_public_id(photo),
         caption=caption,
         reply_markup=kb,
+        parse_mode="HTML",
         disable_notification=True,
     )
 
@@ -1625,7 +1713,7 @@ async def _edit_or_replace_my_photo_message(
     try:
         if msg.photo:
             await msg.edit_media(
-                media=InputMediaPhoto(media=_photo_public_id(photo), caption=caption),
+                media=InputMediaPhoto(media=_photo_public_id(photo), caption=caption, parse_mode="HTML"),
                 reply_markup=kb,
             )
             await _store_photo_message_id(state, msg.message_id, photo_id=photo["id"])
@@ -1644,6 +1732,7 @@ async def _edit_or_replace_my_photo_message(
         photo=_photo_public_id(photo),
         caption=caption,
         reply_markup=kb,
+        parse_mode="HTML",
         disable_notification=True,
     )
     await _store_photo_message_id(state, sent.message_id, photo_id=photo["id"])
@@ -1664,6 +1753,7 @@ async def _edit_or_replace_caption_with_photo(
             message_id=message_id,
             caption=caption,
             reply_markup=reply_markup,
+            parse_mode="HTML",
         )
         return message_id
     except Exception:
@@ -1679,6 +1769,7 @@ async def _edit_or_replace_caption_with_photo(
         photo=file_id,
         caption=caption,
         reply_markup=reply_markup,
+        parse_mode="HTML",
         disable_notification=True,
     )
     return sent.message_id
@@ -1757,7 +1848,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         myphoto_is_premium=bool(is_premium_user),
         myphoto_locked_ids=[],
     )
-    await _render_upload_intro_screen(callback, state, user, second=False)
+    await _render_upload_intro_screen(callback, state, user)
     await callback.answer()
 
 
@@ -1784,7 +1875,7 @@ async def myphoto_view(callback: CallbackQuery, state: FSMContext):
         if photos:
             await _render_myphoto_gallery(callback, state, user, photos=photos)
         else:
-            await _render_upload_intro_screen(callback, state, user, second=False)
+            await _render_upload_intro_screen(callback, state, user)
         return
 
     data = await state.get_data()
@@ -2175,111 +2266,18 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "myphoto:add_intro:extra")
 async def myphoto_add_intro_extra(callback: CallbackQuery, state: FSMContext):
-    """Показывает экран правил/идей для загрузки второй фотографии."""
+    """Legacy callback: route to the standard upload intro."""
     user = await _ensure_user(callback)
     if user is None:
         return
-
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    limit, current, remaining = await _idea_counters(user, is_premium_user)
-    idea_title, idea_hint = _get_daily_idea()
-    text = _build_upload_intro_text(
-        user,
-        idea_label="Идея дня",
-        idea_title=idea_title,
-        idea_hint=idea_hint,
-        second=True,
-    )
-    kb = build_upload_intro_kb(
-        remaining=remaining,
-        limit=limit,
-        idea_cb="myphoto:idea:extra",
-        upload_cb="myphoto:add:extra",
-    )
-
-    sent = await callback.message.bot.send_message(
-        chat_id=callback.message.chat.id,
-        text=text,
-        reply_markup=kb,
-        disable_notification=True,
-    )
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    await _render_upload_intro_screen(callback, state, user)
     await callback.answer()
 
 
 @router.callback_query(F.data == "myphoto:idea:extra")
 async def myphoto_generate_idea_extra(callback: CallbackQuery, state: FSMContext):
-    """Сгенерировать идею для второй фотографии (те же лимиты, другая навигация)."""
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    limit_per_week, current_used, remaining_before = await _idea_counters(user, is_premium_user)
-    week_key = _current_week_key()
-
-    if current_used >= limit_per_week:
-        await callback.answer(
-            f"Лимит идей на неделю: {limit_per_week}. Попробуй после понедельника.",
-            show_alert=True,
-        )
-        return
-
-    try:
-        new_count = await increment_weekly_idea_requests(user["id"], week_key)
-    except Exception:
-        new_count = current_used + 1
-
-    daily_title, _ = _get_daily_idea()
-    idea_title, idea_hint = _pick_random_idea(exclude_title=daily_title)
-    text = _build_upload_intro_text(
-        user,
-        idea_label="Новая идея",
-        idea_title=idea_title,
-        idea_hint=idea_hint,
-        second=True,
-    )
-    remaining_after = max(limit_per_week - new_count, 0)
-    kb = build_upload_intro_kb(
-        remaining=remaining_after,
-        limit=limit_per_week,
-        idea_cb="myphoto:idea:extra",
-        upload_cb="myphoto:add:extra",
-    )
-
-    try:
-        if callback.message and getattr(callback.message, "photo", None):
-            await callback.message.edit_caption(caption=text, reply_markup=kb)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=text,
-            reply_markup=kb,
-            disable_notification=True,
-        )
-
-    await callback.answer()
+    """Legacy callback: route to default idea generation."""
+    await myphoto_generate_idea(callback, state)
 
 
 @router.callback_query(F.data.startswith("myphoto:ratings:"))
@@ -2339,14 +2337,12 @@ async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
-    data = await state.get_data()
-    is_extra = bool(data.get("upload_is_extra"))
     try:
         await state.clear()
     except Exception:
         pass
 
-    await _render_upload_intro_screen(callback, state, user, second=is_extra)
+    await _render_upload_intro_screen(callback, state, user)
     await callback.answer()
 
 
@@ -2411,8 +2407,8 @@ async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
 def _user_photo_limits(user: dict, stats: dict, *, is_unlimited: bool) -> tuple[int, int]:
     """
     Возвращает (max_active, daily_limit).
-    GlowShot 2.1: 1 публикация в день для всех ролей.
-    Активных одновременно — до 2 (день загрузки + следующий день).
+    GlowShot: 1 публикация в день для всех ролей.
+    Активных одновременно — до 2 (сегодняшняя и вчерашняя работа до архива).
     Админ: технический bypass.
     """
     if is_unlimited:
@@ -2441,9 +2437,6 @@ async def _can_user_upload_now(user: dict, is_premium_user: bool, is_unlimited: 
         active_count = 0
 
     if active_count >= max_active:
-        # Нужен ручной делит перед новой загрузкой
-        if is_premium_user and max_active > 1:
-            return False, "Удалите одну из текущих фотографий, чтобы загрузить новую."
         return False, "Сначала удалите текущую фотографию."
 
     return True, None
@@ -2452,7 +2445,144 @@ async def _can_user_upload_now(user: dict, is_premium_user: bool, is_unlimited: 
 # ========= ДОБАВЛЕНИЕ ФОТО =========
 
 
-@router.callback_query(F.data.regexp(r"^myphoto:add(?::extra)?$"))
+async def _clear_rules_state(state: FSMContext) -> None:
+    await state.update_data(
+        rules_screen_active=False,
+        rules_screen_msg_id=None,
+        rules_gate_id=None,
+    )
+
+
+async def _start_upload_wizard(
+    callback: CallbackQuery,
+    state: FSMContext,
+    *,
+    user_id: int,
+) -> None:
+    await state.set_state(MyPhotoStates.waiting_photo)
+    await _clear_rules_state(state)
+    await state.update_data(
+        upload_msg_id=callback.message.message_id,
+        upload_chat_id=callback.message.chat.id,
+        upload_is_photo=bool(getattr(callback.message, "photo", None)),
+        upload_user_id=user_id,
+        file_id=None,
+        title=None,
+    )
+
+    text = "Отправь фотографию (1 шт.), которую хочешь добавить."
+    kb = build_upload_wizard_kb(back_to="menu")
+    sent_msg_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
+    if sent_msg_id is None:
+        sent_msg_id = int(callback.message.message_id)
+    await state.update_data(
+        upload_msg_id=sent_msg_id,
+        upload_chat_id=callback.message.chat.id,
+        upload_is_photo=False,
+    )
+    await remember_screen(callback.from_user.id, int(sent_msg_id), state=state)
+
+
+async def _show_upload_rules_screen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    data = await state.get_data()
+    current_msg_id = int(callback.message.message_id)
+    if bool(data.get("rules_screen_active")) and int(data.get("rules_screen_msg_id") or 0) == current_msg_id:
+        await callback.answer()
+        return
+
+    gate_id = f"{int(user['id'])}:{int(get_moscow_now().timestamp() * 1000)}"
+    await state.update_data(
+        rules_screen_active=True,
+        rules_screen_msg_id=current_msg_id,
+        rules_gate_id=gate_id,
+    )
+
+    text = _build_upload_rules_text(user)
+    sent_msg_id = await _edit_or_replace_text(callback, text, build_upload_rules_wait_kb(), parse_mode="HTML")
+    if sent_msg_id is None:
+        sent_msg_id = current_msg_id
+    await state.update_data(
+        rules_screen_active=True,
+        rules_screen_msg_id=int(sent_msg_id),
+        rules_gate_id=gate_id,
+        upload_msg_id=int(sent_msg_id),
+        upload_chat_id=callback.message.chat.id,
+        upload_is_photo=False,
+    )
+    await remember_screen(callback.from_user.id, int(sent_msg_id), state=state)
+    await callback.answer()
+
+    await asyncio.sleep(UPLOAD_RULES_WAIT_SECONDS)
+
+    data_after = await state.get_data()
+    if not bool(data_after.get("rules_screen_active")):
+        return
+    if str(data_after.get("rules_gate_id") or "") != gate_id:
+        return
+
+    rules_msg_id = int(data_after.get("rules_screen_msg_id") or sent_msg_id)
+    updated_msg_id, _ = await _edit_or_replace_progress_message(
+        bot=callback.bot,
+        chat_id=int(callback.message.chat.id),
+        message_id=rules_msg_id,
+        text=text,
+        reply_markup=build_upload_rules_ack_kb(),
+        prefer_caption=False,
+        parse_mode="HTML",
+    )
+    if updated_msg_id is None:
+        return
+    await state.update_data(
+        rules_screen_active=True,
+        rules_screen_msg_id=int(updated_msg_id),
+        rules_gate_id=gate_id,
+        upload_msg_id=int(updated_msg_id),
+        upload_chat_id=callback.message.chat.id,
+        upload_is_photo=False,
+    )
+    if int(updated_msg_id) != int(rules_msg_id):
+        await remember_screen(callback.from_user.id, int(updated_msg_id), state=state)
+
+
+@router.callback_query(F.data == "myphoto:rules")
+async def myphoto_rules(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    await _show_upload_rules_screen(callback, state, user)
+
+
+@router.callback_query(F.data == "myphoto:rules:wait")
+async def myphoto_rules_wait(callback: CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:rules:back")
+async def myphoto_rules_back(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    await _clear_rules_state(state)
+    await _render_upload_intro_screen(callback, state, user)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:rules:ack")
+async def myphoto_rules_ack(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    await set_upload_rules_ack_at(int(user["id"]))
+    await _start_upload_wizard(callback, state, user_id=int(user["id"]))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:add")
+@router.callback_query(F.data == "myphoto:add:extra")
 async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     """Старт мастера загрузки новой работы.
 
@@ -2510,30 +2640,11 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    await state.set_state(MyPhotoStates.waiting_photo)
-    is_extra = (callback.data or "") == "myphoto:add:extra"
-    await state.update_data(
-        upload_msg_id=callback.message.message_id,
-        upload_chat_id=callback.message.chat.id,
-        upload_is_photo=bool(getattr(callback.message, "photo", None)),
-        upload_user_id=user_id,
-        file_id=None,
-        title=None,
-        upload_is_extra=is_extra,
-    )
+    if await should_show_upload_rules(int(user_id)):
+        await _show_upload_rules_screen(callback, state, user)
+        return
 
-    text = "Отправь фотографию (1 шт.), которую хочешь добавить."
-    kb = build_upload_wizard_kb(back_to="menu")
-
-    sent_msg_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
-    if sent_msg_id is None:
-        sent_msg_id = int(callback.message.message_id)
-    await state.update_data(
-        upload_msg_id=sent_msg_id,
-        upload_chat_id=callback.message.chat.id,
-        upload_is_photo=False,
-    )
-
+    await _start_upload_wizard(callback, state, user_id=int(user_id))
     await callback.answer()
 
 
