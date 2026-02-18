@@ -113,8 +113,8 @@ async def _edit_or_replace_text(
 def _upload_processing_error_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:open"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:open"),
     )
     return kb.as_markup()
 
@@ -736,8 +736,8 @@ def build_upload_rules_wait_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="⏳ Читаю…", callback_data="myphoto:rules:wait"))
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:rules:back"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:rules:back"),
     )
     return kb.as_markup()
 
@@ -746,8 +746,8 @@ def build_upload_rules_ack_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✅ Ознакомился(ась) → дальше", callback_data="myphoto:rules:ack"))
     kb.row(
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:rules:back"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:rules:back"),
     )
     return kb.as_markup()
 
@@ -838,8 +838,8 @@ def build_my_photo_keyboard(
                 ),
             ],
             [
-                InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:gallery"),
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:gallery"),
             ],
         ]
     )
@@ -1208,10 +1208,11 @@ def _build_myphoto_gallery_kb(
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for photo in photos:
-        tag_emoji = _tag_emoji(str(photo.get("tag") or ""))
+        tag_key = str(photo.get("tag") or "").strip()
+        left_emoji = _tag_emoji(tag_key) if tag_key else "📸"
         kb.row(
             InlineKeyboardButton(
-                text=f"📷 {_short_title_for_button(photo.get('title'))} {tag_emoji}",
+                text=f"{left_emoji} {_short_title_for_button(photo.get('title'))}",
                 callback_data=f"myphoto:view:{int(photo['id'])}",
             )
         )
@@ -1297,7 +1298,7 @@ async def _render_myphoto_gallery(
 
 def _compute_photo_status(*, rank: int | None, votes_count: int, avg_score: float) -> str:
     if votes_count <= 0:
-        return "🆕 Новая работа (ждёт первые оценки)"
+        return "🆕 Новая работа"
     if votes_count < VOTES_STABILITY_THRESHOLD:
         return "🌱 Набирает оценки"
     if rank is not None and rank <= 10:
@@ -1307,6 +1308,16 @@ def _compute_photo_status(*, rank: int | None, votes_count: int, avg_score: floa
     if avg_score < 6:
         return "📉 Нужны оценки"
     return "✅ Стабильная позиция"
+
+def _format_status_line(status: str) -> str:
+    raw = (status or "").strip()
+    if not raw:
+        return "📌 Статус: <b>—</b>"
+    parts = raw.split(maxsplit=1)
+    if len(parts) == 2:
+        icon, text = parts[0], parts[1]
+        return f"{_esc_html(icon)} Статус: <b>{_esc_html(text)}</b>"
+    return f"📌 Статус: <b>{_esc_html(raw)}</b>"
 
 def _esc_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1576,14 +1587,12 @@ async def build_my_photo_main_text(photo: dict) -> str:
     if views_total > 0:
         metric_parts.append(f"👁: <b>{views_total}</b>")
     lines.append(" · ".join(metric_parts))
-    lines.append(f"📌 Статус: <b>{_esc_html(computed_status)}</b>")
+    lines.append(_format_status_line(computed_status))
     if time_left != "—":
         lines.append(f"⏳ До архива: <b>{_esc_html(time_left)}</b>")
 
     if votes_count < VOTES_STABILITY_THRESHOLD:
         lines.append(f"🚀 До стабильного рейтинга: ещё <b>{VOTES_STABILITY_THRESHOLD - votes_count}</b> оценок")
-
-    lines.extend(["", _context_mission(votes_count), _context_tip(votes_count)])
 
     description = str(photo.get("description") or "").strip()
     if description and description.lower() not in {"нет", "none", "null"}:
@@ -2096,7 +2105,7 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
             lines.append(f"🔥 За сегодня: <b>{votes_today}</b>")
 
         lines.append("")
-        lines.append(f"📌 Статус: <b>{_esc_html(computed_status)}</b>")
+        lines.append(_format_status_line(computed_status))
         lines.append(f"⏳ До архивирования: <b>{_esc_html(time_left)}</b>")
 
         if is_premium_user:
@@ -2804,8 +2813,8 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
 def _myphoto_back_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
     )
     return kb.as_markup()
 
@@ -2831,8 +2840,8 @@ def _myphoto_comments_kb(
         kb.row(*nav_row)
 
     kb.row(
-        InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
     )
     return kb.as_markup()
 
@@ -2970,8 +2979,10 @@ async def myphoto_comments(callback: CallbackQuery, state: FSMContext):
     if nav:
         kb.row(*nav)
 
-    kb.row(InlineKeyboardButton(text="📸 К фото", callback_data=f"myphoto:back:{photo_id}"))
-    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    kb.row(
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
+    )
 
     try:
         if callback.message.photo:
