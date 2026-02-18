@@ -828,10 +828,7 @@ def build_my_photo_keyboard(
     photo_id: int,
     *,
     ratings_enabled: bool | None = None,
-    can_add_more: bool = False,
     is_premium_user: bool = False,
-    nav_prev: bool = False,
-    nav_next: bool = False,
     locked: bool = False,
     show_premium_cta: bool = False,
     premium_back_cb: str | None = None,
@@ -854,29 +851,23 @@ def build_my_photo_keyboard(
             InlineKeyboardButton(text=t("myphoto.btn.stats", lang), callback_data=f"myphoto:stats:{photo_id}"),
         ])
 
-    nav_row: list[InlineKeyboardButton] = []
-    if can_add_more:
-        nav_row.append(InlineKeyboardButton(text=t("myphoto.btn.add", lang), callback_data="myphoto:add_intro:extra"))
-    elif nav_prev or nav_next:
-        if nav_prev:
-            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data="myphoto:nav:prev"))
-        if nav_next:
-            nav_row.append(InlineKeyboardButton(text="➡️", callback_data="myphoto:nav:next"))
-    if nav_row:
-        rows.append(nav_row)
-
     if locked and show_premium_cta:
-        back_cb = premium_back_cb or "menu:back"
+        back_cb = premium_back_cb or "myphoto:gallery"
         rows.append([InlineKeyboardButton(text=t("myphoto.btn.premium", lang), callback_data=f"premium:open:{back_cb}")])
 
     rows.append(
         [
-            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
             InlineKeyboardButton(
                 text=t("myphoto.btn.delete", lang),
                 callback_data=f"myphoto:delete:{photo_id}",
                 style="danger",
             ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="myphoto:gallery"),
+            InlineKeyboardButton(text=HOME, callback_data="menu:back"),
         ]
     )
 
@@ -1140,6 +1131,113 @@ def _is_photo_active_for_myphoto(photo: dict | None) -> bool:
     if exp_dt.tzinfo is None and now.tzinfo is not None:
         exp_dt = exp_dt.replace(tzinfo=now.tzinfo)
     return exp_dt > now
+
+
+def _short_title_for_button(title: object, *, limit: int = 28) -> str:
+    s = str(title or "Без названия").strip().replace("\n", " ")
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)].rstrip() + "…"
+
+
+async def _load_active_myphoto_gallery(user_id: int) -> list[dict]:
+    photos = await get_active_photos_for_user(int(user_id), limit=10)
+    photos = [p for p in photos if _is_photo_active_for_myphoto(p)]
+    try:
+        photos = sorted(
+            photos,
+            key=lambda p: (p.get("created_at") or "", p.get("id") or 0),
+            reverse=True,
+        )
+    except Exception:
+        pass
+    return photos[:2]
+
+
+def _build_myphoto_gallery_kb(
+    photos: list[dict],
+    *,
+    can_add_more: bool,
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for photo in photos:
+        kb.row(
+            InlineKeyboardButton(
+                text=f"📷 {_short_title_for_button(photo.get('title'))}",
+                callback_data=f"myphoto:view:{int(photo['id'])}",
+            )
+        )
+    if can_add_more:
+        kb.row(InlineKeyboardButton(text="➕ Добавить фото", callback_data="myphoto:add_intro:extra"))
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:back"),
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+async def _build_myphoto_gallery_text(
+    photos: list[dict],
+    *,
+    denied_reason: str | None = None,
+) -> str:
+    lines: list[str] = ["🖼 <b>Галерея активных фотографий</b>", ""]
+    for idx, photo in enumerate(photos, start=1):
+        title = _esc_html(str(photo.get("title") or "Без названия"))
+        try:
+            stats = await get_photo_stats(int(photo["id"]))
+        except Exception:
+            stats = {}
+        bayes_raw = stats.get("bayes_score")
+        if bayes_raw is None:
+            bayes_str = "—"
+        else:
+            bayes_str = _fmt_avg(float(bayes_raw))
+        votes_count = int(stats.get("ratings_count") or photo.get("votes_count") or 0)
+        time_left = _format_time_left(photo.get("expires_at"))
+        lines.append(f"{idx}. <code>\"{title}\"</code>")
+        meta = [f"⭐ {bayes_str}", f"🗳 {votes_count}"]
+        if time_left != "—":
+            meta.append(f"⏳ {_esc_html(time_left)}")
+        lines.append(" · ".join(meta))
+        lines.append("")
+    if denied_reason:
+        lines.append(f"⚠️ {_esc_html(denied_reason)}")
+    return "\n".join(lines).strip()
+
+
+async def _render_myphoto_gallery(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+    *,
+    photos: list[dict] | None = None,
+) -> bool:
+    user_id = int(user["id"])
+    if photos is None:
+        photos = await _load_active_myphoto_gallery(user_id)
+    if not photos:
+        return False
+
+    can_upload_today = True
+    denied_reason: str | None = None
+    if not is_unlimited_upload_user(user):
+        can_upload_today, denied_reason = await check_can_upload_today(user_id)
+
+    can_add_more = len(photos) < 2 and can_upload_today
+    text = await _build_myphoto_gallery_text(
+        photos,
+        denied_reason=denied_reason if (len(photos) < 2 and not can_upload_today) else None,
+    )
+    kb = _build_myphoto_gallery_kb(photos, can_add_more=can_add_more)
+    sent_id = await _edit_or_replace_text(callback, text, kb)
+    if sent_id is not None:
+        await remember_screen(callback.from_user.id, sent_id, state=state)
+    await state.update_data(
+        myphoto_ids=[int(p["id"]) for p in photos],
+        myphoto_last_id=int(photos[0]["id"]),
+    )
+    return True
 
 
 def _compute_photo_status(*, rank: int | None, votes_count: int, avg_score: float) -> str:
@@ -1416,9 +1514,6 @@ async def _show_my_photo_section(
     service_message: Message,
     state: FSMContext,
     photo: dict,
-    nav_prev: bool = False,
-    nav_next: bool = False,
-    can_add_more: bool = False,
     is_premium_user: bool = False,
     locked: bool = False,
     user: dict | None = None,
@@ -1436,10 +1531,7 @@ async def _show_my_photo_section(
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
-        can_add_more=can_add_more,
         is_premium_user=is_premium_user,
-        nav_prev=nav_prev,
-        nav_next=nav_next,
         locked=locked,
         lang=lang,
     )
@@ -1469,9 +1561,6 @@ async def _edit_or_replace_my_photo_message(
     state: FSMContext,
     photo: dict,
     *,
-    nav_prev: bool | None = None,
-    nav_next: bool | None = None,
-    can_add_more: bool | None = None,
     is_premium_user: bool | None = None,
     locked: bool | None = None,
 ) -> None:
@@ -1509,20 +1598,13 @@ async def _edit_or_replace_my_photo_message(
             except Exception:
                 ids = []
 
-    current_idx = 0
-    if photo.get("id") in ids:
-        current_idx = ids.index(photo["id"])
-    if nav_prev is None:
-        nav_prev = current_idx > 0
-    if nav_next is None:
-        nav_next = current_idx < len(ids) - 1
-    if can_add_more is None:
-        can_upload_today = True
-        if user and not is_unlimited_upload_user(user):
-            can_upload_today, _ = await check_can_upload_today(int(user["id"]))
-        can_add_more = len(ids) < 2 and can_upload_today
     if is_premium_user is None:
         is_premium_user = bool(data.get("myphoto_is_premium"))
+        if not is_premium_user and user and user.get("tg_id"):
+            try:
+                is_premium_user = await is_user_premium_active(int(user["tg_id"]))
+            except Exception:
+                pass
     if locked is None:
         locked_ids = set(data.get("myphoto_locked_ids") or [])
         locked = photo.get("id") in locked_ids
@@ -1532,17 +1614,14 @@ async def _edit_or_replace_my_photo_message(
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
-        can_add_more=bool(can_add_more),
         is_premium_user=bool(is_premium_user),
-        nav_prev=bool(nav_prev),
-        nav_next=bool(nav_next),
         locked=bool(locked),
         show_premium_cta=bool(locked and not is_premium_user and len(ids) > 1),
-        premium_back_cb=f"myphoto:open",
+        premium_back_cb="myphoto:gallery",
         lang=lang,
     )
 
-    # 1) Пробуем edit_media (идеально для перелистывания 2 фото)
+    # 1) Пробуем edit_media для текущего экрана карточки фото.
     try:
         if msg.photo:
             await msg.edit_media(
@@ -1609,13 +1688,18 @@ async def _edit_or_replace_caption_with_photo(
 
 
 @router.callback_query(F.data == "myphoto:open")
+@router.callback_query(F.data == "myphoto:gallery")
 async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
-    if should_throttle(callback.from_user.id, "myphoto:open", 1.0):
-        try:
-            await callback.answer("Секунду…", show_alert=False)
-        except Exception:
-            pass
-        return
+    cb_data = callback.data or ""
+    if cb_data in {"myphoto:open", "myphoto:gallery"}:
+        throttle_key = "myphoto:gallery" if cb_data == "myphoto:gallery" else "myphoto:open"
+        if should_throttle(callback.from_user.id, throttle_key, 1.0):
+            try:
+                await callback.answer("Секунду…", show_alert=False)
+            except Exception:
+                pass
+            return
+
     await cleanup_previous_screen(
         callback.message.bot,
         callback.message.chat.id,
@@ -1640,215 +1724,89 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
         )
     except Exception:
         pass
-    data = await state.get_data()
-    menu_msg_id = data.get("menu_msg_id")
-    opened_from_menu = menu_msg_id and callback.message and callback.message.message_id == menu_msg_id
 
-    is_admin = is_admin_user(user)
-    is_unlimited = is_unlimited_upload_user(user)
-    user_id = user["id"]
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    photos = await get_latest_photos_for_user(user_id, limit=10)
-    # сортируем новые сверху
-    try:
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
-    except Exception:
-        pass
-
-    # Ограничиваем набор до 2 фото (премиум максимум две активные)
-    photos = photos[:2]
-
-    photo: dict | None = None
-    current_idx = 0
+    photos = await _load_active_myphoto_gallery(int(user["id"]))
     if photos:
-        data = await state.get_data()
-        last_pid = data.get("myphoto_last_id")
-        photo_ids = [p["id"] for p in photos]
-        if last_pid and last_pid in photo_ids:
-            current_idx = photo_ids.index(last_pid)
-            photo = photos[current_idx]
-        else:
-            photo = photos[0]
-    locked_ids: list[int] = []
-
-    if photo is None:
-        data = await state.get_data()
-        last_pid = data.get("myphoto_last_id")
-        if last_pid:
-            candidate = await get_photo_by_id(last_pid)
-            if _is_photo_active_for_myphoto(candidate):
-                photo = candidate
-
-    # Если сегодняшняя работа помечена как удалённая, но ты админ —
-    # пробуем вернуть последнюю живую работу (любого дня)
-    if photo is not None and photo.get("is_deleted") and is_admin:
-        data = await state.get_data()
-        last_pid = data.get("myphoto_last_id")
-        if last_pid:
-            candidate = await get_photo_by_id(last_pid)
-            if _is_photo_active_for_myphoto(candidate):
-                photo = candidate
-
-    if photo is None:
-        archived_count = 0
         try:
-            archived_count = await get_archived_photos_count(int(user_id))
-        except Exception:
-            archived_count = 0
-
-        if archived_count > 0:
-            text = "Активной фотографии сейчас нет. Она уже в архиве 📚"
-            kb = _build_no_active_myphoto_kb()
-            await state.update_data(
-                myphoto_ids=[],
-                myphoto_current_idx=0,
-                myphoto_last_id=None,
-                myphoto_is_premium=is_premium_user,
-                myphoto_locked_ids=[],
-            )
-            sent_id = None
-            if opened_from_menu:
-                sent = await callback.message.bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text=text,
-                    reply_markup=kb,
-                    disable_notification=True,
-                )
-                sent_id = sent.message_id
+            if user.get("tg_id"):
+                is_premium_user = await is_user_premium_active(int(user["tg_id"]))
             else:
-                sent_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
-            if sent_id is not None:
-                await remember_screen(callback.from_user.id, sent_id, state=state)
-            await callback.answer()
-            return
-
-        can_upload_today = True
-        denied_reason = None
-        if not is_unlimited:
-            can_upload_today, denied_reason = await check_can_upload_today(int(user_id))
-        limit, current, remaining = await _idea_counters(user, is_premium_user)
-        kb = build_upload_intro_kb(remaining=remaining, limit=limit)
-
-        idea_title, idea_hint = _get_daily_idea()
-        text = _build_upload_intro_text(
-            user,
-            idea_label="Идея дня",
-            idea_title=idea_title,
-            idea_hint=idea_hint,
-            publish_notice=(
-                denied_reason or "Публикация сегодня недоступна. Завтра можно."
-                if not can_upload_today
-                else None
-            ),
-        )
+                is_premium_user = False
+        except Exception:
+            is_premium_user = False
         await state.update_data(
-            myphoto_ids=[],
-            myphoto_current_idx=0,
-            myphoto_last_id=None,
-            myphoto_is_premium=is_premium_user,
+            myphoto_ids=[int(p["id"]) for p in photos],
+            myphoto_last_id=int(photos[0]["id"]),
+            myphoto_is_premium=bool(is_premium_user),
             myphoto_locked_ids=[],
         )
+        await _render_myphoto_gallery(callback, state, user, photos=photos)
+        await callback.answer()
+        return
 
-        sent_id = None
-        if opened_from_menu:
-            sent = await callback.message.bot.send_message(
-                chat_id=callback.message.chat.id,
-                text=text,
-                reply_markup=kb,
-                disable_notification=True,
-            )
-            sent_id = sent.message_id
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(int(user["tg_id"]))
         else:
-            try:
-                if callback.message.photo:
-                    await callback.message.edit_caption(caption=text, reply_markup=kb)
-                else:
-                    await callback.message.edit_text(text, reply_markup=kb)
-                sent_id = callback.message.message_id
-            except Exception:
-                try:
-                    await callback.message.delete()
-                except Exception:
-                    pass
-                sent = await callback.message.bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text=text,
-                    reply_markup=kb,
-                    disable_notification=True,
-                )
-                sent_id = sent.message_id
-
-        if sent_id is not None:
-            await remember_screen(callback.from_user.id, sent_id, state=state)
-
-        await callback.answer()
-        return
-
-    if photo.get("is_deleted"):
-        limit, current, remaining = await _idea_counters(user, is_premium_user)
-        can_upload_today = True
-        denied_reason = None
-        if not is_unlimited:
-            can_upload_today, denied_reason = await check_can_upload_today(int(user_id))
-        idea_title, idea_hint = _get_daily_idea()
-        text = _build_upload_intro_text(
-            user,
-            idea_label="Идея дня",
-            idea_title=idea_title,
-            idea_hint=idea_hint,
-            publish_notice=(
-                denied_reason or "Публикация сегодня недоступна. Завтра можно."
-                if not can_upload_today
-                else None
-            ),
-        )
-        sent_id = await _edit_or_replace_text(
-            callback,
-            text,
-            build_upload_intro_kb(remaining=remaining, limit=limit),
-        )
-        if sent_id is not None:
-            await remember_screen(callback.from_user.id, sent_id, state=state)
-        await callback.answer()
-        return
-
-    # Сохраняем список фото и текущий индекс в state для навигации
-    photo_ids = [p["id"] for p in photos]
+            is_premium_user = False
+    except Exception:
+        is_premium_user = False
     await state.update_data(
-        myphoto_ids=photo_ids,
-        myphoto_current_idx=current_idx,
-        myphoto_last_id=photo["id"],
-        myphoto_is_premium=is_premium_user,
-        myphoto_locked_ids=locked_ids,
+        myphoto_ids=[],
+        myphoto_last_id=None,
+        myphoto_is_premium=bool(is_premium_user),
+        myphoto_locked_ids=[],
     )
+    await _render_upload_intro_screen(callback, state, user, second=False)
+    await callback.answer()
 
-    nav_prev = current_idx > 0
-    nav_next = current_idx < len(photo_ids) - 1
-    can_upload_today = True
-    if not is_unlimited:
-        can_upload_today, _ = await check_can_upload_today(int(user_id))
-    can_add_more = len(photo_ids) < 2 and can_upload_today
-    locked = False
 
-    await _show_my_photo_section(
-        chat_id=callback.message.chat.id,
-        service_message=callback.message,
-        state=state,
-        photo=photo,
-        nav_prev=nav_prev,
-        nav_next=nav_next,
-        can_add_more=can_add_more,
-        is_premium_user=is_premium_user,
-        locked=locked,
-        user=user,
+@router.callback_query(F.data.regexp(r"^myphoto:view:(\d+)$"))
+async def myphoto_view(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    try:
+        photo_id = int((callback.data or "").split(":")[2])
+    except Exception:
+        await callback.answer("Ошибка.")
+        return
+
+    photo = await get_photo_by_id(photo_id)
+    if (
+        photo is None
+        or int(photo.get("user_id", 0)) != int(user.get("id", 0))
+        or photo.get("is_deleted")
+        or not _is_photo_active_for_myphoto(photo)
+    ):
+        await callback.answer("Фотография не найдена.", show_alert=True)
+        photos = await _load_active_myphoto_gallery(int(user["id"]))
+        if photos:
+            await _render_myphoto_gallery(callback, state, user, photos=photos)
+        else:
+            await _render_upload_intro_screen(callback, state, user, second=False)
+        return
+
+    data = await state.get_data()
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+    is_premium_user = bool(data.get("myphoto_is_premium"))
+    if not is_premium_user and user.get("tg_id"):
+        try:
+            is_premium_user = await is_user_premium_active(int(user["tg_id"]))
+        except Exception:
+            pass
+
+    await state.update_data(
+        myphoto_last_id=int(photo_id),
+        myphoto_is_premium=bool(is_premium_user),
     )
-
+    await _edit_or_replace_my_photo_message(
+        callback,
+        state,
+        photo,
+        is_premium_user=bool(is_premium_user),
+        locked=photo_id in locked_ids,
+    )
     await callback.answer()
 
 
@@ -1917,89 +1875,11 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
 # ========= Навигация по своим фотографиям =========
 @router.callback_query(F.data.startswith("myphoto:nav:"))
 async def myphoto_nav(callback: CallbackQuery, state: FSMContext):
-    """
-    Навигация по своим фотографиям: вперёд / назад.
-    Работает на основе списка активных работ пользователя.
-    """
-    user = await _ensure_user(callback)
-    if user is None:
-        return
-
-    direction = (callback.data or "").split(":")[-1]
-    user_id = int(user["id"])
-    is_unlimited = is_unlimited_upload_user(user)
-
-    is_premium_user = False
-    try:
-        if user.get("tg_id"):
-            is_premium_user = await is_user_premium_active(user["tg_id"])
-    except Exception:
-        is_premium_user = False
-
-    photos = await get_active_photos_for_user(user_id, limit=2)
-    try:
-        photos = sorted(photos, key=lambda p: (p.get("created_at") or "", p.get("id") or 0))
-    except Exception:
-        pass
-    photos = photos[:2]
-
-    if not photos:
-        await my_photo_menu(callback, state)
-        return
-
-    photo_ids = [p["id"] for p in photos]
-    data = await state.get_data()
-    current_idx = int(data.get("myphoto_current_idx") or 0)
-    last_pid = data.get("myphoto_last_id")
-    if last_pid in photo_ids:
-        current_idx = photo_ids.index(last_pid)
-    current_idx = max(0, min(current_idx, len(photo_ids) - 1))
-
-    if direction == "next" and current_idx < len(photo_ids) - 1:
-        current_idx += 1
-    elif direction == "prev" and current_idx > 0:
-        current_idx -= 1
-
-    photo = photos[current_idx]
-    nav_prev = current_idx > 0
-    nav_next = current_idx < len(photo_ids) - 1
-    can_upload_today = True
-    if not is_unlimited:
-        can_upload_today, _ = await check_can_upload_today(int(user_id))
-    can_add_more = len(photo_ids) < 2 and can_upload_today
-    locked = False
-
-    await state.update_data(
-        myphoto_ids=photo_ids,
-        myphoto_current_idx=current_idx,
-        myphoto_last_id=photo["id"],
-        myphoto_is_premium=is_premium_user,
-        myphoto_locked_ids=[],
-    )
-
-    await _edit_or_replace_my_photo_message(
-        callback,
-        state,
-        photo,
-        nav_prev=nav_prev,
-        nav_next=nav_next,
-        can_add_more=can_add_more,
-        is_premium_user=is_premium_user,
-        locked=False,
-    )
-    await callback.answer()
+    # Legacy callback from old keyboards: now opens gallery.
+    await my_photo_menu(callback, state)
 
 
 _MY_ARCHIVE_PAGE_SIZE = 5
-
-
-def _build_no_active_myphoto_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="📚 Архив", callback_data="myphoto:archive:0"),
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-    )
-    return kb.as_markup()
 
 
 _MONTHS_RU_SHORT = {
@@ -2892,7 +2772,6 @@ async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    await callback.answer("Фотография удалена.")
     # Обновляем раздел «Моя фотография» после удаления
     await my_photo_menu(callback, state)
     return
@@ -2917,44 +2796,21 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
     if photo is None or int(photo.get("user_id", 0)) != int(user["id"]) or photo.get("is_deleted"):
         await callback.answer("Ок")
         return
-    caption = await build_my_photo_main_text(photo)
-    # show_premium_cta: если фото залочено и у пользователя нет премиума, но есть 2 фото
     data = await state.get_data()
-    ids = data.get("myphoto_ids") or []
-    is_premium_user = await is_user_premium_active(user["tg_id"])
-    current_idx = ids.index(photo["id"]) if photo["id"] in ids else 0
-    nav_prev = current_idx > 0
-    nav_next = current_idx < len(ids) - 1
-    can_upload_today = True
-    if not is_unlimited_upload_user(user):
-        can_upload_today, _ = await check_can_upload_today(int(user["id"]))
-    can_add_more = len(ids) < 2 and can_upload_today
-    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
-    kb = build_my_photo_keyboard(
-        photo["id"],
-        ratings_enabled=_photo_ratings_enabled(photo),
-        can_add_more=can_add_more,
-        nav_prev=nav_prev,
-        nav_next=nav_next,
-        show_premium_cta=bool(photo.get("locked") or (len(ids) > 1 and not is_premium_user)),
-        lang=lang,
-    )
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=caption, reply_markup=kb)
-        else:
-            await callback.message.edit_text(caption, reply_markup=kb)
-    except Exception:
+    is_premium_user = bool(data.get("myphoto_is_premium"))
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+    if not is_premium_user and user.get("tg_id"):
         try:
-            await callback.message.delete()
+            is_premium_user = await is_user_premium_active(int(user["tg_id"]))
         except Exception:
             pass
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=caption,
-            reply_markup=kb,
-            disable_notification=True,
-        )
+    await _edit_or_replace_my_photo_message(
+        callback,
+        state,
+        photo,
+        is_premium_user=bool(is_premium_user),
+        locked=photo_id in locked_ids,
+    )
     await callback.answer("Отменено")
 
 
@@ -3017,51 +2873,20 @@ async def myphoto_back(callback: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
-    ids: list[int] = data.get("myphoto_ids") or []
-    try:
-        current_idx = ids.index(photo_id) if photo_id in ids else 0
-    except Exception:
-        current_idx = 0
-    nav_prev = current_idx > 0
-    nav_next = current_idx < len(ids) - 1
-    can_upload_today = True
-    if not is_unlimited_upload_user(user):
-        can_upload_today, _ = await check_can_upload_today(int(user["id"]))
-    can_add_more = len(ids) < 2 and can_upload_today
     is_premium_user = bool(data.get("myphoto_is_premium"))
-    locked_ids = set(data.get("myphoto_locked_ids") or [])
-
-    caption = await build_my_photo_main_text(photo, locked=photo_id in locked_ids)
-    lang = (user.get("lang") or "ru").split("-")[0] if user else "ru"
-    kb = build_my_photo_keyboard(
-        photo_id,
-        ratings_enabled=_photo_ratings_enabled(photo),
-        can_add_more=can_add_more,
-        is_premium_user=is_premium_user,
-        nav_prev=nav_prev,
-        nav_next=nav_next,
-        locked=photo_id in locked_ids,
-        lang=lang,
-    )
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=caption, reply_markup=kb)
-        else:
-            await callback.message.edit_text(caption, reply_markup=kb)
-    except Exception:
+    if not is_premium_user and user.get("tg_id"):
         try:
-            await callback.message.delete()
+            is_premium_user = await is_user_premium_active(int(user["tg_id"]))
         except Exception:
             pass
-        await callback.message.bot.send_photo(
-            chat_id=callback.message.chat.id,
-            photo=_photo_public_id(photo),
-            caption=caption,
-            reply_markup=kb,
-            disable_notification=True,
-        )
-
+    locked_ids = set(data.get("myphoto_locked_ids") or [])
+    await _edit_or_replace_my_photo_message(
+        callback,
+        state,
+        photo,
+        is_premium_user=bool(is_premium_user),
+        locked=photo_id in locked_ids,
+    )
     await callback.answer()
 
 
@@ -3678,29 +3503,15 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     except Exception:
         active_photos_after = [photo]
     photo_ids_after = [p["id"] for p in active_photos_after]
-    try:
-        current_idx = photo_ids_after.index(photo["id"])
-    except ValueError:
-        current_idx = 0
-    nav_prev = current_idx > 0
-    nav_next = current_idx < len(photo_ids_after) - 1
 
     lang = "ru"
     if actor:
         lang = (actor.get("lang") or "ru").split("-")[0]
 
-    can_upload_today = True
-    if actor and not is_unlimited_upload_user(actor):
-        can_upload_today, _ = await check_can_upload_today(int(user_id))
-    can_add_more = len(photo_ids_after) < 2 and can_upload_today
-
     kb = build_my_photo_keyboard(
         photo["id"],
         ratings_enabled=_photo_ratings_enabled(photo),
-        can_add_more=can_add_more,
         is_premium_user=is_premium_user,
-        nav_prev=nav_prev,
-        nav_next=nav_next,
         lang=lang,
     )
 
@@ -3729,7 +3540,6 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     await state.clear()
     await state.update_data(
         myphoto_ids=photo_ids_after,
-        myphoto_current_idx=current_idx,
         myphoto_last_id=photo["id"],
         myphoto_is_premium=is_premium_user,
         myphoto_photo_msg_id=final_msg_id,

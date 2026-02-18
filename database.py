@@ -5358,21 +5358,48 @@ async def mark_photo_deleted(photo_id: int) -> None:
 
 
 async def mark_photo_deleted_by_user(photo_id: int, user_id: int) -> None:
-    """Мягкое удаление пользователем — блокирует слот дня."""
+    """Мягкое удаление пользователем — блокирует слот дня и вычищает из итогов."""
     p = _assert_pool()
     async with p.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE photos
-            SET is_deleted=1,
-                status='deleted',
-                deleted_reason='user',
-                deleted_at=NOW()
-            WHERE id=$1 AND user_id=$2
-            """,
-            int(photo_id),
-            int(user_id),
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE photos
+                SET is_deleted=1,
+                    status='deleted',
+                    deleted_reason='user',
+                    deleted_at=NOW()
+                WHERE id=$1 AND user_id=$2
+                RETURNING submit_day
+                """,
+                int(photo_id),
+                int(user_id),
+            )
+            if not row:
+                return
+
+            # Удаленная пользователем работа не должна участвовать в итогах/архиве.
+            await conn.execute(
+                "DELETE FROM result_ranks WHERE photo_id=$1",
+                int(photo_id),
+            )
+            await conn.execute(
+                """
+                DELETE FROM notification_queue
+                WHERE type='daily_results_top'
+                  AND status='pending'
+                  AND (payload->>'photo_id')::bigint = $1
+                """,
+                int(photo_id),
+            )
+
+            submit_day = row.get("submit_day")
+            if submit_day is not None:
+                # Сбрасываем кэш дня, чтобы при следующей публикации итогов снэпшот пересобрался без этой фото.
+                await conn.execute(
+                    "DELETE FROM daily_results_cache WHERE submit_day=$1::date",
+                    submit_day,
+                )
 
 
 async def hard_delete_photo(photo_id: int) -> None:
@@ -7369,6 +7396,7 @@ async def get_user_stats_overview(
             FROM result_ranks rr
             JOIN photos p ON p.id = rr.photo_id
             WHERE p.user_id = ANY($1::bigint[])
+              AND COALESCE(p.is_deleted,0)=0
             """,
             candidate_user_ids,
         )
