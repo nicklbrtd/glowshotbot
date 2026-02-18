@@ -34,7 +34,6 @@ from database import (
     set_photo_moderation_status,
     get_photo_by_id,
     get_user_by_id,
-    get_moderators,
     is_user_premium_active,
     get_awards_for_user,
     try_award_referral,
@@ -81,6 +80,17 @@ from utils.registration_guard import require_user_name
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+async def _rate_tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.6) -> bool:
+    if not should_throttle(callback.from_user.id, key, seconds):
+        return False
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+    return True
+
 
 # --- Helper: Touch giraffe banner without changing reply-keyboard (for inline callbacks) ---
 async def _touch_giraffe_banner(bot, chat_id: int, tg_id: int) -> None:
@@ -2015,6 +2025,8 @@ async def rate_tutorial_ok(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:comment:"))
 async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _rate_tap_guard(callback, "rate:comment", 0.7):
+        return
     if await _deny_if_full_banned(callback=callback):
         return
     touched = False
@@ -2103,6 +2115,8 @@ async def rate_comment(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:comment_mode:"))
 async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _rate_tap_guard(callback, "rate:comment_mode", 0.7):
+        return
     if await _deny_if_full_banned(callback=callback):
         return
     touched = False
@@ -2174,6 +2188,8 @@ async def rate_comment_mode(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:report:"))
 async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _rate_tap_guard(callback, "rate:report", 0.7):
+        return
     if await _deny_if_full_banned(callback=callback):
         return
     touched = False
@@ -2240,6 +2256,8 @@ async def rate_report(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rate:report_reason:"))
 async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _rate_tap_guard(callback, "rate:report_reason", 0.7):
+        return
     if await _deny_if_full_banned(callback=callback):
         return
     touched = False
@@ -2298,6 +2316,8 @@ async def rate_report_reason(callback: CallbackQuery, state: FSMContext) -> None
 
 @router.callback_query(F.data.startswith("rate:return:"))
 async def rate_return_to_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _rate_tap_guard(callback, "rate:return", 0.55):
+        return
     if await _deny_if_full_banned(callback=callback):
         return
     touched = False

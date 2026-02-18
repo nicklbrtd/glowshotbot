@@ -2,7 +2,7 @@ from aiogram import Router, F
 import html
 from utils.i18n import t
 from utils.banner import sync_giraffe_section_nav
-from aiogram.types import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
@@ -38,10 +38,7 @@ from database import (
     set_ads_enabled_by_tg_id,
     get_user_block_status_by_tg_id,
     ensure_user_author_code,
-    set_all_user_photos_ratings_enabled,
-    set_user_allow_ratings_by_tg_id,
     get_user_stats,
-    get_archived_photos_for_user,
 )
 from keyboards.common import build_back_kb, build_confirm_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
@@ -53,6 +50,16 @@ from utils.time import get_moscow_now
 from utils.ui import cleanup_previous_screen, remember_screen
 
 router = Router()
+
+
+async def _profile_tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.8) -> bool:
+    if not should_throttle(callback.from_user.id, key, seconds):
+        return False
+    try:
+        await callback.answer("Секунду…", show_alert=False)
+    except Exception:
+        pass
+    return True
 
 
 # Helper to get language from user dict
@@ -721,6 +728,8 @@ async def profile_back_to_profile(callback: CallbackQuery):
     """
     Возврат к просмотру профиля из вложенных разделов (награды, настройки и т.п.).
     """
+    if await _profile_tap_guard(callback, "profile:back", 0.7):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе, странно. Попробуй /start.", show_alert=True)
@@ -1884,6 +1893,8 @@ def _kb_notifications_settings(
 
 @router.callback_query(F.data == "profile:settings:toggle:ads")
 async def profile_settings_toggle_ads(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:settings:toggle:ads", 0.9):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
@@ -1931,6 +1942,8 @@ async def profile_settings_toggle_ads(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:settings")
 async def profile_settings_open(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:settings", 0.7):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
@@ -1973,6 +1986,8 @@ async def profile_settings_open(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:settings:notifications")
 async def profile_settings_notifications(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:settings:notifications", 0.7):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     if user is None:
         await callback.answer("Тебя нет в базе. Попробуй /start.", show_alert=True)
@@ -1996,6 +2011,8 @@ async def profile_settings_notifications(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:settings:toggle:lang")
 async def profile_settings_toggle_lang(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:settings:toggle:lang", 0.9):
+        return
     tg_id = int(callback.from_user.id)
     current_user = await get_user_by_tg_id(tg_id)
     current_lang = _get_lang(current_user)
@@ -2041,6 +2058,8 @@ async def profile_settings_toggle_lang(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:settings:toggle:likes")
 async def profile_settings_toggle_likes(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:settings:toggle:likes", 0.7):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
 
@@ -2072,6 +2091,8 @@ async def profile_settings_toggle_likes(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:settings:toggle:comments")
 async def profile_settings_toggle_comments(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:settings:toggle:comments", 0.7):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     tg_id = int((user or {}).get("tg_id") or callback.from_user.id)
 
@@ -2134,6 +2155,8 @@ async def profile_settings_toggle_streak(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:delete")
 async def profile_delete_confirm(callback: CallbackQuery):
+    if await _profile_tap_guard(callback, "profile:delete", 0.9):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
 
@@ -2154,6 +2177,8 @@ async def profile_delete_confirm(callback: CallbackQuery):
 
 @router.callback_query(F.data == "profile:delete_confirm")
 async def profile_delete_do(callback: CallbackQuery, state: FSMContext):
+    if await _profile_tap_guard(callback, "profile:delete_confirm", 1.2):
+        return
     user = await get_user_by_tg_id(callback.from_user.id)
     lang = _get_lang(user)
 

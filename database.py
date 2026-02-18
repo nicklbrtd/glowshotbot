@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import os
 import random
@@ -34,8 +32,6 @@ from config import (
     STREAK_GRACE_HOURS,
     STREAK_MAX_NUDGES_PER_DAY,
 )
-
-import traceback
 
 DB_DSN = os.getenv("DATABASE_URL")
 pool: asyncpg.Pool | None = None

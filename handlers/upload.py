@@ -18,7 +18,6 @@ from utils.antispam import should_throttle
 from keyboards.common import HOME
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.dispatcher.event.bases import SkipHandler
 
 from database import (
     get_user_by_tg_id,
@@ -108,6 +107,17 @@ async def _edit_or_replace_text(
         return int(sent.message_id)
     except Exception:
         return None
+
+
+async def _tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.7) -> bool:
+    """Lightweight anti-spam guard for repeated callback taps."""
+    if not should_throttle(callback.from_user.id, key, seconds):
+        return False
+    try:
+        await callback.answer("Секунду…", show_alert=False)
+    except Exception:
+        pass
+    return True
 
 
 def _upload_processing_error_kb() -> InlineKeyboardMarkup:
@@ -349,6 +359,10 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
     # Если пришёл документ — пересылаем как фото для единообразия
     sent_photo = None
     try:
+        await message.bot.delete_message(chat_id=upload_chat_id, message_id=upload_msg_id)
+    except Exception:
+        pass
+    try:
         if photo_bytes is not None:
             sent_photo = await message.bot.send_photo(
                 chat_id=upload_chat_id,
@@ -364,11 +378,6 @@ async def _accept_image_for_upload(message: Message, state: FSMContext, source: 
             )
             file_id_to_preview = sent_photo.photo[-1].file_id if sent_photo and sent_photo.photo else file_id_to_preview
         else:
-            # Заменяем старое служебное сообщение на новое с фотографией
-            try:
-                await message.bot.delete_message(chat_id=upload_chat_id, message_id=upload_msg_id)
-            except Exception:
-                pass
             sent_photo = await message.bot.send_photo(
                 chat_id=upload_chat_id,
                 photo=file_id_to_preview,
@@ -871,25 +880,6 @@ def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     )
     return kb.as_markup()
 
-def build_edit_cancel_kb(photo_id: int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="✏️ К редактированию", callback_data=f"myphoto:editmenu:{photo_id}"),
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-    )
-    return kb.as_markup()
-
-
-def build_edit_desc_kb(photo_id: int, has_description: bool) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    if has_description:
-        kb.row(InlineKeyboardButton(text="🗑 Удалить описание", callback_data=f"myphoto:edit:desc_clear:{photo_id}"))
-    kb.row(
-        InlineKeyboardButton(text="✏️ К редактированию", callback_data=f"myphoto:editmenu:{photo_id}"),
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-    )
-    return kb.as_markup()
-
 def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -1139,31 +1129,6 @@ DAILY_TIPS: list[str] = [
     "💡 Совет дня: один сильный кадр лучше серии похожих",
 ]
 
-TIP_SEGMENTS: dict[str, list[str]] = {
-    "new": [
-        "💡 Совет дня: короткое и точное название помогает получить первые оценки.",
-        "💡 Совет дня: поставь релевантный тег, так фото быстрее понимают в ленте.",
-        "💡 Совет дня: оставь в кадре один главный объект без визуального шума.",
-        "💡 Совет дня: выровняй горизонт перед публикацией, это повышает восприятие.",
-        "💡 Совет дня: лёгкий контраст и чистый фон дают более уверенный старт.",
-    ],
-    "growing": [
-        "💡 Совет дня: чистая композиция и один сюжет обычно дают больше высоких оценок.",
-        "💡 Совет дня: мягкий свет утром/вечером чаще работает лучше жёсткого дневного.",
-        "💡 Совет дня: проверь вертикали и геометрию, особенно в архитектуре.",
-        "💡 Совет дня: убери лишние детали по краям, чтобы взгляд не рассыпался.",
-        "💡 Совет дня: делай акцент на глубине и отделении объекта от фона.",
-    ],
-    "stable": [
-        "💡 Совет дня: не удаляй работу в росте, стабильность часто даёт ещё оценки.",
-        "💡 Совет дня: удерживай качество серии, одинаковый уровень повышает доверие.",
-        "💡 Совет дня: в часы активности аудитории шанс добора оценок выше.",
-        "💡 Совет дня: не перегружай обработкой, естественный вид чаще выигрывает.",
-        "💡 Совет дня: фиксируй сильные решения из этого кадра для следующих работ.",
-    ],
-}
-
-
 def _daily_tip() -> str:
     if not DAILY_TIPS:
         return "💡 Совет дня: чистая композиция почти всегда выигрывает."
@@ -1173,31 +1138,6 @@ def _daily_tip() -> str:
 
 def _gallery_mission_text() -> str:
     return "🎯 Миссия дня: оцени 10 фото → +10 credits → твои работы покажут чаще"
-
-
-def _context_mission(votes_count: int) -> str:
-    if votes_count <= 0:
-        return "🎯 Быстрый старт: оцени 5 фото → получишь credits → твою работу начнут показывать"
-    if votes_count < VOTES_STABILITY_THRESHOLD:
-        return "🎯 Добей стабильность: оцени 10 фото → +10 credits → шанс добрать оценки выше"
-    return "🎯 Удержи позицию: оцени 10 фото → твои работы покажут чаще"
-
-
-def _context_tip(votes_count: int) -> str:
-    if votes_count <= 0:
-        key = "new"
-        segment_id = 0
-    elif votes_count < VOTES_STABILITY_THRESHOLD:
-        key = "growing"
-        segment_id = 1
-    else:
-        key = "stable"
-        segment_id = 2
-    tips = TIP_SEGMENTS.get(key) or DAILY_TIPS
-    if not tips:
-        return "💡 Совет дня: держи композицию чистой и читаемой."
-    idx = (get_moscow_now().date().toordinal() + segment_id * 13) % len(tips)
-    return tips[idx]
 
 
 def _build_myphoto_gallery_kb(
@@ -1385,10 +1325,6 @@ def build_upload_wizard_kb(*, back_to: str = "menu") -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Отмена", callback_data="myphoto:upload_cancel"),
         )
     return kb.as_markup()
-
-
-# Backward-compat alias for old typo name.
-buxild_upload_wizard_kb = build_upload_wizard_kb
 
 
 async def _ensure_user(callback: CallbackQuery | Message) -> dict | None:
@@ -1773,6 +1709,8 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:view:(\d+)$"))
 async def myphoto_view(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:view", 0.45):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -1810,6 +1748,8 @@ async def myphoto_view(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "myphoto:idea")
 async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:idea", 0.9):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -1821,7 +1761,7 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
     except Exception:
         is_premium_user = False
 
-    limit_per_week, current_used, remaining_before = await _idea_counters(user, is_premium_user)
+    limit_per_week, current_used, _ = await _idea_counters(user, is_premium_user)
     week_key = _current_week_key()
 
     if current_used >= limit_per_week:
@@ -2183,6 +2123,8 @@ async def myphoto_generate_idea_extra(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data.startswith("myphoto:ratings:"))
 async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:ratings_toggle", 0.8):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2229,6 +2171,8 @@ async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "myphoto:upload_cancel")
 async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
     """Cancel upload wizard and return to upload intro with ideas."""
+    if await _tap_guard(callback, "myphoto:upload_cancel", 0.8):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2244,6 +2188,8 @@ async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "myphoto:upload_back")
 async def myphoto_upload_back(callback: CallbackQuery, state: FSMContext):
     """Go back inside upload wizard (from title step back to photo step)."""
+    if await _tap_guard(callback, "myphoto:upload_back", 0.8):
+        return
     cur_state = await state.get_state()
 
     # If we are on title step — go back to photo step
@@ -2309,32 +2255,6 @@ def _user_photo_limits(user: dict, stats: dict, *, is_unlimited: bool) -> tuple[
     if is_unlimited:
         return 2, 10**9
     return 2, 1
-
-
-async def _can_user_upload_now(user: dict, is_premium_user: bool, is_unlimited: bool) -> tuple[bool, str | None]:
-    stats = {}
-    try:
-        stats = await get_user_stats(int(user["id"]))
-    except Exception:
-        stats = {}
-    max_active, _daily_limit = _user_photo_limits(user, stats, is_unlimited=is_unlimited)
-    user_id = int(user["id"])
-
-    if not is_unlimited:
-        can_upload, reason = await check_can_upload_today(user_id)
-        if not can_upload:
-            return False, reason or "Сегодня новая публикация недоступна."
-
-    active_count = 0
-    try:
-        active_count = len(await get_active_photos_for_user(user_id))
-    except Exception:
-        active_count = 0
-
-    if active_count >= max_active:
-        return False, "Сначала удалите текущую фотографию."
-
-    return True, None
 
 
 # ========= ДОБАВЛЕНИЕ ФОТО =========
@@ -2458,6 +2378,8 @@ async def myphoto_rules_wait(callback: CallbackQuery):
 
 @router.callback_query(F.data == "myphoto:rules:back")
 async def myphoto_rules_back(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:rules:back", 0.8):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2468,6 +2390,8 @@ async def myphoto_rules_back(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "myphoto:rules:ack")
 async def myphoto_rules_ack(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:rules:ack", 1.0):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2484,6 +2408,8 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     Шаг 1 — загрузка фотографии.
     """
 
+    if await _tap_guard(callback, "myphoto:add", 1.0):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2690,6 +2616,8 @@ async def myphoto_delete(callback: CallbackQuery, state: FSMContext):
     """
     Показывает подтверждение удаления своей фотографии (с премиум-предупреждением).
     """
+    if await _tap_guard(callback, "myphoto:delete", 0.9):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2750,6 +2678,8 @@ async def myphoto_delete_confirm(callback: CallbackQuery, state: FSMContext):
     """
     Подтверждение удаления своей фотографии.
     """
+    if await _tap_guard(callback, "myphoto:delete_confirm", 1.1):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -2788,6 +2718,8 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
     """
     Отмена удаления — восстановить карточку фото.
     """
+    if await _tap_guard(callback, "myphoto:delete_cancel", 0.8):
+        return
     user = await _ensure_user(callback)
     if user is None:
         await callback.answer("Ок")
@@ -2807,43 +2739,6 @@ async def myphoto_delete_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 # ====== MY PHOTO CALLBACK HANDLERS FOR COMMENTS/STATS/REPEAT/PROMOTE/EDIT ======
-
-# --- Helper keyboards ---
-def _myphoto_back_kb(photo_id: int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
-    )
-    return kb.as_markup()
-
-
-def _myphoto_comments_kb(
-    photo_id: int,
-    page: int,
-    has_prev: bool,
-    has_next: bool,
-    *,
-    sort_key: str = "date",
-    sort_dir: str = "desc",
-    show_sort: bool = False,
-) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-
-    nav_row: list[InlineKeyboardButton] = []
-    if has_prev:
-        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"myphoto:comments:{photo_id}:{page-1}"))
-    if has_next:
-        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"myphoto:comments:{photo_id}:{page+1}"))
-    if nav_row:
-        kb.row(*nav_row)
-
-    kb.row(
-        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:back:{photo_id}"),
-    )
-    return kb.as_markup()
-
 
 # --- Back to main card handler ---
 @router.callback_query(F.data.regexp(r"^myphoto:back:(\d+)$"))
@@ -3010,6 +2905,8 @@ async def myphoto_repeat(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:edit:(\d+)$"))
 async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:edit", 0.7):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -3052,6 +2949,8 @@ async def myphoto_edit(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:editmenu:(\d+)$"))
 async def myphoto_editmenu(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:editmenu", 0.7):
+        return
     try:
         await state.clear()
     except Exception:
@@ -3117,6 +3016,8 @@ async def myphoto_edit_device(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:device:set:(\d+):(phone|camera|other)$"))
 async def myphoto_device_set(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:device:set", 0.8):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
@@ -3180,6 +3081,8 @@ async def myphoto_edit_tag(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.regexp(r"^myphoto:tag:set:(\d+):(.*)$"))
 async def myphoto_tag_set(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:tag:set", 0.8):
+        return
     user = await _ensure_user(callback)
     if user is None:
         return
