@@ -1572,9 +1572,9 @@ async def build_my_photo_main_text(photo: dict) -> str:
     header = f"<b><code>\"{title_safe}\"</code>{device_suffix}</b>"
 
     lines: list[str] = [header, f"🏷️ Тег: <b>{tag_text}</b>", ""]
-    metric_parts = [f"⭐ Bayes: <b>{bayes_str}</b>", f"🗳 Оценок: <b>{votes_count}</b>"]
+    metric_parts = [f"⭐: <b>{bayes_str}</b>", f"🗳: <b>{votes_count}</b>"]
     if views_total > 0:
-        metric_parts.append(f"👁 Показов: <b>{views_total}</b>")
+        metric_parts.append(f"👁: <b>{views_total}</b>")
     lines.append(" · ".join(metric_parts))
     lines.append(f"📌 Статус: <b>{_esc_html(computed_status)}</b>")
     if time_left != "—":
