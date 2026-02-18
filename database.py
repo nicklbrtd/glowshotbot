@@ -196,6 +196,8 @@ async def _ensure_user_stats_row(conn: asyncpg.Connection, user_id: int) -> dict
             "votes_given_today": 0,
             "votes_given_happyhour_today": 0,
             "public_portfolio": False,
+            "author_forward_allowed": True,
+            "author_badge_enabled": True,
             "last_active_at": now_dt,
         }
 
@@ -261,6 +263,88 @@ async def set_upload_rules_ack_at(user_id: int, dt: datetime | None = None) -> d
             ts,
         )
     return ts
+
+
+async def get_author_settings(*, user_id: int | None = None, tg_id: int | None = None) -> dict:
+    """Return author UI settings from user_stats.
+
+    Keys:
+      - forward_allowed (bool): whether photo forwarding is allowed.
+      - badge_enabled (bool): whether author badge is visible.
+    """
+    uid = None
+    if user_id is not None:
+        try:
+            uid = int(user_id)
+        except Exception:
+            uid = None
+    elif tg_id is not None:
+        p = _assert_pool()
+        async with p.acquire() as conn:
+            uid = await conn.fetchval(
+                "SELECT id FROM users WHERE tg_id=$1 AND is_deleted=0",
+                int(tg_id),
+            )
+            if uid is None:
+                return {"forward_allowed": True, "badge_enabled": True}
+            await _ensure_user_stats_row(conn, int(uid))
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COALESCE(author_forward_allowed, TRUE) AS author_forward_allowed,
+                    COALESCE(author_badge_enabled, TRUE) AS author_badge_enabled
+                FROM user_stats
+                WHERE user_id=$1
+                """,
+                int(uid),
+            )
+        return {
+            "forward_allowed": bool((row or {}).get("author_forward_allowed", True)),
+            "badge_enabled": bool((row or {}).get("author_badge_enabled", True)),
+        }
+
+    if uid is None:
+        return {"forward_allowed": True, "badge_enabled": True}
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(uid))
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE(author_forward_allowed, TRUE) AS author_forward_allowed,
+                COALESCE(author_badge_enabled, TRUE) AS author_badge_enabled
+            FROM user_stats
+            WHERE user_id=$1
+            """,
+            int(uid),
+        )
+    return {
+        "forward_allowed": bool((row or {}).get("author_forward_allowed", True)),
+        "badge_enabled": bool((row or {}).get("author_badge_enabled", True)),
+    }
+
+
+async def set_author_forward_allowed(user_id: int, allowed: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        await conn.execute(
+            "UPDATE user_stats SET author_forward_allowed=$2 WHERE user_id=$1",
+            int(user_id),
+            bool(allowed),
+        )
+
+
+async def set_author_badge_enabled(user_id: int, enabled: bool) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_user_stats_row(conn, int(user_id))
+        await conn.execute(
+            "UPDATE user_stats SET author_badge_enabled=$2 WHERE user_id=$1",
+            int(user_id),
+            bool(enabled),
+        )
 
 
 def _happy_hour_multiplier(now: datetime | None = None) -> int:
@@ -2554,6 +2638,8 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS last_daily_grant_day DATE;")
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS migration_notified BOOLEAN NOT NULL DEFAULT FALSE;")
         await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS upload_rules_ack_at TIMESTAMPTZ;")
+        await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS author_forward_allowed BOOLEAN NOT NULL DEFAULT TRUE;")
+        await conn.execute("ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS author_badge_enabled BOOLEAN NOT NULL DEFAULT TRUE;")
 
         await conn.execute(
             """

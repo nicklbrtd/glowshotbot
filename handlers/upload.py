@@ -897,8 +897,8 @@ def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📸 Камера", callback_data=f"myphoto:device:set:{photo_id}:camera"),
     )
     kb.row(
-        InlineKeyboardButton(text="✏️ К редактированию", callback_data=f"myphoto:editmenu:{photo_id}"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"),
     )
     return kb.as_markup()
 
@@ -907,8 +907,8 @@ def build_tag_kb(photo_id: int) -> InlineKeyboardMarkup:
     for tag_key, label in EDIT_TAGS:
         kb.row(InlineKeyboardButton(text=label, callback_data=f"myphoto:tag:set:{photo_id}:{tag_key}"))
     kb.row(
-        InlineKeyboardButton(text="✏️ К редактированию", callback_data=f"myphoto:editmenu:{photo_id}"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:editmenu:{photo_id}"),
     )
     return kb.as_markup()
 
@@ -1118,7 +1118,6 @@ async def _load_active_myphoto_gallery(user_id: int) -> list[dict]:
         photos = sorted(
             photos,
             key=lambda p: (p.get("created_at") or "", p.get("id") or 0),
-            reverse=True,
         )
     except Exception:
         pass
@@ -1291,7 +1290,7 @@ async def _render_myphoto_gallery(
         await remember_screen(callback.from_user.id, sent_id, state=state)
     await state.update_data(
         myphoto_ids=[int(p["id"]) for p in photos],
-        myphoto_last_id=int(photos[0]["id"]),
+        myphoto_last_id=int(photos[-1]["id"]),
     )
     return True
 
@@ -1758,7 +1757,7 @@ async def my_photo_menu(callback: CallbackQuery, state: FSMContext):
     if photos:
         await state.update_data(
             myphoto_ids=[int(p["id"]) for p in photos],
-            myphoto_last_id=int(photos[0]["id"]),
+            myphoto_last_id=int(photos[-1]["id"]),
         )
         await _render_myphoto_gallery(callback, state, user, photos=photos)
         await callback.answer()

@@ -1,6 +1,6 @@
 from aiogram import Router, F
 from aiogram.enums import ChatMemberStatus
-from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InputMediaDocument, ChatJoinRequest
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaDocument, ChatJoinRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
@@ -13,6 +13,9 @@ from database import (
     set_user_author_status_by_tg_id,
     is_user_author_by_tg_id,
     get_user_rating_summary,
+    get_author_settings,
+    set_author_forward_allowed,
+    set_author_badge_enabled,
 )
 from datetime import datetime
 from keyboards.common import build_back_kb
@@ -31,20 +34,281 @@ class AuthorApplyStates(StatesGroup):
 
 
 @router.callback_query(F.data == "author:menu")
-async def author_menu(callback: CallbackQuery):
+async def author_menu(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_tg_id(callback.from_user.id)
-    lang = _get_lang(user)
-    text = (
-        "🧑‍🎨 <b>Меню автора</b>\n"
-        "Скоро добавим больше функций для авторов.\n"
-        "Уже работаю над меню!"
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+    if not await is_user_author_by_tg_id(int(callback.from_user.id)):
+        await _deny_author_access(callback, state)
+        return
+
+    settings = await get_author_settings(user_id=int(user["id"]))
+    await _render_author_main(callback, state, settings=settings)
+    await callback.answer()
+
+
+def _author_menu_text(*, settings: dict) -> str:
+    forward_allowed = bool(settings.get("forward_allowed", True))
+    badge_enabled = bool(settings.get("badge_enabled", True))
+    forward_line = "✅ разрешена" if forward_allowed else "🔒 запрещена"
+    badge_line = "✅ показывается" if badge_enabled else "🙈 скрыт"
+    return (
+        "🧑‍🎨 <b>Меню автора</b>\n\n"
+        f"📨 Пересылка фото: {forward_line}\n"
+        f"🎖 Бейдж автора: {badge_line}\n"
+        "📁 Портфолио: 🔒 скоро (заглушка)"
     )
-    await callback.message.edit_text(
-        text,
-        reply_markup=build_back_kb(callback_data="menu:profile", text=t("common.back", lang)),
-        parse_mode="HTML",
+
+
+def _author_access_denied_text() -> str:
+    return "🧑‍🎨 <b>Меню автора</b>\n\nСначала пройди подтверждение автора."
+
+
+def _author_access_denied_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:profile"),
+        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def _author_menu_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⚙️ Настройки", callback_data="author:settings"))
+    kb.row(InlineKeyboardButton(text="📁 Портфолио", callback_data="author:portfolio"))
+    kb.row(InlineKeyboardButton(text="👥 Группа авторов", url=AUTHOR_GROUP_INVITE_LINK))
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:profile"),
+        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def _author_settings_text(*, settings: dict) -> str:
+    forward_allowed = bool(settings.get("forward_allowed", True))
+    badge_enabled = bool(settings.get("badge_enabled", True))
+    forward_line = "✅ разрешена" if forward_allowed else "🔒 запрещена"
+    badge_line = "✅ показывается" if badge_enabled else "🙈 скрыт"
+    return (
+        "⚙️ <b>Настройки автора</b>\n\n"
+        f"📨 Пересылка фото: {forward_line}\n"
+        "Если выключено — бот отправляет фото как защищённое (нельзя переслать/сохранить в Telegram).\n"
+        "Скриншоты не блокируются.\n\n"
+        f"🎖 Бейдж автора: {badge_line}"
+    )
+
+
+def _author_settings_kb(*, settings: dict) -> InlineKeyboardMarkup:
+    forward_allowed = bool(settings.get("forward_allowed", True))
+    badge_enabled = bool(settings.get("badge_enabled", True))
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="🔒 Запретить пересылку" if forward_allowed else "✅ Разрешить пересылку",
+            callback_data="author:toggle:forward",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="🙈 Скрыть бейдж" if badge_enabled else "👁 Показать бейдж",
+            callback_data="author:toggle:badge",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="author:menu"),
+        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+def _author_portfolio_text() -> str:
+    return (
+        "📁 <b>Портфолио автора</b>\n\n"
+        "Скоро: публичная страница лучших работ + ссылка для клиентов.\n\n"
+        "План: выбрать 9 работ, показать итоги/награды, включить публичный доступ."
+    )
+
+
+def _author_portfolio_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="👥 Группа авторов", url=AUTHOR_GROUP_INVITE_LINK))
+    kb.row(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="author:menu"),
+        InlineKeyboardButton(text="🏠 В меню", callback_data="menu:back"),
+    )
+    return kb.as_markup()
+
+
+async def _render_author_screen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    text: str,
+    kb: InlineKeyboardMarkup,
+    *,
+    parse_mode: str = "HTML",
+) -> None:
+    if await _edit_screen(callback.message.bot, state, text, kb, parse_mode=parse_mode):
+        try:
+            data = await state.get_data()
+            msg_id, chat_id = _get_screen_ids(data)
+            await state.update_data(
+                author_msg_id=int(msg_id or callback.message.message_id),
+                author_chat_id=int(chat_id or callback.message.chat.id),
+            )
+        except Exception:
+            pass
+        return
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=kb,
+            parse_mode=parse_mode,
+        )
+        try:
+            await state.update_data(
+                author_msg_id=callback.message.message_id,
+                author_chat_id=callback.message.chat.id,
+            )
+        except Exception:
+            pass
+        return
+    except Exception:
+        pass
+
+    old_message_id = callback.message.message_id
+    try:
+        sent = await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            parse_mode=parse_mode,
+            disable_notification=True,
+        )
+    except Exception:
+        return
+
+    try:
+        await callback.message.bot.delete_message(
+            chat_id=callback.message.chat.id,
+            message_id=old_message_id,
+        )
+    except Exception:
+        pass
+
+    try:
+        await state.update_data(
+            author_msg_id=sent.message_id,
+            author_chat_id=sent.chat.id,
+        )
+    except Exception:
+        pass
+
+
+async def _render_author_main(callback: CallbackQuery, state: FSMContext, *, settings: dict | None = None) -> None:
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        return
+    resolved_settings = settings or await get_author_settings(user_id=int(user["id"]))
+    await _render_author_screen(
+        callback,
+        state,
+        _author_menu_text(settings=resolved_settings),
+        _author_menu_kb(),
+    )
+
+
+async def _deny_author_access(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer("Сначала пройди подтверждение автора", show_alert=True)
+    await _render_author_screen(
+        callback,
+        state,
+        _author_access_denied_text(),
+        _author_access_denied_kb(),
+    )
+
+
+@router.callback_query(F.data == "author:settings")
+async def author_settings(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+    if not await is_user_author_by_tg_id(int(callback.from_user.id)):
+        await _deny_author_access(callback, state)
+        return
+    settings = await get_author_settings(user_id=int(user["id"]))
+    await _render_author_screen(
+        callback,
+        state,
+        _author_settings_text(settings=settings),
+        _author_settings_kb(settings=settings),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "author:portfolio")
+async def author_portfolio(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+    if not await is_user_author_by_tg_id(int(callback.from_user.id)):
+        await _deny_author_access(callback, state)
+        return
+    await _render_author_screen(
+        callback,
+        state,
+        _author_portfolio_text(),
+        _author_portfolio_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "author:toggle:forward")
+async def author_toggle_forward(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+    if not await is_user_author_by_tg_id(int(callback.from_user.id)):
+        await _deny_author_access(callback, state)
+        return
+    settings = await get_author_settings(user_id=int(user["id"]))
+    new_value = not bool(settings.get("forward_allowed", True))
+    await set_author_forward_allowed(int(user["id"]), new_value)
+    updated = await get_author_settings(user_id=int(user["id"]))
+    await _render_author_screen(
+        callback,
+        state,
+        _author_settings_text(settings=updated),
+        _author_settings_kb(settings=updated),
+    )
+    await callback.answer("Сохранено")
+
+
+@router.callback_query(F.data == "author:toggle:badge")
+async def author_toggle_badge(callback: CallbackQuery, state: FSMContext):
+    user = await get_user_by_tg_id(callback.from_user.id)
+    if user is None:
+        await callback.answer("Тебя нет в базе, попробуй /start.", show_alert=True)
+        return
+    if not await is_user_author_by_tg_id(int(callback.from_user.id)):
+        await _deny_author_access(callback, state)
+        return
+    settings = await get_author_settings(user_id=int(user["id"]))
+    new_value = not bool(settings.get("badge_enabled", True))
+    await set_author_badge_enabled(int(user["id"]), new_value)
+    updated = await get_author_settings(user_id=int(user["id"]))
+    await _render_author_screen(
+        callback,
+        state,
+        _author_settings_text(settings=updated),
+        _author_settings_kb(settings=updated),
+    )
+    await callback.answer("Сохранено")
 
 
 def _author_target_chat_id() -> int | None:

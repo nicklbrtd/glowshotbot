@@ -62,6 +62,7 @@ from database import (
     get_user_rating_day_stats,
     mark_user_suspicious_rating,
     consume_credits_on_rating,
+    get_author_settings,
 )
 from handlers.upload import EDIT_TAGS
 from html import escape
@@ -316,6 +317,38 @@ async def _ensure_author_premium_active(photo: dict, author: dict | None = None)
         author["is_premium_active"] = active
     return active
 
+
+async def _ensure_author_ui_settings(photo: dict, author: dict | None = None) -> tuple[bool, bool]:
+    """Attach author UI settings to photo and return (forward_allowed, badge_enabled)."""
+    forward_allowed = True
+    badge_enabled = True
+    if photo.get("author_forward_allowed") is not None:
+        forward_allowed = bool(photo.get("author_forward_allowed"))
+    if photo.get("author_badge_enabled") is not None:
+        badge_enabled = bool(photo.get("author_badge_enabled"))
+
+    try:
+        author_user_id = int(photo.get("user_id") or 0)
+    except Exception:
+        author_user_id = 0
+
+    if author_user_id > 0 and (
+        photo.get("author_forward_allowed") is None or photo.get("author_badge_enabled") is None
+    ):
+        try:
+            settings = await get_author_settings(user_id=author_user_id)
+            forward_allowed = bool(settings.get("forward_allowed", True))
+            badge_enabled = bool(settings.get("badge_enabled", True))
+        except Exception:
+            forward_allowed = True
+            badge_enabled = True
+
+    photo["author_forward_allowed"] = bool(forward_allowed)
+    photo["author_badge_enabled"] = bool(badge_enabled)
+    if author is not None:
+        author["author_badge_enabled"] = bool(badge_enabled)
+    return bool(forward_allowed), bool(badge_enabled)
+
 def build_mod_report_keyboard(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🗑 Удалить", callback_data=f"mod:report_delete:{photo_id}")
@@ -560,6 +593,7 @@ class RatingCard:
     caption: str
     keyboard: InlineKeyboardMarkup
     photo_file_id: str | None
+    protect_content: bool = False
 
 
 async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_tg_id: int) -> RatingCard:
@@ -595,7 +629,10 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
         if not photo.get("user_tg_channel_link") and author_user.get("tg_channel_link"):
             photo["user_tg_channel_link"] = author_user.get("tg_channel_link")
 
-        premium_active = await _ensure_author_premium_active(photo, author_user)
+        await _ensure_author_premium_active(photo, author_user)
+
+    forward_allowed, _badge_enabled = await _ensure_author_ui_settings(photo, author_user)
+    protect_content = bool(author_user and bool(author_user.get("is_author")) and not forward_allowed)
 
     link_button = _get_link_button_from_photo(photo, author_user, require_premium=True)
 
@@ -636,6 +673,7 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
         caption=caption,
         keyboard=kb,
         photo_file_id=file_id_str,
+        protect_content=protect_content,
     )
 
 
@@ -711,6 +749,7 @@ async def _build_rate_view(
 
     if "user_is_premium_active" not in photo:
         await _ensure_author_premium_active(photo, author)
+    await _ensure_author_ui_settings(photo, author)
 
     link_button = _get_link_button_from_photo(photo, author, require_premium=True)
 
@@ -1186,6 +1225,7 @@ async def _apply_rating_card(
                 parse_mode="HTML",
                 disable_notification=True,
                 show_caption_above_media=True,
+                protect_content=bool(card.protect_content),
             )
         else:
             sent = await bot.send_message(
@@ -1526,8 +1566,9 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
     premium_badge = "💎 " if is_author_premium else ""
     title_mono = f"«<b><code>{escape(title)}</code></b>»"
     verified_badge = ""
+    badge_enabled = bool(photo.get("author_badge_enabled", True))
     try:
-        if author and bool(author.get("is_author")):
+        if author and bool(author.get("is_author")) and badge_enabled:
             verified_badge = " ✅ Автор подтвержден"
     except Exception:
         verified_badge = ""

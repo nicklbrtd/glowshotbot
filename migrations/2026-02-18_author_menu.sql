@@ -1,0 +1,5 @@
+ALTER TABLE user_stats
+    ADD COLUMN IF NOT EXISTS author_forward_allowed BOOLEAN NOT NULL DEFAULT TRUE;
+
+ALTER TABLE user_stats
+    ADD COLUMN IF NOT EXISTS author_badge_enabled BOOLEAN NOT NULL DEFAULT TRUE;
