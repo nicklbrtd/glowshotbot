@@ -692,6 +692,7 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
             rate_kb_msg_id BIGINT,
             screen_msg_id BIGINT,
             banner_msg_id BIGINT,
+            rate_cards_seen INTEGER NOT NULL DEFAULT 0,
             rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE,
             update_notice_seen_ver INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -703,6 +704,9 @@ async def _ensure_ui_state_table(conn: asyncpg.Connection) -> None:
     )
     await conn.execute(
         "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS banner_msg_id BIGINT;"
+    )
+    await conn.execute(
+        "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS rate_cards_seen INTEGER NOT NULL DEFAULT 0;"
     )
     await conn.execute(
         "ALTER TABLE user_ui_state ADD COLUMN IF NOT EXISTS rate_tutorial_seen BOOLEAN NOT NULL DEFAULT FALSE;"
@@ -774,7 +778,7 @@ async def get_user_ui_state(tg_id: int) -> dict:
         await _ensure_ui_state_table(conn)
         row = await conn.fetchrow(
             """
-            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_tutorial_seen, update_notice_seen_ver, updated_at
+            SELECT menu_msg_id, rate_kb_msg_id, screen_msg_id, banner_msg_id, rate_cards_seen, rate_tutorial_seen, update_notice_seen_ver, updated_at
             FROM user_ui_state
             WHERE tg_id=$1
             """,
@@ -786,11 +790,13 @@ async def get_user_ui_state(tg_id: int) -> dict:
                 "rate_kb_msg_id": None,
                 "screen_msg_id": None,
                 "banner_msg_id": None,
+                "rate_cards_seen": 0,
                 "rate_tutorial_seen": False,
                 "update_notice_seen_ver": 0,
                 "updated_at": None,
             }
         d = dict(row)
+        d.setdefault("rate_cards_seen", 0)
         d.setdefault("update_notice_seen_ver", 0)
         return d
 
@@ -872,6 +878,22 @@ async def set_user_rate_tutorial_seen(tg_id: int, seen: bool = True) -> None:
             """,
             int(tg_id),
             bool(seen),
+        )
+
+
+async def set_user_rate_cards_seen(tg_id: int, value: int) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_ui_state_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO user_ui_state (tg_id, rate_cards_seen, updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (tg_id)
+            DO UPDATE SET rate_cards_seen=$2, updated_at=NOW()
+            """,
+            int(tg_id),
+            max(0, int(value)),
         )
 
 # -------------------- Tech mode settings --------------------

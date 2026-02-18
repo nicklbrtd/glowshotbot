@@ -95,7 +95,7 @@ async def admin_ads_add(callback: CallbackQuery, state: FSMContext):
         callback.message,
         state,
         prefix="admin",
-        text="🆕 <b>Новая реклама</b>\n\nОтправь заголовок (до 100 символов).",
+        text="🆕 <b>Новая реклама</b>\n\nОтправь заголовок (до 100 символов).\nОн виден только в админ-панели.",
         reply_markup=build_back_kb(callback_data="admin:ads", text="⬅️ Назад"),
     )
     await callback.answer()
@@ -125,7 +125,7 @@ async def admin_ads_title(message: Message, state: FSMContext):
         message,
         state,
         prefix="admin",
-        text="Теперь отправь текст объявления (2-4 строки).",
+        text="Теперь отправь текст объявления (этот текст увидят пользователи).",
         reply_markup=build_back_kb(callback_data="admin:ads", text="⬅️ Назад"),
     )
 

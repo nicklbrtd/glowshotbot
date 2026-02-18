@@ -58,6 +58,7 @@ from database import (
     get_user_ui_state,
     set_user_rate_kb_msg_id,
     set_user_screen_msg_id,
+    set_user_rate_cards_seen,
     set_user_rate_tutorial_seen,
     get_user_rating_day_stats,
     mark_user_suspicious_rating,
@@ -596,7 +597,13 @@ class RatingCard:
     protect_content: bool = False
 
 
-async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_tg_id: int) -> RatingCard:
+async def _build_rating_card_from_photo(
+    photo: dict,
+    rater_user_id: int,
+    viewer_tg_id: int,
+    *,
+    show_ad: bool = False,
+) -> RatingCard:
     """Собрать карточку оценивания для конкретной фотографии (с учётом премиума, ачивок и т.д.)."""
     photo = dict(photo)
 
@@ -636,7 +643,12 @@ async def _build_rating_card_from_photo(photo: dict, rater_user_id: int, viewer_
 
     link_button = _get_link_button_from_photo(photo, author_user, require_premium=True)
 
-    caption = await build_rate_caption(photo, viewer_tg_id=int(viewer_tg_id), show_details=False)
+    caption = await build_rate_caption(
+        photo,
+        viewer_tg_id=int(viewer_tg_id),
+        show_details=False,
+        show_ad=bool(show_ad),
+    )
 
     is_premium_rater = False
     rater_lang = "ru"
@@ -682,6 +694,8 @@ async def _build_rating_card_for_photo(
     rater_user_id: int,
     viewer_tg_id: int,
     prefix: str | None = None,
+    *,
+    show_ad: bool = False,
 ) -> RatingCard | None:
     try:
         photo = await get_photo_by_id(int(photo_id))
@@ -691,7 +705,7 @@ async def _build_rating_card_for_photo(
     if photo is None:
         return None
 
-    card = await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id)
+    card = await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id, show_ad=show_ad)
     if prefix:
         card.caption = f"{prefix}\n\n{card.caption}"
     return card
@@ -702,6 +716,7 @@ async def _build_rate_view(
     viewer_tg_id: int,
     *,
     show_details: bool = False,
+    show_ad: bool = False,
 ) -> tuple[str, InlineKeyboardMarkup, bool] | None:
     try:
         photo = await get_photo_by_id(int(photo_id))
@@ -754,7 +769,12 @@ async def _build_rate_view(
     link_button = _get_link_button_from_photo(photo, author, require_premium=True)
 
     is_rateable = bool(photo.get("ratings_enabled", True))
-    caption = await build_rate_caption(photo, viewer_tg_id=int(viewer_tg_id), show_details=show_details)
+    caption = await build_rate_caption(
+        photo,
+        viewer_tg_id=int(viewer_tg_id),
+        show_details=show_details,
+        show_ad=bool(show_ad and not show_details),
+    )
     if not is_rateable and "не для оценивания" not in caption.lower():
         caption = caption + "\n\n🚫 <i>Эта фотография не для оценивания.</i>"
 
@@ -780,7 +800,7 @@ async def _build_rate_view(
     return caption, kb, is_rateable
 
 
-async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> RatingCard:
+async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int, *, show_ad: bool = False) -> RatingCard:
     photo = await get_random_photo_for_rating(rater_user_id)
     if photo is None:
         viewer_user = await get_user_by_id(int(rater_user_id))
@@ -792,7 +812,7 @@ async def _build_next_rating_card(rater_user_id: int, viewer_tg_id: int) -> Rati
             photo_file_id=None,
         )
 
-    return await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id)
+    return await _build_rating_card_from_photo(photo, rater_user_id, viewer_tg_id, show_ad=show_ad)
 
 def _build_rate_reply_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     """Reply‑клавиатура для оценок 1–10."""
@@ -1447,7 +1467,13 @@ def build_no_photos_text() -> str:
 
 
 # Специальная подпись для раздела оценивания
-async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool = False) -> str:
+async def build_rate_caption(
+    photo: dict,
+    viewer_tg_id: int,
+    show_details: bool = False,
+    *,
+    show_ad: bool = True,
+) -> str:
     """Карточка оценивания:
     💎 <b><code>Название</code></b>
     [бейдж тега] · Имя · #1/2 (если две активные)
@@ -1725,20 +1751,18 @@ async def build_rate_caption(photo: dict, viewer_tg_id: int, show_details: bool 
         ads_enabled = not viewer_is_premium
 
     ad_lines: list[str] = []
-    if ads_enabled:
+    if ads_enabled and show_ad:
         try:
             ad = await get_random_active_ad()
         except Exception:
             ad = None
         if ad:
-            ad_title = (ad.get("title") or "").strip()
             ad_body = (ad.get("body") or "").strip()
-            if ad_title or ad_body:
-                ad_lines.append("••• реклама •••")
-                if ad_title:
-                    ad_lines.append(f"<b>{escape(ad_title)}</b>")
-                if ad_body:
-                    ad_lines.append(quote(ad_body))
+            ad_title = (ad.get("title") or "").strip()
+            visible_ad_text = ad_body or ad_title
+            if visible_ad_text:
+                ad_lines.append("──────────────")
+                ad_lines.append(f"📣 {escape(visible_ad_text)}")
 
     if ad_lines:
         lines.append("")
@@ -1793,7 +1817,24 @@ async def show_next_photo_for_rating(
                 msg_id = None
 
     viewer = await get_user_by_tg_id(viewer_tg_id)
-    card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id)
+
+    rate_cards_seen = 0
+    try:
+        if state is not None:
+            st = await state.get_data()
+            if st.get("rate_cards_seen") is not None:
+                rate_cards_seen = max(0, int(st.get("rate_cards_seen") or 0))
+            else:
+                ui_state = await get_user_ui_state(int(viewer_tg_id))
+                rate_cards_seen = max(0, int(ui_state.get("rate_cards_seen") or 0))
+        else:
+            ui_state = await get_user_ui_state(int(viewer_tg_id))
+            rate_cards_seen = max(0, int(ui_state.get("rate_cards_seen") or 0))
+    except Exception:
+        rate_cards_seen = 0
+
+    show_ad = ((rate_cards_seen + 1) % 3 == 0)
+    card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id, show_ad=show_ad)
 
     if state is not None:
         data = await state.get_data()
@@ -1846,6 +1887,20 @@ async def show_next_photo_for_rating(
         except Exception:
             pass
         return
+
+    if card.photo is not None:
+        new_seen = rate_cards_seen + 1
+        try:
+            await set_user_rate_cards_seen(int(viewer_tg_id), int(new_seen))
+        except Exception:
+            pass
+        if state is not None:
+            try:
+                st = await state.get_data()
+                st["rate_cards_seen"] = int(new_seen)
+                await state.set_data(st)
+            except Exception:
+                pass
 
     if is_cb:
         try:
@@ -2876,26 +2931,8 @@ async def rate_report_text(message: Message, state: FSMContext) -> None:
                 except Exception:
                     pass
     
-    card = await _build_next_rating_card(int(user["id"]), viewer_tg_id=int(message.from_user.id))
-    lang = _lang(user)
-    is_rateable = bool(card.photo and card.photo.get("ratings_enabled", True))
-    await _apply_rating_card(
-        bot=message.bot,
-        chat_id=report_chat_id,
-        message=None,
-        message_id=report_msg_id,
-        card=card,
-    )
-
-    await _sync_rate_state_for_card(
-        state=state,
-        card=card,
-        bot=message.bot,
-        chat_id=report_chat_id,
-        lang=lang,
-    )
-
     await _clear_rate_report_draft(state)
+    await show_next_photo_for_rating(message, int(user["id"]), state=state, replace_message=False)
     return
 
 @router.callback_query(F.data.startswith("rate:score:"))
