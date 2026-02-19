@@ -901,6 +901,7 @@ async def main():
             await message.answer("Не удалось обновить сообщение тикета, но статус помечен локально.")
 
         ticket["status"] = "resolved"
+        op_id = ticket_operator.get(ticket_id)
         try:
             if op_id != message.from_user.id:
                 support_resolved_count[message.from_user.id] = support_resolved_count.get(message.from_user.id, 0) + 1
