@@ -95,6 +95,10 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 # UI helpers
 # =========================
 
+PODIUM_MIN_PARTICIPANTS = 3
+TOP10_DEFAULT = 10
+
+
 def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -245,11 +249,60 @@ def _daily_file_id(item: dict) -> str:
     return str(item.get("file_id") or "").strip()
 
 
+def _daily_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _daily_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _daily_created_at_key(item: dict) -> str:
+    raw = str(item.get("created_at") or "").strip()
+    if not raw:
+        return "9999-12-31T23:59:59.999999"
+    try:
+        return datetime.fromisoformat(raw).isoformat()
+    except Exception:
+        return raw
+
+
+def _daily_photo_id(item: dict) -> int:
+    return _daily_int(item.get("photo_id") or item.get("id") or 10**18, 10**18)
+
+
+def _daily_sort_key(item: dict) -> tuple[float, int, int, str, int]:
+    bayes = _daily_float(
+        item.get("bayes_score")
+        if item.get("bayes_score") is not None
+        else item.get("avg_score")
+        if item.get("avg_score") is not None
+        else item.get("avg_rating")
+        if item.get("avg_rating") is not None
+        else item.get("score"),
+        0.0,
+    )
+    votes = _daily_int(item.get("votes_count") or item.get("ratings_count") or 0, 0)
+    views = _daily_int(item.get("views_count") or item.get("views") or 0, 0)
+    created_at = _daily_created_at_key(item)
+    photo_id = _daily_photo_id(item)
+    # 1) bayes DESC, 2) votes DESC, 3) views ASC, 4) created_at ASC, 5) photo_id ASC
+    return (-bayes, -votes, views, created_at, photo_id)
+
+
 def _daily_top(payload: dict) -> list[dict]:
     top = payload.get("top") or []
     if not isinstance(top, list):
         return []
-    return [dict(x) for x in top if isinstance(x, dict)]
+    items = [dict(x) for x in top if isinstance(x, dict)]
+    items.sort(key=_daily_sort_key)
+    return items
 
 
 def _render_results_hub_text(*, payload: dict, lang: str, from_archive: bool) -> str:
@@ -266,6 +319,14 @@ def _render_results_hub_text(*, payload: dict, lang: str, from_archive: bool) ->
         f"📅 <b>{party_label}</b>",
         f"👥 Участников: <b>{participants}</b>",
     ]
+    if participants <= 0:
+        lines.append("😶 Сегодня партия не набралась.")
+    elif participants < PODIUM_MIN_PARTICIPANTS:
+        lines.append("⚠️ Маленькая партия: показываем участников без мест.")
+    elif participants < TOP10_DEFAULT:
+        lines.append(f"✅ Мини-итоги: подиум + топ-{participants} (N = кол-во работ).")
+    else:
+        lines.append("🏆 Полные итоги: подиум + топ-10.")
     return "\n".join(lines)
 
 
@@ -299,9 +360,21 @@ async def _render_day_podium_screen(
     payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
     merged_payload = dict(payload or {})
     merged_payload.setdefault("submit_day", cache.get("submit_day"))
+    merged_payload.setdefault("participants_count", cache.get("participants_count"))
+    participants = _daily_int(merged_payload.get("participants_count") or 0, 0)
     top = _daily_top(merged_payload)
+    kb = _build_podium_nav_kb(day_key=day_key, step=step, page_token=page_token)
+    if participants < PODIUM_MIN_PARTICIPANTS:
+        await _show_text(
+            callback,
+            (
+                f"⚠️ В этой партии всего {participants} работ — подиум не формируется.\n"
+                "Открой Топ, чтобы посмотреть участников."
+            ),
+            kb,
+        )
+        return
     if not top:
-        kb = _build_results_hub_kb(day_key=day_key, page_token=page_token)
         await _show_text(callback, "⏳ Топ партии пока формируется.", kb)
         return
 
@@ -310,7 +383,6 @@ async def _render_day_podium_screen(
     item_idx = idx_map.get(step, 2)
     place = place_map.get(step, 3)
     if item_idx >= len(top):
-        kb = _build_podium_nav_kb(day_key=day_key, step=step, page_token=page_token)
         await _show_text(callback, "Пока недостаточно работ для этого места.", kb)
         return
 
@@ -335,7 +407,6 @@ async def _render_day_podium_screen(
     if views_int > 0:
         lines.append(f"👁: <b>{views_int}</b>")
     caption = "\n".join(lines)
-    kb = _build_podium_nav_kb(day_key=day_key, step=step, page_token=page_token)
     file_id = _daily_file_id(item)
     if file_id:
         await _show_photo(callback, file_id=file_id, caption=caption, kb=kb)
@@ -353,24 +424,51 @@ async def _render_day_top10_screen(
     payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
     merged_payload = dict(payload or {})
     merged_payload.setdefault("submit_day", cache.get("submit_day"))
-    top = _daily_top(merged_payload)[:10]
+    merged_payload.setdefault("participants_count", cache.get("participants_count"))
+    participants = _daily_int(merged_payload.get("participants_count") or 0, 0)
+    all_items = _daily_top(merged_payload)
+    if participants <= 0:
+        limit_n = 0
+        title_text = "📊 <b>Топ</b>"
+    elif participants < PODIUM_MIN_PARTICIPANTS:
+        limit_n = participants
+        title_text = "📊 <b>Участники</b>"
+    elif participants < TOP10_DEFAULT:
+        limit_n = participants
+        title_text = f"📊 <b>Топ-{participants}</b>"
+    else:
+        limit_n = TOP10_DEFAULT
+        title_text = "📊 <b>Топ-10</b>"
+    top = all_items[: max(0, min(limit_n, len(all_items)))]
     party_short = html.escape(format_party_label(day_key, mode="short"), quote=False)
-    lines: list[str] = [
-        f"📊 <b>Топ-10</b> · {party_short}",
-        "<i>Рейтинг зафиксирован после окончания партии.</i>",
-        "",
-    ]
+    lines: list[str] = [f"{title_text} · {party_short}"]
+    if participants == 0:
+        lines.extend(["<i>В этой партии нет работ.</i>", ""])
+    elif participants < PODIUM_MIN_PARTICIPANTS:
+        lines.append("")
+    else:
+        lines.extend(["<i>Рейтинг зафиксирован после окончания партии.</i>", ""])
     medal = {1: "🥇", 2: "🥈", 3: "🥉"}
-    for i, item in enumerate(top, start=1):
-        icon = medal.get(i, "•")
-        title = html.escape(_daily_title(item), quote=False)
-        bayes = _fmt_daily_bayes(item)
-        votes = _daily_votes(item)
-        lines.append(f"{icon} {i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
+    if participants < PODIUM_MIN_PARTICIPANTS:
+        for item in top:
+            title = html.escape(_daily_title(item), quote=False)
+            bayes = _fmt_daily_bayes(item)
+            votes = _daily_votes(item)
+            lines.append(f"• <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
+        lines.append("")
+        lines.append("<i>Партия маленькая, результаты менее стабильны.</i>")
+    else:
+        for i, item in enumerate(top, start=1):
+            icon = medal.get(i, "•")
+            title = html.escape(_daily_title(item), quote=False)
+            bayes = _fmt_daily_bayes(item)
+            votes = _daily_votes(item)
+            lines.append(f"{icon} {i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
     lines.extend(
         [
             "",
             "💡 Хочешь больше оценок? Оценивай других → credits → твои фото покажут чаще.",
+            "⚖️ Если рейтинги совпали, выше работа с большим числом оценок; дальше — по времени публикации.",
         ]
     )
     kb = _build_top10_kb(day_key=day_key, page_token=page_token)
