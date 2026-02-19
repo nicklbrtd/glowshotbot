@@ -105,24 +105,47 @@ async def admin_menu(callback: CallbackQuery, state: FSMContext):
 
     # ВАЖНО: при входе в главное админ-меню всегда сбрасываем состояния
     await _reset_fsm_state_only(state)
-    # Если пришли из раздела с отдельным сообщением (например, активность),
-    # чистим его, чтобы не оставлять хвосты.
+    # Чистим служебные сообщения секций, чтобы не оставлять хвосты.
     try:
         data = await state.get_data()
-        act_chat_id = data.get("admin_activity_chat_id")
-        act_msg_id = data.get("admin_activity_msg_id")
-        if act_chat_id and act_msg_id:
+        current_chat_id = int(callback.message.chat.id) if callback.message and callback.message.chat else None
+        current_msg_id = int(callback.message.message_id) if callback.message and callback.message.message_id else None
+        section_pairs = [
+            ("admin_activity_chat_id", "admin_activity_msg_id"),
+            ("role_prompt_chat_id", "role_prompt_msg_id"),
+            ("user_prompt_chat_id", "user_prompt_msg_id"),
+            ("premium_prompt_chat_id", "premium_prompt_msg_id"),
+            ("broadcast_prompt_chat_id", "broadcast_prompt_msg_id"),
+            ("admin_credits_chat_id", "admin_credits_msg_id"),
+            ("admin_settings_chat_id", "admin_settings_msg_id"),
+            ("admin_photos_chat_id", "admin_photos_msg_id"),
+        ]
+        updates: dict[str, None] = {}
+        for chat_key, msg_key in section_pairs:
+            chat_id = data.get(chat_key)
+            msg_id = data.get(msg_key)
+            if not chat_id or not msg_id:
+                continue
+            try:
+                c_chat = int(chat_id)
+                c_msg = int(msg_id)
+            except Exception:
+                updates[chat_key] = None
+                updates[msg_key] = None
+                continue
+            if current_chat_id == c_chat and current_msg_id == c_msg:
+                continue
             try:
                 await callback.message.bot.delete_message(
-                    chat_id=int(act_chat_id),
-                    message_id=int(act_msg_id),
+                    chat_id=c_chat,
+                    message_id=c_msg,
                 )
             except Exception:
                 pass
-            try:
-                await state.update_data(admin_activity_chat_id=None, admin_activity_msg_id=None)
-            except Exception:
-                pass
+            updates[chat_key] = None
+            updates[msg_key] = None
+        if updates:
+            await state.update_data(**updates)
     except Exception:
         pass
 

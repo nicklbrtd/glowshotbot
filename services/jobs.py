@@ -54,7 +54,7 @@ async def daily_credits_grant_job(bot: Bot) -> None:
 
 
 async def daily_results_publish_job(bot: Bot) -> None:
-    """Ежедневно 08:00 — публикация итогов за позавчера + TOP-only notifications."""
+    """Ежедневно 08:00 — публикация итогов за позавчера (без пользовательских DM)."""
     while True:
         target = _next_run(time(8, 0))
         await _sleep_until(target)

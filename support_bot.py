@@ -25,9 +25,12 @@ from database import (
     get_support_users_full,
     is_user_premium_active,
     get_user_by_tg_id,
+    get_user_by_id,
     get_user_by_username,
     get_active_photos_for_user,
     get_photo_ratings_list,
+    admin_delete_last_rating_for_photo,
+    admin_clear_ratings_for_photo,
     ensure_user_minimal_row,
     get_user_premium_status,
     log_bot_error,
@@ -231,6 +234,126 @@ async def main():
             u = None
         return bool(u and (u.get("is_admin") or u.get("is_moderator")))
 
+    async def _get_counts_photos(user_id: int) -> list[dict]:
+        try:
+            photos = await get_active_photos_for_user(int(user_id), limit=2)
+        except Exception:
+            photos = []
+        try:
+            photos = sorted(
+                photos,
+                key=lambda p: (p.get("created_at") or "", p.get("id") or 0),
+                reverse=True,
+            )
+        except Exception:
+            pass
+        return photos[:2]
+
+    def _build_counts_kb(*, target_id: int, photo_id: int, index: int, total: int) -> InlineKeyboardMarkup:
+        has_prev = index > 0
+        has_next = index < (total - 1)
+        prev_idx = index - 1 if has_prev else index
+        next_idx = index + 1 if has_next else index
+        prev_cb = f"support:counts:view:{target_id}:{prev_idx}"
+        next_cb = f"support:counts:view:{target_id}:{next_idx}"
+        current_cb = f"support:counts:view:{target_id}:{index}"
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="⬅️", callback_data=prev_cb),
+                    InlineKeyboardButton(text=f"{index + 1}/{total}", callback_data=current_cb),
+                    InlineKeyboardButton(text="➡️", callback_data=next_cb),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="↩️ Удалить последнюю",
+                        callback_data=f"support:counts:drop1:{photo_id}:{target_id}:{index}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🧹 Аннулировать",
+                        callback_data=f"support:counts:clear:{photo_id}:{target_id}:{index}",
+                    ),
+                ],
+                [InlineKeyboardButton(text="🗑 Закрыть", callback_data="support:counts:del")],
+            ]
+        )
+        return kb
+
+    async def _build_counts_payload(target: dict, index: int, notice: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
+        photos = await _get_counts_photos(int(target["id"]))
+        display_name = (target.get("name") or "").strip()
+        if not display_name:
+            username = (target.get("username") or "").strip()
+            display_name = f"@{username}" if username else f"id:{int(target.get('tg_id') or 0)}"
+        if not photos:
+            text = f"У пользователя {escape(display_name)} нет активных фото."
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🗑 Закрыть", callback_data="support:counts:del")]]
+            )
+            return text, kb
+
+        idx = min(max(int(index), 0), len(photos) - 1)
+        photo = photos[idx]
+        photo_id = int(photo["id"])
+        ratings = await get_photo_ratings_list(photo_id)
+        try:
+            ratings = sorted(
+                ratings,
+                key=lambda r: (r.get("created_at") or ""),
+                reverse=True,
+            )
+        except Exception:
+            pass
+
+        lines: list[str] = [f"Оценки пользователя {escape(display_name)}"]
+        if notice:
+            lines.append(f"ℹ️ {escape(notice)}")
+        lines.append("")
+        lines.append(f"Фото #{idx + 1}: <code>{photo_id}</code>")
+        title = (photo.get("title") or "").strip()
+        if title:
+            lines.append(f"<code>\"{escape(title)}\"</code>")
+        lines.append(f"Всего оценок: <b>{len(ratings)}</b>")
+        lines.append("")
+        if ratings:
+            for r in ratings:
+                u_username = (r.get("username") or "").strip()
+                u_name = (r.get("name") or "").strip()
+                u_tg = r.get("tg_id")
+                if u_username:
+                    label = f"@{u_username}"
+                elif u_name:
+                    label = u_name
+                elif u_tg:
+                    label = f"id:{u_tg}"
+                else:
+                    label = "unknown"
+                lines.append(f"{escape(label)} - {int(r.get('value') or 0)}")
+        else:
+            lines.append("Оценок пока нет.")
+
+        kb = _build_counts_kb(
+            target_id=int(target["id"]),
+            photo_id=photo_id,
+            index=idx,
+            total=len(photos),
+        )
+        return "\n".join(lines), kb
+
+    async def _edit_or_send_counts(callback_or_message, text: str, kb: InlineKeyboardMarkup) -> None:
+        if isinstance(callback_or_message, CallbackQuery):
+            try:
+                await callback_or_message.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+                return
+            except Exception:
+                try:
+                    await callback_or_message.message.delete()
+                except Exception:
+                    pass
+                await callback_or_message.message.answer(text, reply_markup=kb, parse_mode="HTML")
+                return
+        await callback_or_message.answer(text, reply_markup=kb, parse_mode="HTML")
+
     @dp.message(Command("counts"))
     async def counts_cmd(message: Message, command: CommandObject) -> None:
         if not message.from_user:
@@ -269,69 +392,95 @@ async def main():
         if not target:
             text = "Пользователь не найден."
             kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
+                inline_keyboard=[[InlineKeyboardButton(text="🗑 Закрыть", callback_data="support:counts:del")]]
             )
             await message.answer(text, reply_markup=kb)
             return
 
-        photos = []
-        try:
-            photos = await get_active_photos_for_user(int(target["id"]), limit=2)
-        except Exception:
-            photos = []
+        text, kb = await _build_counts_payload(target, index=0)
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
-        if not photos:
-            text = f"У пользователя {escape(str(target.get('name') or uname))} нет активных фото."
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
-            )
-            await message.answer(text, reply_markup=kb)
+    @dp.callback_query(F.data.regexp(r"^support:counts:view:(\d+):(\d+)$"))
+    async def counts_view(callback: CallbackQuery) -> None:
+        if not callback.from_user:
             return
-
-        # Берём самую свежую активную
+        if not await _is_admin_or_moderator(int(callback.from_user.id)):
+            await callback.answer()
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) < 5:
+            await callback.answer()
+            return
         try:
-            photos = sorted(
-                photos,
-                key=lambda p: (p.get("created_at") or "", p.get("id") or 0),
-                reverse=True,
-            )
+            target_id = int(parts[3])
+            index = int(parts[4])
         except Exception:
-            pass
-        photo = photos[0]
+            await callback.answer()
+            return
+        target = await get_user_by_id(target_id)
+        if not target:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        text, kb = await _build_counts_payload(target, index=index)
+        await _edit_or_send_counts(callback, text, kb)
+        await callback.answer()
 
-        ratings = await get_photo_ratings_list(int(photo["id"]))
+    @dp.callback_query(F.data.regexp(r"^support:counts:drop1:(\d+):(\d+):(\d+)$"))
+    async def counts_drop_last(callback: CallbackQuery) -> None:
+        if not callback.from_user:
+            return
+        if not await _is_admin_or_moderator(int(callback.from_user.id)):
+            await callback.answer()
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) < 6:
+            await callback.answer()
+            return
+        try:
+            photo_id = int(parts[3])
+            target_id = int(parts[4])
+            index = int(parts[5])
+        except Exception:
+            await callback.answer()
+            return
+        result = await admin_delete_last_rating_for_photo(photo_id)
+        target = await get_user_by_id(target_id)
+        if not target:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        notice = "Последняя оценка удалена." if result.get("deleted") else "Для этой фотографии оценок нет."
+        text, kb = await _build_counts_payload(target, index=index, notice=notice)
+        await _edit_or_send_counts(callback, text, kb)
+        await callback.answer("Готово")
 
-        display_name = (target.get("name") or "").strip()
-        if not display_name:
-            display_name = f"@{uname}"
-        header = f"Оценки на фотографию пользователя {escape(display_name)}."
-        lines = [header]
-        title = (photo.get("title") or "").strip()
-        if title:
-            lines.append(f"Фото: {escape(title)}")
-        lines.append(f"Всего оценок: {len(ratings)}")
-
-        if ratings:
-            for r in ratings:
-                u_username = (r.get("username") or "").strip()
-                u_name = (r.get("name") or "").strip()
-                u_tg = r.get("tg_id")
-                if u_username:
-                    label = f"@{u_username}"
-                elif u_name:
-                    label = u_name
-                elif u_tg:
-                    label = f"id:{u_tg}"
-                else:
-                    label = "unknown"
-                lines.append(f"{escape(label)} - {int(r.get('value') or 0)}")
-        else:
-            lines.append("Оценок пока нет.")
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Удалить", callback_data="support:counts:del")]]
-        )
-        await message.answer("\n".join(lines), reply_markup=kb)
+    @dp.callback_query(F.data.regexp(r"^support:counts:clear:(\d+):(\d+):(\d+)$"))
+    async def counts_clear(callback: CallbackQuery) -> None:
+        if not callback.from_user:
+            return
+        if not await _is_admin_or_moderator(int(callback.from_user.id)):
+            await callback.answer()
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) < 6:
+            await callback.answer()
+            return
+        try:
+            photo_id = int(parts[3])
+            target_id = int(parts[4])
+            index = int(parts[5])
+        except Exception:
+            await callback.answer()
+            return
+        result = await admin_clear_ratings_for_photo(photo_id)
+        target = await get_user_by_id(target_id)
+        if not target:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        removed = int(result.get("removed") or 0)
+        notice = f"Аннулировано оценок: {removed}."
+        text, kb = await _build_counts_payload(target, index=index, notice=notice)
+        await _edit_or_send_counts(callback, text, kb)
+        await callback.answer("Готово")
 
     @dp.callback_query(F.data == "support:counts:del")
     async def counts_delete(callback: CallbackQuery) -> None:

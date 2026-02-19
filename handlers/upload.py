@@ -56,7 +56,7 @@ from database_results import (
     get_results_items,
 )
 
-from utils.time import get_moscow_now
+from utils.time import get_moscow_now, format_party_id
 from utils.watermark import apply_text_watermark
 from utils.ui import cleanup_previous_screen, remember_screen
 
@@ -1077,6 +1077,15 @@ def _format_time_left(expires_at: object) -> str:
     return " ".join(parts) if parts else "меньше минуты"
 
 
+def _photo_party_id(photo: dict) -> str:
+    submit_day = (
+        photo.get("submit_day")
+        or photo.get("day_key")
+        or str(photo.get("created_at") or "")[:10]
+    )
+    return format_party_id(submit_day, include_year_if_needed=True)
+
+
 def _is_photo_active_for_myphoto(photo: dict | None) -> bool:
     if not photo:
         return False
@@ -1180,7 +1189,8 @@ async def _build_myphoto_gallery_text(
             bayes_str = _fmt_avg(float(bayes_raw))
         votes_count = int(photo.get("votes_count") or stats.get("ratings_count") or 0)
         time_left = _esc_html(_format_time_left(photo.get("expires_at")))
-        lines.append(f"{idx}) <code>\"{title}\"</code>")
+        party_id = _esc_html(_photo_party_id(photo))
+        lines.append(f"{idx}) <code>\"{title}\"</code> - <b>{party_id}</b>")
         meta = [f"⭐ {bayes_str}", f"🗳 {votes_count}"]
         if time_left != "—":
             meta.append(f"⏳ {time_left}")
@@ -1875,14 +1885,15 @@ def _format_archive_rank_line(photo: dict) -> str:
 
 
 def _format_archive_item(photo: dict) -> list[str]:
-    submit_day = _format_archive_day(photo.get("submit_day") or photo.get("archived_at") or photo.get("day_key"))
+    submit_day = photo.get("submit_day") or photo.get("archived_at") or photo.get("day_key")
+    party_id = _esc_html(format_party_id(submit_day, include_year_if_needed=True))
     title = _esc_html(str(photo.get("title") or "Без названия"))
     rating = _format_archive_rating(photo.get("avg_score"))
     rank_line = _format_archive_rank_line(photo)
     votes = int(photo.get("votes_count") or 0)
 
     return [
-        f"{submit_day} · <code>{title}</code>",
+        f"{party_id} · <code>\"{title}\"</code>",
         f"⭐ {rating} · 🏆 {rank_line} · 🗳 {votes}",
     ]
 
@@ -2012,11 +2023,13 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
     status_raw = str(snapshot.get("status") or photo.get("status") or "active").lower()
     computed_status = _compute_photo_status(rank=rank, votes_count=votes_count, avg_score=avg_score)
     time_left = _format_time_left(snapshot.get("expires_at") or photo.get("expires_at"))
+    party_id = _esc_html(_photo_party_id(photo))
 
     lines: list[str] = []
     if status_raw == "archived":
         lines.append("📊 <b>Итоги фото</b>")
         lines.append("")
+        lines.append(f"🧩 Партия: <b>{party_id}</b>")
         if avg_score > 0:
             lines.append(f"⭐ Финальный рейтинг: <b>{_fmt_avg(avg_score)}</b>")
         lines.append(f"🏆 Итоговое место: <b>{rank_str}</b>")
@@ -2028,6 +2041,7 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
     else:
         lines.append("📊 <b>Статистика фото</b>")
         lines.append("")
+        lines.append(f"🧩 Партия: <b>{party_id}</b>")
         if avg_score > 0:
             lines.append(f"⭐ Рейтинг: <b>{_fmt_avg(avg_score)}</b>")
         lines.append(f"🏆 Место: <b>{rank_str}</b>")

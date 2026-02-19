@@ -3,7 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Sequence
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont # type: ignore[import]
 
 
 def render_activity_chart(

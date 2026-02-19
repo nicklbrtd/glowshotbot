@@ -16,12 +16,16 @@ from PIL import Image, ImageDraw, ImageFont  # type: ignore[import]
 from keyboards.common import HOME, RESULTS, RESULTS_ARCHIVE, build_back_to_menu_kb
 from utils.i18n import t
 from utils.banner import sync_giraffe_section_nav
-from utils.time import get_moscow_now, get_moscow_today
+from utils.time import (
+    get_moscow_now,
+    get_moscow_today,
+    format_party_label,
+    format_day_short,
+)
 from utils.ui import cleanup_previous_screen, remember_screen
 
 from database_results import (
     PERIOD_DAY,
-    SCOPE_GLOBAL,
     SCOPE_CITY,
     SCOPE_COUNTRY,
     KIND_TOP_PHOTOS,
@@ -38,7 +42,6 @@ from database_results import (
     refresh_alltime_cache_payload,
 )
 
-from services.results_engine import recalc_day_global
 from database import (
     get_user_by_tg_id,
     set_user_screen_msg_id,
@@ -47,13 +50,6 @@ from database import (
     list_daily_results_days,
 )
 from utils.registration_guard import require_user_name
-
-
-try:
-    from services.results_engine import recalc_day_city, recalc_day_country
-except Exception:  # pragma: no cover
-    recalc_day_city = None  # type: ignore
-    recalc_day_country = None  # type: ignore
 
 
 
@@ -102,15 +98,13 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=RESULTS, callback_data="results:latest")],
+            [InlineKeyboardButton(text="🏁 Итоги", callback_data="results:latest")],
             [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
             [
                 InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-                InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
+                InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"),
             ],
-            [
-                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-            ],
+            [InlineKeyboardButton(text=HOME, callback_data="menu:back")],
         ]
     )
 
@@ -119,23 +113,9 @@ def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="🏁 Итоги", callback_data="results:latest"),
                 InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-            ],
-        ]
-    )
-
-
-def _build_latest_results_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
-            [
-                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-                InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
-            ],
-            [
-                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-            ],
+            ]
         ]
     )
 
@@ -157,42 +137,255 @@ def _build_results_archive_kb(
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"results:archive:{page+1}"))
     if nav_row:
         kb.row(*nav_row)
-    kb.row(InlineKeyboardButton(text=RESULTS, callback_data="results:latest"))
-    kb.row(
-        InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-        InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
-    )
+    kb.row(InlineKeyboardButton(text="🏁 Итоги", callback_data="results:latest"))
+    kb.row(InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"))
     kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
     return kb.as_markup()
 
 
-def _render_cached_daily_results(payload: dict, *, title_prefix: str) -> str:
-    submit_day = str(payload.get("submit_day") or "—")
-    participants = int(payload.get("participants_count") or 0)
-    threshold = int(payload.get("top_threshold") or 0)
+def _page_token(page: int | None) -> str:
+    if page is None or page < 0:
+        return "-1"
+    return str(int(page))
+
+
+def _parse_page_token(token: str | None) -> int | None:
+    try:
+        v = int(str(token or "-1"))
+    except Exception:
+        return None
+    if v < 0:
+        return None
+    return v
+
+
+def _archive_cb_from_page_token(page_token: str | None) -> str:
+    page = _parse_page_token(page_token)
+    return f"results:archive:{page or 0}"
+
+
+def _hub_cb(day_key: str, page_token: str | None) -> str:
+    return f"results:hub:{day_key}:{_page_token(_parse_page_token(page_token))}"
+
+
+def _build_cache_wait_kb(*, refresh_cb: str, archive_cb: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_cb))
+    kb.row(InlineKeyboardButton(text="📅 Архив", callback_data=archive_cb))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def _build_results_hub_kb(*, day_key: str, page_token: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🏆 Итоги дня", callback_data=f"results:podium:{day_key}:1:{page_token}"))
+    kb.row(
+        InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+        InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"),
+    )
+    kb.row(InlineKeyboardButton(text="📅 Архив", callback_data=_archive_cb_from_page_token(page_token)))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def _build_podium_nav_kb(*, day_key: str, step: int, page_token: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if step == 1:
+        kb.row(InlineKeyboardButton(text="➡️", callback_data=f"results:podium:{day_key}:2:{page_token}"))
+    elif step == 2:
+        kb.row(
+            InlineKeyboardButton(text="⬅️", callback_data=f"results:podium:{day_key}:1:{page_token}"),
+            InlineKeyboardButton(text="➡️", callback_data=f"results:podium:{day_key}:3:{page_token}"),
+        )
+    else:
+        kb.row(
+            InlineKeyboardButton(text="⬅️", callback_data=f"results:podium:{day_key}:2:{page_token}"),
+            InlineKeyboardButton(text="➡️", callback_data=f"results:top10:{day_key}:{page_token}"),
+        )
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=_hub_cb(day_key, page_token)))
+    return kb.as_markup()
+
+
+def _build_top10_kb(*, day_key: str, page_token: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🏆 Подиум", callback_data=f"results:podium:{day_key}:1:{page_token}"))
+    kb.row(
+        InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
+        InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"),
+    )
+    kb.row(InlineKeyboardButton(text="📅 Архив", callback_data=_archive_cb_from_page_token(page_token)))
+    kb.row(
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ В хаб", callback_data=_hub_cb(day_key, page_token)),
+    )
+    return kb.as_markup()
+
+
+def _fmt_daily_bayes(item: dict) -> str:
+    value = item.get("bayes_score")
+    if value is None:
+        value = item.get("avg_score")
+    if value is None:
+        value = item.get("avg_rating")
+    if value is None:
+        value = item.get("score")
+    try:
+        return f"{float(value):.2f}"
+    except Exception:
+        return "—"
+
+
+def _daily_votes(item: dict) -> int:
+    return int(item.get("votes_count") or item.get("ratings_count") or 0)
+
+
+def _daily_author(item: dict) -> str:
+    return str(
+        item.get("author_name")
+        or item.get("user_name")
+        or item.get("author")
+        or "Автор"
+    ).strip() or "Автор"
+
+
+def _daily_title(item: dict) -> str:
+    return str(item.get("title") or "Без названия").strip() or "Без названия"
+
+
+def _daily_file_id(item: dict) -> str:
+    return str(item.get("file_id") or "").strip()
+
+
+def _daily_top(payload: dict) -> list[dict]:
     top = payload.get("top") or []
+    if not isinstance(top, list):
+        return []
+    return [dict(x) for x in top if isinstance(x, dict)]
 
-    lines: list[str] = [f"🏆 <b>{title_prefix}</b>", ""]
-    lines.append(f"📅 Дата партии: <b>{submit_day}</b>")
-    lines.append(f"👥 Участников: <b>{participants}</b>")
-    lines.append(f"🔔 Уведомления в ЛС: только TOP <b>{threshold}</b>")
-    lines.append("")
-    if not top:
-        lines.append("Топ пока пуст.")
-        return "\n".join(lines)
 
-    for item in top:
-        rank = int(item.get("final_rank") or 0)
-        medal = "🥇" if rank == 1 else ("🥈" if rank == 2 else ("🥉" if rank == 3 else "▪️"))
-        title = html.escape(str(item.get("title") or "Без названия"), quote=False)
-        avg = item.get("avg_score")
-        votes = int(item.get("votes_count") or 0)
-        try:
-            avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-        except Exception:
-            avg_str = "0"
-        lines.append(f"{medal} {rank}. <b>{title}</b> — {avg_str} · 💖 {votes}")
+def _render_results_hub_text(*, payload: dict, lang: str, from_archive: bool) -> str:
+    submit_day = str(payload.get("submit_day") or "")
+    participants = int(payload.get("participants_count") or 0)
+    party_label = html.escape(format_party_label(submit_day, lang=lang, mode="full"), quote=False)
+    if from_archive:
+        title = f"🏁 <b>Итоги за {html.escape(format_day_short(submit_day, lang=lang), quote=False)}</b>"
+    else:
+        title = "🏁 <b>Итоги</b>"
+    lines = [
+        title,
+        "",
+        f"📅 <b>{party_label}</b>",
+        f"👥 Участников: <b>{participants}</b>",
+    ]
     return "\n".join(lines)
+
+
+async def _render_day_hub_screen(
+    callback: CallbackQuery,
+    *,
+    day_key: str,
+    cache: dict,
+    page_token: str,
+    from_archive: bool,
+) -> None:
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(user)
+    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
+    merged_payload = dict(payload or {})
+    merged_payload.setdefault("submit_day", cache.get("submit_day"))
+    merged_payload.setdefault("participants_count", cache.get("participants_count"))
+    text = _render_results_hub_text(payload=merged_payload, lang=lang, from_archive=from_archive)
+    kb = _build_results_hub_kb(day_key=day_key, page_token=page_token)
+    await _show_text(callback, text, kb)
+
+
+async def _render_day_podium_screen(
+    callback: CallbackQuery,
+    *,
+    day_key: str,
+    cache: dict,
+    step: int,
+    page_token: str,
+) -> None:
+    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
+    merged_payload = dict(payload or {})
+    merged_payload.setdefault("submit_day", cache.get("submit_day"))
+    top = _daily_top(merged_payload)
+    if not top:
+        kb = _build_results_hub_kb(day_key=day_key, page_token=page_token)
+        await _show_text(callback, "⏳ Топ партии пока формируется.", kb)
+        return
+
+    idx_map = {1: 2, 2: 1, 3: 0}
+    place_map = {1: 3, 2: 2, 3: 1}
+    item_idx = idx_map.get(step, 2)
+    place = place_map.get(step, 3)
+    if item_idx >= len(top):
+        kb = _build_podium_nav_kb(day_key=day_key, step=step, page_token=page_token)
+        await _show_text(callback, "Пока недостаточно работ для этого места.", kb)
+        return
+
+    item = top[item_idx]
+    title = html.escape(_daily_title(item), quote=False)
+    author = html.escape(_daily_author(item), quote=False)
+    party_short = html.escape(format_party_label(day_key, mode="short"), quote=False)
+    votes = _daily_votes(item)
+    bayes = _fmt_daily_bayes(item)
+    medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+    lines = [
+        f"{medal} <b>{place} место</b> · {party_short}",
+        f"<code>\"{title}\"</code>",
+        f"👤 Автор: <b>{author}</b>",
+        f"⭐: <b>{bayes}</b> · 🗳: <b>{votes}</b>",
+    ]
+    views = item.get("views") or item.get("views_count")
+    try:
+        views_int = int(views or 0)
+    except Exception:
+        views_int = 0
+    if views_int > 0:
+        lines.append(f"👁: <b>{views_int}</b>")
+    caption = "\n".join(lines)
+    kb = _build_podium_nav_kb(day_key=day_key, step=step, page_token=page_token)
+    file_id = _daily_file_id(item)
+    if file_id:
+        await _show_photo(callback, file_id=file_id, caption=caption, kb=kb)
+    else:
+        await _show_text(callback, caption, kb)
+
+
+async def _render_day_top10_screen(
+    callback: CallbackQuery,
+    *,
+    day_key: str,
+    cache: dict,
+    page_token: str,
+) -> None:
+    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
+    merged_payload = dict(payload or {})
+    merged_payload.setdefault("submit_day", cache.get("submit_day"))
+    top = _daily_top(merged_payload)[:10]
+    party_short = html.escape(format_party_label(day_key, mode="short"), quote=False)
+    lines: list[str] = [
+        f"📊 <b>Топ-10</b> · {party_short}",
+        "<i>Рейтинг зафиксирован после окончания партии.</i>",
+        "",
+    ]
+    medal = {1: "🥇", 2: "🥈", 3: "🥉"}
+    for i, item in enumerate(top, start=1):
+        icon = medal.get(i, "•")
+        title = html.escape(_daily_title(item), quote=False)
+        bayes = _fmt_daily_bayes(item)
+        votes = _daily_votes(item)
+        lines.append(f"{icon} {i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
+    lines.extend(
+        [
+            "",
+            "💡 Хочешь больше оценок? Оценивай других → credits → твои фото покажут чаще.",
+        ]
+    )
+    kb = _build_top10_kb(day_key=day_key, page_token=page_token)
+    await _show_text(callback, "\n".join(lines), kb)
 
 
 def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
@@ -220,50 +413,6 @@ def build_alltime_paged_kb(mode: str, page: int, max_page: int, lang: str = "ru"
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
     )
     return kb.as_markup()
-
-
-def build_day_nav_kb(day_key: str, step: int, lang: str = "ru") -> InlineKeyboardMarkup:
-    """
-    step 0: заставка — «Вперёд», «В меню»
-    step 1–3: 3/2/1 места — «Назад», «Вперёд»
-    step 4: топ-10 — «Назад», «В меню»
-    """
-    if step <= 0:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text=RESULTS, callback_data="results:latest"),
-                    InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-                ],
-                [
-                    InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:1"),
-                ]
-            ]
-        )
-
-    if 1 <= step <= 3:
-        prev_step = step - 1
-        next_step = step + 1
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="⬅️", callback_data=f"results:day:{day_key}:{prev_step}"),
-                    InlineKeyboardButton(text=t("results.btn.forward", lang), callback_data=f"results:day:{day_key}:{next_step}"),
-                ],
-                [
-                    InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-                ],
-            ]
-        )
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=RESULTS, callback_data="results:latest"),
-                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-            ]
-        ]
-    )
 
 
 async def _show_text(callback: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> int | None:
@@ -326,23 +475,6 @@ async def _show_photo(callback: CallbackQuery, file_id: str, caption: str, kb: I
         return int(sent.message_id)
     except Exception:
         return await _show_text(callback, caption, kb)
-
-
-def _label_for_day(day_key: str) -> str:
-    now = get_moscow_now()
-    today = get_moscow_today()
-    try:
-        today_key = today.isoformat()
-    except Exception:
-        today_key = str(today)
-
-    yesterday = (now.date() - timedelta(days=1)).isoformat()
-
-    if day_key == today_key:
-        return "сегодняшнего дня"
-    if day_key == yesterday:
-        return "вчерашнего дня"
-    return f"дня {day_key}"
 
 
 # ===== ALL-TIME =====
@@ -1087,13 +1219,17 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
                 "id": payload.get("photo_id") or it.get("photo_id"),
                 "file_id": payload.get("file_id"),
                 "title": payload.get("title") or "Без названия",
+                "bayes_score": payload.get("bayes_score") or payload.get("avg_rating") or it.get("score"),
                 "avg_rating": payload.get("avg_rating"),
-                "ratings_count": payload.get("ratings_count"),
-                "user_name": payload.get("user_name"),
+                "ratings_count": payload.get("ratings_count") or payload.get("votes_count"),
+                "votes_count": payload.get("votes_count") or payload.get("ratings_count"),
+                "author_name": payload.get("author_name") or payload.get("user_name"),
+                "user_name": payload.get("user_name") or payload.get("author_name"),
                 "user_username": payload.get("user_username"),
                 "rated_users": payload.get("rated_users"),
                 "comments_count": payload.get("comments_count"),
                 "super_count": payload.get("super_count"),
+                "views_count": payload.get("views_count") or payload.get("views"),
                 "score": it.get("score"),
             }
         )
@@ -1130,28 +1266,17 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
         )
     except Exception:
         pass
-    kb = build_results_menu_kb(lang)
-    latest = await get_latest_daily_results_cache()
-    latest_day = latest.get("submit_day") if latest else None
     text = (
         "🏁 <b>Итоги</b>\n\n"
-        "Экран показывает последние опубликованные итоги (за позавчера).\n"
-        "Также доступен архив итогов по датам.\n\n"
-        f"Последняя публикация: <b>{latest_day or 'пока нет'}</b>"
+        "Здесь публикуются ежедневные результаты партии.\n"
+        "Открой последние итоги или архив партий."
     )
-    sent = await callback.message.bot.send_message(
-        chat_id=callback.message.chat.id,
-        text=text,
-        reply_markup=kb,
-        parse_mode="HTML",
-        disable_notification=True,
-    )
+    sent_id = await _show_text(callback, text, build_results_menu_kb(lang))
+    if sent_id is None:
+        await callback.answer()
+        return
     try:
-        await remember_screen(callback.from_user.id, int(sent.message_id), state=state)
-    except Exception:
-        pass
-    try:
-        await callback.message.delete()
+        await remember_screen(callback.from_user.id, int(sent_id), state=state)
     except Exception:
         pass
     await callback.answer()
@@ -1161,12 +1286,12 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
 async def results_latest(callback: CallbackQuery):
     latest = await get_latest_daily_results_cache()
     if not latest:
+        kb = _build_cache_wait_kb(refresh_cb="results:latest", archive_cb="results:archive:0")
         text = (
-            "🏆 <b>Итоги</b>\n\n"
-            "Пока нет опубликованных итогов.\n"
-            "Итоги выходят ежедневно в 08:00 МСК за позавчера."
+            "⏳ Итоги ещё готовятся или недоступны.\n"
+            "Попробуй через минуту."
         )
-        await _show_text(callback, text, _build_latest_results_kb())
+        await _show_text(callback, text, kb)
         await callback.answer()
         return
 
@@ -1174,9 +1299,14 @@ async def results_latest(callback: CallbackQuery):
     merged_payload = dict(payload or {})
     merged_payload.setdefault("submit_day", latest.get("submit_day"))
     merged_payload.setdefault("participants_count", latest.get("participants_count"))
-    merged_payload.setdefault("top_threshold", latest.get("top_threshold"))
-    text = _render_cached_daily_results(merged_payload, title_prefix="Итоги")
-    await _show_text(callback, text, _build_latest_results_kb())
+    submit_day = str(merged_payload.get("submit_day") or "")
+    await _render_day_hub_screen(
+        callback,
+        day_key=submit_day,
+        cache=latest,
+        page_token="-1",
+        from_archive=False,
+    )
     await callback.answer()
 
 
@@ -1202,10 +1332,13 @@ async def results_archive(callback: CallbackQuery):
             day = str(row.get("submit_day") or "")
             participants = int(row.get("participants_count") or 0)
             threshold = int(row.get("top_threshold") or 0)
-            lines.append(f"• {day} — участников: {participants}, TOP: {threshold}")
+            full_label = html.escape(format_party_label(day, mode="full"), quote=False)
+            short_label = html.escape(format_party_label(day, mode="short"), quote=False)
+            day_short = html.escape(format_day_short(day), quote=False)
+            lines.append(f"• {full_label} — 👥 {participants} · TOP {threshold}")
             day_buttons.append(
                 (
-                    f"📅 {day}",
+                    f"📅 {short_label} · {day_short}",
                     f"results:daycache:{day}:{page}",
                 )
             )
@@ -1236,41 +1369,110 @@ async def results_archive_day(callback: CallbackQuery):
 
     cache = await get_daily_results_cache(day)
     if not cache:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data=f"results:archive:{page}")],
-                [
-                    InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-                    InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
-                ],
-                [
-                    InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-                ]
-            ]
+        kb = _build_cache_wait_kb(
+            refresh_cb=f"results:daycache:{day}:{page}",
+            archive_cb=f"results:archive:{page}",
         )
-        await _show_text(callback, "Итоги за эту дату пока недоступны.", kb)
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
         await callback.answer()
         return
 
-    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
-    merged_payload = dict(payload or {})
-    merged_payload.setdefault("submit_day", cache.get("submit_day"))
-    merged_payload.setdefault("participants_count", cache.get("participants_count"))
-    merged_payload.setdefault("top_threshold", cache.get("top_threshold"))
-    text = _render_cached_daily_results(merged_payload, title_prefix=f"Итоги за {day}")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data=f"results:archive:{page}")],
-            [
-                InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-                InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
-            ],
-            [
-                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-            ],
-        ]
+    await _render_day_hub_screen(
+        callback,
+        day_key=day,
+        cache=cache,
+        page_token=_page_token(page),
+        from_archive=True,
     )
-    await _show_text(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^results:hub:(\d{4}-\d{2}-\d{2}):(-?\d+)$"))
+async def results_hub_day(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+    day = str(parts[2] or "")
+    page_token = str(parts[3] or "-1")
+    page = _parse_page_token(page_token)
+    cache = await get_daily_results_cache(day)
+    if not cache:
+        kb = _build_cache_wait_kb(
+            refresh_cb=f"results:hub:{day}:{page_token}",
+            archive_cb=f"results:archive:{page or 0}",
+        )
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+        await callback.answer()
+        return
+    await _render_day_hub_screen(
+        callback,
+        day_key=day,
+        cache=cache,
+        page_token=page_token,
+        from_archive=(page is not None),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^results:podium:(\d{4}-\d{2}-\d{2}):([1-3]):(-?\d+)$"))
+async def results_podium(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) < 5:
+        await callback.answer()
+        return
+    day = str(parts[2] or "")
+    try:
+        step = int(parts[3])
+    except Exception:
+        step = 1
+    page_token = str(parts[4] or "-1")
+    page = _parse_page_token(page_token)
+    cache = await get_daily_results_cache(day)
+    if not cache:
+        kb = _build_cache_wait_kb(
+            refresh_cb=f"results:podium:{day}:{step}:{page_token}",
+            archive_cb=f"results:archive:{page or 0}",
+        )
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+        await callback.answer()
+        return
+    await _render_day_podium_screen(
+        callback,
+        day_key=day,
+        cache=cache,
+        step=step,
+        page_token=page_token,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^results:top10:(\d{4}-\d{2}-\d{2}):(-?\d+)$"))
+async def results_top10_day(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+    day = str(parts[2] or "")
+    page_token = str(parts[3] or "-1")
+    page = _parse_page_token(page_token)
+
+    cache = await get_daily_results_cache(day)
+    if not cache:
+        kb = _build_cache_wait_kb(
+            refresh_cb=f"results:top10:{day}:{page_token}",
+            archive_cb=f"results:archive:{page or 0}",
+        )
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+        await callback.answer()
+        return
+
+    await _render_day_top10_screen(
+        callback,
+        day_key=day,
+        cache=cache,
+        page_token=page_token,
+    )
     await callback.answer()
 
 
@@ -1311,188 +1513,11 @@ async def results_hof_nav(callback: CallbackQuery):
 # =========================
 
 
-async def _ensure_day_global_cached(day_key: str) -> None:
-    # Try read cache first
-    items = await _get_top_cached_day(day_key, SCOPE_GLOBAL, "global", limit=10)
-    if items:
-        return
-
-    # No cache -> compute now (fast enough for MVP)
-    await recalc_day_global(day_key=str(day_key), limit=10)
-
-
-async def _ensure_day_city_cached(day_key: str, city: str) -> None:
-    items = await _get_top_cached_day(day_key, SCOPE_CITY, city, limit=10)
-    if items:
-        return
-    if recalc_day_city is None:
-        raise RuntimeError("City results engine is not implemented (recalc_day_city missing)")
-    await recalc_day_city(day_key=str(day_key), city=str(city), limit=10)
-
-
-async def _ensure_day_country_cached(day_key: str, country: str) -> None:
-    items = await _get_top_cached_day(day_key, SCOPE_COUNTRY, country, limit=10)
-    if items:
-        return
-    if recalc_day_country is None:
-        raise RuntimeError("Country results engine is not implemented (recalc_day_country missing)")
-    await recalc_day_country(day_key=str(day_key), country=str(country), limit=10)
-
-
-async def _render_results_day(callback: CallbackQuery, day_key: str, step: int) -> None:
-    label = _label_for_day(day_key)
-    user = await get_user_by_tg_id(int(callback.from_user.id))
-    lang = _lang(user)
-    kb_back_menu = build_back_to_results_kb(lang)
-
-    # Ensure cache exists (global)
-    try:
-        await _ensure_day_global_cached(day_key)
-    except Exception:
-        text = (
-            "🔥 <b>Итоги дня</b>\n\n"
-            "Пока не могу загрузить итоги. Попробуй ещё раз через минуту.\n"
-            "<i>Если повторяется — значит движок/кэш упали, глянь логи.</i>"
-        )
-        await _show_text(callback, text, kb_back_menu)
-        await callback.answer()
-        return
-
-    top = await _get_top_cached_day(day_key, SCOPE_GLOBAL, "global", limit=10)
-    if not top:
-        text = (
-            f"📭 За {label} пока нет ни одной фотографии, прошедшей порог участия.\n\n"
-            "Итоги появятся, когда работам поставят достаточно оценок."
-        )
-        await _show_text(callback, text, kb_back_menu)
-        await callback.answer()
-        return
-
-    nav_kb = build_day_nav_kb(day_key, step, lang)
-
-    # step 0: intro screen
-    if step <= 0:
-        try:
-            day_dt = datetime.fromisoformat(day_key)
-            day_str = day_dt.strftime("%d.%m.%Y")
-        except Exception:
-            day_str = day_key
-
-        today_str = get_moscow_now().date().strftime("%d.%m.%Y")
-
-        text = (
-            f"📅 <b>Итоги дня ({day_str})</b>\n"
-            f"Сегодня: {today_str}\n\n"
-            "Нажимай «Вперёд», чтобы увидеть:\n"
-            "• 🥉 3 место дня\n"
-            "• 🥈 2 место дня\n"
-            "• 🥇 1 место дня\n"
-            "• 📊 Топ-10 фотографий дня"
-        )
-        await _show_text(callback, text, nav_kb)
-        await callback.answer()
-        return
-
-    total = len(top)
-
-    # steps 1–3: 3rd/2nd/1st places
-    if step in (1, 2, 3):
-        if step == 1:
-            place_num = 3
-            if total < 3:
-                await _show_text(callback, f"ℹ️ За {label} недостаточно работ для 3 места.", nav_kb)
-                await callback.answer()
-                return
-            item = top[2]
-        elif step == 2:
-            place_num = 2
-            if total < 2:
-                await _show_text(callback, f"ℹ️ За {label} недостаточно работ для 2 места.", nav_kb)
-                await callback.answer()
-                return
-            item = top[1]
-        else:
-            place_num = 1
-            item = top[0]
-
-        author_name = (item.get("user_name") or "").strip()
-        username = item.get("user_username")
-
-        if username:
-            link_text = author_name or "Автор"
-            author_display = f'<a href="https://t.me/{username}">{link_text}</a>'
-        elif author_name:
-            author_display = author_name
-        else:
-            author_display = "Неизвестный автор"
-
-        avg = item.get("avg_rating")
-        if avg is not None:
-            try:
-                avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                avg_str = str(avg)
-        else:
-            avg_str = "—"
-
-        medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
-        medal = medal_map.get(place_num, "🏅")
-
-        caption = "\n".join(
-            [
-                f"{medal} <b>{place_num} место {label}</b>",
-                "",
-                f"<code>\"{item.get('title') or 'Без названия'}\"</code>",
-                f"Автор: {author_display}",
-                "",
-                f"Рейтинг: <b>{avg_str}</b>",
-            ]
-        )
-
-        await _show_photo(callback, file_id=str(item["file_id"]), caption=caption, kb=nav_kb)
-        await callback.answer()
-        return
-
-    # step 4: top-10 text
-    lines: list[str] = [f"📊 <b>Топ-10 фотографий {label}</b>", ""]
-    for i, item in enumerate(top, start=1):
-        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "▪️"))
-
-        avg = item.get("avg_rating")
-        if avg is not None:
-            try:
-                avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                avg_str = str(avg)
-        else:
-            avg_str = "—"
-
-        title = item.get("title") or "Без названия"
-        if i <= 3:
-            lines.append(f"{medal} {i} место — <b>\"{title}\"</b>")
-        else:
-            lines.append(f"{medal} {i} место — <b>\"{title}\"</b>")
-            lines.append(f"    рейтинг: <b>{avg_str}</b>")
-
-        if i == 3 and len(top) > 3:
-            lines.append("")
-
-    nav = build_day_nav_kb(day_key, step=4, lang=lang)
-    await _show_text(callback, "\n".join(lines), nav)
-    await callback.answer()
-
-
 @router.callback_query(F.data == "results:day")
 async def results_day(callback: CallbackQuery):
-    """
-    Итоги дня показываем за позавчерашний календарный день по Москве,
-    и публикуем после 08:00 МСК.
-    """
     user = await get_user_by_tg_id(int(callback.from_user.id))
     lang = _lang(user)
-
     now = get_moscow_now()
-
     if now.hour < 8:
         text = (
             "⏰ Итоги дня появляются каждый день после <b>08:00 по МСК</b>.\n\n"
@@ -1502,9 +1527,21 @@ async def results_day(callback: CallbackQuery):
         await _show_text(callback, text, build_back_to_results_kb(lang))
         await callback.answer()
         return
-
     day_key = (now.date() - timedelta(days=2)).isoformat()
-    await _render_results_day(callback, day_key, step=0)
+    cache = await get_daily_results_cache(day_key)
+    if not cache:
+        kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+        await callback.answer()
+        return
+    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
+    merged_payload = dict(payload or {})
+    merged_payload.setdefault("submit_day", cache.get("submit_day"))
+    merged_payload.setdefault("participants_count", cache.get("participants_count"))
+    text = _render_results_hub_text(payload=merged_payload, lang=lang, from_archive=False)
+    kb = _build_results_hub_kb(day_key=day_key, page_token="-1")
+    await _show_text(callback, text, kb)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("results:day:"))
@@ -1520,8 +1557,51 @@ async def results_day_nav(callback: CallbackQuery):
         step = 0
     if step > 4:
         step = 4
-
-    await _render_results_day(callback, day_key, step)
+    if step == 0:
+        cache = await get_daily_results_cache(day_key)
+        if not cache:
+            kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
+            await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+            await callback.answer()
+            return
+        await _render_day_hub_screen(
+            callback,
+            day_key=day_key,
+            cache=cache,
+            page_token="-1",
+            from_archive=False,
+        )
+        await callback.answer()
+        return
+    if step in (1, 2, 3):
+        cache = await get_daily_results_cache(day_key)
+        if not cache:
+            kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
+            await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+            await callback.answer()
+            return
+        await _render_day_podium_screen(
+            callback,
+            day_key=day_key,
+            cache=cache,
+            step=step,
+            page_token="-1",
+        )
+        await callback.answer()
+        return
+    cache = await get_daily_results_cache(day_key)
+    if not cache:
+        kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+        await callback.answer()
+        return
+    await _render_day_top10_screen(
+        callback,
+        day_key=day_key,
+        cache=cache,
+        page_token="-1",
+    )
+    await callback.answer()
 
 
 # =========================
@@ -1561,12 +1641,12 @@ async def results_me(callback: CallbackQuery):
 async def results_city(callback: CallbackQuery):
     now = get_moscow_now()
 
-    if now.hour < 7:
+    if now.hour < 8:
         kb = build_back_to_menu_kb()
         text = (
-            "⏰ Итоги дня появляются каждый день после <b>07:00 по МСК</b>.\n\n"
+            "⏰ Итоги дня появляются каждый день после <b>08:00 по МСК</b>.\n\n"
             f"Сейчас: <b>{now.strftime('%H:%M')}</b>.\n"
-            "Загляни чуть позже — мы подсчитаем все оценки за вчера."
+            "Загляни чуть позже — публикуем итоги за позавчера."
         )
         await _show_text(callback, text, kb)
         await callback.answer()
@@ -1586,19 +1666,7 @@ async def results_city(callback: CallbackQuery):
         await callback.answer()
         return
 
-    day_key = (now.date() - timedelta(days=1)).isoformat()
-
-    try:
-        await _ensure_day_city_cached(day_key, city)
-    except Exception:
-        kb = build_back_to_menu_kb()
-        text = (
-            "🏙 <b>Итоги города</b>\n\n"
-            "Пока не могу загрузить итоги города. Попробуй ещё раз через минуту."
-        )
-        await _show_text(callback, text, kb)
-        await callback.answer()
-        return
+    day_key = (now.date() - timedelta(days=2)).isoformat()
 
     top = await _get_top_cached_day(day_key, SCOPE_CITY, city, limit=10)
 
@@ -1606,28 +1674,21 @@ async def results_city(callback: CallbackQuery):
         kb = build_back_to_menu_kb()
         text = (
             f"🏙 <b>Итоги города: {city}</b>\n\n"
-            "Пока итоги города недоступны.\n"
-            "Условия: в городе должно быть <b>минимум 5 активных авторов</b> и\n"
-            "каждая работа должна набрать <b>10+ оценок</b>."
+            "⏳ Итоги ещё готовятся или недоступны.\n"
+            "Попробуй через минуту."
         )
         await _show_text(callback, text, kb)
         await callback.answer()
         return
 
-    label = _label_for_day(day_key)
-    lines: list[str] = [f"🏙 <b>Топ-10 города {city} за {label}</b>", ""]
+    party = html.escape(format_party_label(day_key, mode="full"), quote=False)
+    lines: list[str] = [f"🏙 <b>Топ-10 города {city}</b>", f"<b>{party}</b>", ""]
     for i, item in enumerate(top, start=1):
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "▪️"))
-        title = item.get("title") or "Без названия"
-        avg = item.get("avg_rating")
-        if avg is not None:
-            try:
-                avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                avg_str = str(avg)
-        else:
-            avg_str = "—"
-        lines.append(f"{medal} {i} — <b>\"{title}\"</b> (рейтинг: <b>{avg_str}</b>)")
+        title = html.escape(str(item.get("title") or "Без названия"), quote=False)
+        bayes = _fmt_daily_bayes(item)
+        votes = _daily_votes(item)
+        lines.append(f"{medal} {i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
 
     kb = build_back_to_menu_kb()
     await _show_text(callback, "\n".join(lines), kb)
@@ -1639,12 +1700,12 @@ async def results_city(callback: CallbackQuery):
 async def results_country(callback: CallbackQuery):
     now = get_moscow_now()
 
-    if now.hour < 7:
+    if now.hour < 8:
         kb = build_back_to_menu_kb()
         text = (
-            "⏰ Итоги дня появляются каждый день после <b>07:00 по МСК</b>.\n\n"
+            "⏰ Итоги дня появляются каждый день после <b>08:00 по МСК</b>.\n\n"
             f"Сейчас: <b>{now.strftime('%H:%M')}</b>.\n"
-            "Загляни чуть позже — мы подсчитаем все оценки за вчера."
+            "Загляни чуть позже — публикуем итоги за позавчера."
         )
         await _show_text(callback, text, kb)
         await callback.answer()
@@ -1664,19 +1725,7 @@ async def results_country(callback: CallbackQuery):
         await callback.answer()
         return
 
-    day_key = (now.date() - timedelta(days=1)).isoformat()
-
-    try:
-        await _ensure_day_country_cached(day_key, country)
-    except Exception:
-        kb = build_back_to_menu_kb()
-        text = (
-            "🌍 <b>Итоги страны</b>\n\n"
-            "Пока не могу загрузить итоги страны. Попробуй ещё раз через минуту."
-        )
-        await _show_text(callback, text, kb)
-        await callback.answer()
-        return
+    day_key = (now.date() - timedelta(days=2)).isoformat()
 
     top = await _get_top_cached_day(day_key, SCOPE_COUNTRY, country, limit=10)
 
@@ -1684,28 +1733,21 @@ async def results_country(callback: CallbackQuery):
         kb = build_back_to_menu_kb()
         text = (
             f"🌍 <b>Итоги страны: {country}</b>\n\n"
-            "Пока итоги страны недоступны.\n"
-            "Условия: в стране должно быть <b>минимум 100 активных авторов</b> и\n"
-            "каждая работа должна набрать <b>25+ оценок</b>."
+            "⏳ Итоги ещё готовятся или недоступны.\n"
+            "Попробуй через минуту."
         )
         await _show_text(callback, text, kb)
         await callback.answer()
         return
 
-    label = _label_for_day(day_key)
-    lines: list[str] = [f"🌍 <b>Топ-10 страны {country} за {label}</b>", ""]
+    party = html.escape(format_party_label(day_key, mode="full"), quote=False)
+    lines: list[str] = [f"🌍 <b>Топ-10 страны {country}</b>", f"<b>{party}</b>", ""]
     for i, item in enumerate(top, start=1):
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "▪️"))
-        title = item.get("title") or "Без названия"
-        avg = item.get("avg_rating")
-        if avg is not None:
-            try:
-                avg_str = f"{float(avg):.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                avg_str = str(avg)
-        else:
-            avg_str = "—"
-        lines.append(f"{medal} {i} — <b>\"{title}\"</b> (рейтинг: <b>{avg_str}</b>)")
+        title = html.escape(str(item.get("title") or "Без названия"), quote=False)
+        bayes = _fmt_daily_bayes(item)
+        votes = _daily_votes(item)
+        lines.append(f"{medal} {i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
 
     kb = build_back_to_menu_kb()
     await _show_text(callback, "\n".join(lines), kb)

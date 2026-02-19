@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+LEGACY MODULE.
+
+This query layer is used only by the legacy services/results_engine.py path.
+Active production flow does not call this module directly.
+"""
+
 import asyncpg
 from config import LINK_RATING_WEIGHT, RATE_BAYES_FALLBACK_MEAN
 

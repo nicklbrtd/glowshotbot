@@ -20,6 +20,7 @@ from .awards import router as awards_router
 from .premium import router as premium_router
 from .credits import router as credits_router
 from .ads import router as ads_router
+from .photos import router as photos_router
 # settings.py может быть пустым/в процессе — подключаем мягко
 try:
     from .settings import router as settings_router
@@ -40,5 +41,6 @@ router.include_router(awards_router)
 router.include_router(premium_router)
 router.include_router(credits_router)
 router.include_router(ads_router)
+router.include_router(photos_router)
 if settings_router is not None:
     router.include_router(settings_router)

@@ -184,18 +184,30 @@ async def edit_or_answer(
     """
     chat_id, msg_id = await _get_ctx_ids(state, prefix)
 
+    candidates: list[tuple[int, int]] = []
+    try:
+        if message.chat and message.message_id:
+            cur = (int(message.chat.id), int(message.message_id))
+            candidates.append(cur)
+    except Exception:
+        pass
     if chat_id and msg_id:
+        saved = (int(chat_id), int(msg_id))
+        if saved not in candidates:
+            candidates.append(saved)
+
+    for c_chat_id, c_msg_id in candidates:
         try:
             await message.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
+                chat_id=c_chat_id,
+                message_id=c_msg_id,
                 text=text,
                 reply_markup=reply_markup,
             )
+            await _set_ctx_ids(state, prefix, c_chat_id, c_msg_id)
             return
         except Exception:
-            # если сообщение старое/не то — попробуем просто продолжить
-            pass
+            continue
 
     sent = await message.answer(text, reply_markup=reply_markup)
     await _set_ctx_ids(state, prefix, sent.chat.id, sent.message_id)

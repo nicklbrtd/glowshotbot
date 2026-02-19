@@ -469,6 +469,75 @@ async def admin_reset_all_credits() -> int:
         return 0
 
 
+async def admin_delete_all_active_photos() -> int:
+    """Admin helper: soft-delete all active photos for all users."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                """
+                SELECT id
+                FROM photos
+                WHERE is_deleted=0
+                  AND COALESCE(status,'active')='active'
+                FOR UPDATE
+                """
+            )
+            if not rows:
+                return 0
+            photo_ids = [int(r["id"]) for r in rows]
+            await conn.execute(
+                """
+                UPDATE photos
+                SET is_deleted=1,
+                    status='deleted',
+                    deleted_reason='admin_bulk_active',
+                    deleted_at=NOW()
+                WHERE id = ANY($1::bigint[])
+                """,
+                photo_ids,
+            )
+            await conn.execute(
+                """
+                DELETE FROM result_ranks
+                WHERE photo_id = ANY($1::bigint[])
+                """,
+                photo_ids,
+            )
+            await conn.execute(
+                """
+                DELETE FROM notification_queue
+                WHERE status='pending'
+                  AND type='daily_results_top'
+                  AND (payload->>'photo_id') IS NOT NULL
+                  AND (payload->>'photo_id')::bigint = ANY($1::bigint[])
+                """,
+                photo_ids,
+            )
+            return len(photo_ids)
+
+
+async def admin_delete_all_archived_photos() -> int:
+    """Admin helper: soft-delete all archived photos for all users."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE photos
+            SET is_deleted=1,
+                status='deleted',
+                deleted_reason='admin_bulk_archive',
+                deleted_at=NOW()
+            WHERE is_deleted=0
+              AND status='archived'
+            """
+        )
+    try:
+        return int(str(res).split()[-1])
+    except Exception:
+        return 0
+
+
 async def consume_credits_on_show(author_user_id: int, *, now: datetime | None = None) -> bool:
     """
     Spend author's credits into show tokens and consume one token per show.
@@ -2231,6 +2300,104 @@ async def get_photo_ratings_list(photo_id: int) -> list[dict]:
             int(photo_id),
         )
     return [dict(r) for r in rows] if rows else []
+
+
+async def admin_delete_last_rating_for_photo(photo_id: int) -> dict:
+    """
+    Delete the latest 1..10 rating for a photo and recalc photo counters.
+    Returns: {"deleted": bool, "value": int|None, "user_id": int|None, "votes_count": int}
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT id FROM photos WHERE id=$1 FOR UPDATE", int(photo_id))
+            row = await conn.fetchrow(
+                """
+                SELECT id, user_id, value
+                FROM ratings
+                WHERE photo_id=$1
+                  AND value BETWEEN 1 AND 10
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                int(photo_id),
+            )
+            if not row:
+                return {"deleted": False, "value": None, "user_id": None, "votes_count": 0}
+
+            r_user_id = int(row["user_id"])
+            r_value = int(row["value"])
+            await conn.execute(
+                "DELETE FROM ratings WHERE photo_id=$1 AND user_id=$2",
+                int(photo_id),
+                r_user_id,
+            )
+            await conn.execute(
+                "DELETE FROM votes WHERE photo_id=$1 AND voter_id=$2",
+                int(photo_id),
+                r_user_id,
+            )
+
+            agg = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::int AS cnt,
+                    COALESCE(SUM(value), 0)::int AS sum_score
+                FROM ratings
+                WHERE photo_id=$1
+                  AND value BETWEEN 1 AND 10
+                """,
+                int(photo_id),
+            )
+            votes_count = int((agg or {}).get("cnt") or 0)
+            sum_score = int((agg or {}).get("sum_score") or 0)
+            avg_score = (float(sum_score) / float(votes_count)) if votes_count > 0 else 0.0
+            await conn.execute(
+                """
+                UPDATE photos
+                SET votes_count=$2, sum_score=$3, avg_score=$4
+                WHERE id=$1
+                """,
+                int(photo_id),
+                votes_count,
+                sum_score,
+                avg_score,
+            )
+            return {
+                "deleted": True,
+                "value": r_value,
+                "user_id": r_user_id,
+                "votes_count": votes_count,
+            }
+
+
+async def admin_clear_ratings_for_photo(photo_id: int) -> dict:
+    """
+    Delete all 1..10 ratings for a photo and recalc photo counters.
+    Returns: {"removed": int, "votes_count": int}
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT id FROM photos WHERE id=$1 FOR UPDATE", int(photo_id))
+            removed = await conn.fetchval(
+                """
+                WITH d AS (
+                    DELETE FROM ratings
+                    WHERE photo_id=$1
+                      AND value BETWEEN 1 AND 10
+                    RETURNING 1
+                )
+                SELECT COUNT(*)::int FROM d
+                """,
+                int(photo_id),
+            )
+            await conn.execute("DELETE FROM votes WHERE photo_id=$1", int(photo_id))
+            await conn.execute(
+                "UPDATE photos SET votes_count=0, sum_score=0, avg_score=0 WHERE id=$1",
+                int(photo_id),
+            )
+            return {"removed": int(removed or 0), "votes_count": 0}
 
 
 async def get_photo_skip_count_for_photo(photo_id: int) -> int:
@@ -6370,8 +6537,8 @@ async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> 
 
 async def publish_daily_results(submit_day: date, *, limit: int = 10) -> dict:
     """
-    Publish cached daily results and enqueue DM notifications only for dynamic TOP threshold.
-    Idempotent: notifications are enqueued once per submit_day.
+    Publish cached daily results snapshot.
+    User DM notifications for daily results are disabled.
     """
     snapshot = await build_daily_results_snapshot(submit_day, limit=limit)
     p = _assert_pool()
@@ -6413,34 +6580,6 @@ async def publish_daily_results(submit_day: date, *, limit: int = 10) -> dict:
             )
 
             if not already_enqueued:
-                threshold = int(snapshot.get("top_threshold") or 0)
-                participants = int(snapshot.get("participants_count") or 0)
-                for item in snapshot.get("top", []):
-                    user_id = int(item.get("user_id") or 0)
-                    rank = int(item.get("final_rank") or 0)
-                    if user_id <= 0 or rank <= 0 or rank > threshold:
-                        continue
-                    jitter = random.randint(0, 180)
-                    await conn.execute(
-                        """
-                        INSERT INTO notification_queue (user_id, type, payload, run_after, status)
-                        VALUES ($1, 'daily_results_top', $2::jsonb, $3, 'pending')
-                        """,
-                        user_id,
-                        json.dumps(
-                            {
-                                "submit_day": str(submit_day),
-                                "photo_id": int(item.get("photo_id") or 0),
-                                "rank": rank,
-                                "participants_count": participants,
-                                "top_threshold": threshold,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        now + timedelta(seconds=jitter),
-                    )
-                    enqueued_count += 1
-
                 await conn.execute(
                     """
                     UPDATE daily_results_cache
@@ -6664,7 +6803,7 @@ async def finalize_party(submit_day: date | None = None, *, min_votes: int = 7, 
 
 
 async def daily_recap(submit_day: date, *, min_votes: int = 7, top_n: int = 3) -> dict:
-    """Формирует суточную сводку: топ-N и персональные авторам активных фото."""
+    """Формирует суточную сводку (без постановки пользовательских уведомлений)."""
     p = _assert_pool()
     top_list: list[dict] = []
     async with p.acquire() as conn:
@@ -6684,43 +6823,6 @@ async def daily_recap(submit_day: date, *, min_votes: int = 7, top_n: int = 3) -
             int(top_n),
         )
         top_list = [dict(r) for r in rows]
-
-        for r in top_list:
-            await enqueue_notification(
-                int(r["user_id"]),
-                "daily_recap_top",
-                {
-                    "photo_id": int(r["id"]),
-                    "submit_day": str(submit_day),
-                    "avg_score": float(r.get("avg_score") or 0),
-                    "votes_count": int(r.get("votes_count") or 0),
-                    "rank_hint": top_list.index(r) + 1,
-                },
-            )
-
-        # персональные сводки авторам всех активных фото дня
-        all_rows = await conn.fetch(
-            """
-            SELECT * FROM photos
-            WHERE submit_day=$1::date
-              AND is_deleted=0
-              AND COALESCE(status,'active')='active'
-              AND (expires_at IS NULL OR expires_at > NOW())
-            """,
-            submit_day,
-        )
-        for r in all_rows:
-            await enqueue_notification(
-                int(r["user_id"]),
-                "daily_recap_personal",
-                {
-                    "photo_id": int(r["id"]),
-                    "submit_day": str(submit_day),
-                    "avg_score": float(r.get("avg_score") or 0),
-                    "votes_count": int(r.get("votes_count") or 0),
-                    "expires_at": str(r.get("expires_at")),
-                },
-            )
 
     return {"top": top_list}
 

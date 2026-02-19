@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""
+LEGACY MODULE.
+
+This results engine is currently not part of the active runtime flow.
+Production results UI/cache path uses handlers/results.py + database_results.py.
+Keep this file only as a reference until full consolidation.
+"""
+
 from typing import Any
 import math
 from datetime import datetime

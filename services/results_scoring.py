@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+LEGACY MODULE.
+
+Scoring helpers below are currently used only by the legacy results_engine path.
+Current production results flow relies on database_results.py aggregations.
+"""
+
 from dataclasses import dataclass
 from typing import Iterable
 from config import (

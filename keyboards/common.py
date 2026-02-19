@@ -167,10 +167,13 @@ def build_admin_menu(lang: str = "ru") -> InlineKeyboardMarkup:
 
     # 5 ряд
     kb.button(text="📣 Реклама", callback_data="admin:ads")
-    kb.button(text=t("kb.admin.settings", lang), callback_data="admin:settings")
+    kb.button(text="🖼 Фотографии", callback_data="admin:photos")
 
     # 6 ряд
+    kb.button(text=t("kb.admin.settings", lang), callback_data="admin:settings")
+
+    # 7 ряд
     kb.button(text=t("kb.back_to_menu", lang), callback_data="menu:back")
 
-    kb.adjust(2, 2, 2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 2, 2, 1, 1)
     return kb.as_markup()

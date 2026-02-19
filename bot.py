@@ -802,25 +802,9 @@ async def main() -> None:
         n_type = str(item.get("type") or "")
         payload = item.get("payload") or {}
         text = None
-        if n_type == "final_rank":
-            rank = payload.get("final_rank")
-            text = f"📊 Итоги партии: ваше фото заняло место #{rank}. Спасибо за участие!"
-        elif n_type == "daily_results_top":
-            rank = int(payload.get("rank") or 0)
-            submit_day = str(payload.get("submit_day") or "")
-            threshold = int(payload.get("top_threshold") or 0)
-            text = (
-                f"🏆 Итоги за {submit_day} опубликованы.\n"
-                f"Твоя работа в TOP {threshold}: место #{rank}."
-            )
-        elif n_type == "daily_recap_top":
-            rank = payload.get("rank_hint")
-            text = f"🔥 Ты в топ-{rank} за вчера! Продолжай."
-        elif n_type == "daily_recap_personal":
-            votes = payload.get("votes_count", 0)
-            avg = payload.get("avg_score", 0)
-            text = f"Сводка за сутки: +{votes} голосов, средняя {avg:.2f}."
-        elif n_type == "migration_notice":
+        if n_type in {"final_rank", "daily_results_top", "daily_recap_top", "daily_recap_personal"}:
+            return
+        if n_type == "migration_notice":
             expires_at = payload.get("expires_at")
             text = (
                 "🚀 Обновили GlowShot!\n"
