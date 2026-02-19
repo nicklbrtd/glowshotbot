@@ -98,11 +98,10 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🏁 Итоги", callback_data="results:latest")],
-            [InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0")],
+            [InlineKeyboardButton(text="🏆 Итоги дня", callback_data="results:day")],
             [
                 InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-                InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"),
+                InlineKeyboardButton(text=RESULTS_ARCHIVE, callback_data="results:archive:0"),
             ],
             [InlineKeyboardButton(text=HOME, callback_data="menu:back")],
         ]
@@ -121,25 +120,15 @@ def build_back_to_results_kb(lang: str = "ru") -> InlineKeyboardMarkup:
 
 
 def _build_results_archive_kb(
-    *,
-    page: int,
-    has_prev: bool,
-    has_next: bool,
-    day_buttons: list[tuple[str, str]],
+    *, day_buttons: list[tuple[str, str]]
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for text, cb in day_buttons:
         kb.row(InlineKeyboardButton(text=text, callback_data=cb))
-    nav_row: list[InlineKeyboardButton] = []
-    if has_prev:
-        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"results:archive:{page-1}"))
-    if has_next:
-        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"results:archive:{page+1}"))
-    if nav_row:
-        kb.row(*nav_row)
-    kb.row(InlineKeyboardButton(text="🏁 Итоги", callback_data="results:latest"))
-    kb.row(InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"))
-    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    kb.row(
+        InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="results:latest"),
+    )
     return kb.as_markup()
 
 
@@ -168,6 +157,13 @@ def _hub_cb(day_key: str, page_token: str | None) -> str:
     return f"results:hub:{day_key}:{_page_token(_parse_page_token(page_token))}"
 
 
+def _party_back_cb(page_token: str | None) -> str:
+    page = _parse_page_token(page_token)
+    if page is None:
+        return "results:latest"
+    return f"results:archive:{page}"
+
+
 def _build_cache_wait_kb(*, refresh_cb: str, archive_cb: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="🔄 Обновить", callback_data=refresh_cb))
@@ -179,10 +175,7 @@ def _build_cache_wait_kb(*, refresh_cb: str, archive_cb: str) -> InlineKeyboardM
 def _build_results_hub_kb(*, day_key: str, page_token: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="🏆 Итоги дня", callback_data=f"results:podium:{day_key}:1:{page_token}"))
-    kb.row(
-        InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-        InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"),
-    )
+    kb.row(InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"))
     kb.row(InlineKeyboardButton(text="📅 Архив", callback_data=_archive_cb_from_page_token(page_token)))
     kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
     return kb.as_markup()
@@ -202,21 +195,17 @@ def _build_podium_nav_kb(*, day_key: str, step: int, page_token: str) -> InlineK
             InlineKeyboardButton(text="⬅️", callback_data=f"results:podium:{day_key}:2:{page_token}"),
             InlineKeyboardButton(text="➡️", callback_data=f"results:top10:{day_key}:{page_token}"),
         )
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=_hub_cb(day_key, page_token)))
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=_party_back_cb(page_token)))
     return kb.as_markup()
 
 
 def _build_top10_kb(*, day_key: str, page_token: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="🏆 Подиум", callback_data=f"results:podium:{day_key}:1:{page_token}"))
-    kb.row(
-        InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"),
-        InlineKeyboardButton(text="🔝 Все время", callback_data="results:alltime"),
-    )
-    kb.row(InlineKeyboardButton(text="📅 Архив", callback_data=_archive_cb_from_page_token(page_token)))
+    kb.row(InlineKeyboardButton(text="👤 Мои итоги", callback_data="results:me"))
     kb.row(
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
-        InlineKeyboardButton(text="⬅️ В хаб", callback_data=_hub_cb(day_key, page_token)),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=_party_back_cb(page_token)),
     )
     return kb.as_markup()
 
@@ -392,10 +381,9 @@ def build_alltime_menu_kb(mode: str, lang: str = "ru") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📃 Топ 10", callback_data="results:alltime:top10")
     kb.button(text="📍 Где я?", callback_data="results:alltime:me")
-    kb.button(text="👑 Зал славы", callback_data="results:hof")
     kb.button(text=RESULTS, callback_data="results:latest")
     kb.button(text=HOME, callback_data="menu:back")
-    kb.adjust(1, 1, 1, 2)
+    kb.adjust(1, 1, 2)
     return kb.as_markup()
 
 
@@ -409,7 +397,7 @@ def build_alltime_paged_kb(mode: str, page: int, max_page: int, lang: str = "ru"
     if buttons:
         kb.adjust(len(buttons))
     kb.row(
-        InlineKeyboardButton(text="🏆 За все время", callback_data="results:alltime"),
+        InlineKeyboardButton(text="🏁 Итоги", callback_data="results:latest"),
         InlineKeyboardButton(text=HOME, callback_data="menu:back"),
     )
     return kb.as_markup()
@@ -1284,44 +1272,20 @@ async def results_menu(callback: CallbackQuery, state: FSMContext | None = None)
 
 @router.callback_query(F.data == "results:latest")
 async def results_latest(callback: CallbackQuery):
-    latest = await get_latest_daily_results_cache()
-    if not latest:
-        kb = _build_cache_wait_kb(refresh_cb="results:latest", archive_cb="results:archive:0")
-        text = (
-            "⏳ Итоги ещё готовятся или недоступны.\n"
-            "Попробуй через минуту."
-        )
-        await _show_text(callback, text, kb)
-        await callback.answer()
-        return
-
-    payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
-    merged_payload = dict(payload or {})
-    merged_payload.setdefault("submit_day", latest.get("submit_day"))
-    merged_payload.setdefault("participants_count", latest.get("participants_count"))
-    submit_day = str(merged_payload.get("submit_day") or "")
-    await _render_day_hub_screen(
-        callback,
-        day_key=submit_day,
-        cache=latest,
-        page_token="-1",
-        from_archive=False,
+    user = await get_user_by_tg_id(int(callback.from_user.id))
+    lang = _lang(user)
+    text = (
+        "🏁 <b>Итоги</b>\n\n"
+        "Выбери раздел ниже."
     )
+    await _show_text(callback, text, build_results_menu_kb(lang))
     await callback.answer()
 
 
 @router.callback_query(F.data.regexp(r"^results:archive:(\d+)$"))
 async def results_archive(callback: CallbackQuery):
-    try:
-        page = max(0, int((callback.data or "results:archive:0").split(":")[2]))
-    except Exception:
-        page = 0
-    page_size = 8
-    offset = page * page_size
-    rows = await list_daily_results_days(limit=page_size + 1, offset=offset)
-    has_next = len(rows) > page_size
-    page_rows = rows[:page_size]
-    has_prev = page > 0
+    rows = await list_daily_results_days(limit=6, offset=0)
+    page_rows = rows[:6]
 
     lines: list[str] = ["📅 <b>Архив итогов</b>", ""]
     day_buttons: list[tuple[str, str]] = []
@@ -1331,27 +1295,44 @@ async def results_archive(callback: CallbackQuery):
         for row in page_rows:
             day = str(row.get("submit_day") or "")
             participants = int(row.get("participants_count") or 0)
-            threshold = int(row.get("top_threshold") or 0)
-            full_label = html.escape(format_party_label(day, mode="full"), quote=False)
             short_label = html.escape(format_party_label(day, mode="short"), quote=False)
             day_short = html.escape(format_day_short(day), quote=False)
-            lines.append(f"• {full_label} — 👥 {participants} · TOP {threshold}")
+            lines.append(f"· Партия {short_label} · {day_short} - 👥 {participants}")
             day_buttons.append(
                 (
-                    f"📅 {short_label} · {day_short}",
-                    f"results:daycache:{day}:{page}",
+                    f"{short_label}",
+                    f"results:daycache:{day}",
                 )
             )
-        lines.append("")
-        lines.append(f"Страница {page + 1}")
 
-    kb = _build_results_archive_kb(
-        page=page,
-        has_prev=has_prev,
-        has_next=has_next,
-        day_buttons=day_buttons,
-    )
+    kb = _build_results_archive_kb(day_buttons=day_buttons)
     await _show_text(callback, "\n".join(lines), kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^results:daycache:(\d{4}-\d{2}-\d{2})$"))
+async def results_archive_day_simple(callback: CallbackQuery):
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+    day = str(parts[2] or "")
+    cache = await get_daily_results_cache(day)
+    if not cache:
+        kb = _build_cache_wait_kb(
+            refresh_cb=f"results:daycache:{day}",
+            archive_cb="results:archive:0",
+        )
+        await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
+        await callback.answer()
+        return
+    await _render_day_podium_screen(
+        callback,
+        day_key=day,
+        cache=cache,
+        step=1,
+        page_token="0",
+    )
     await callback.answer()
 
 
@@ -1377,12 +1358,12 @@ async def results_archive_day(callback: CallbackQuery):
         await callback.answer()
         return
 
-    await _render_day_hub_screen(
+    await _render_day_podium_screen(
         callback,
         day_key=day,
         cache=cache,
+        step=1,
         page_token=_page_token(page),
-        from_archive=True,
     )
     await callback.answer()
 
@@ -1493,19 +1474,12 @@ async def results_alltime_me(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:hof")
 async def results_hof(callback: CallbackQuery):
-    await _render_hof(callback, page=0)
+    await results_latest(callback)
 
 
 @router.callback_query(F.data.startswith("results:hof:"))
 async def results_hof_nav(callback: CallbackQuery):
-    parts = (callback.data or "").split(":")
-    page = 0
-    if len(parts) == 3:
-        try:
-            page = int(parts[2])
-        except Exception:
-            page = 0
-    await _render_hof(callback, page=page)
+    await results_latest(callback)
 
 
 # =========================
@@ -1534,13 +1508,13 @@ async def results_day(callback: CallbackQuery):
         await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
         await callback.answer()
         return
-    payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
-    merged_payload = dict(payload or {})
-    merged_payload.setdefault("submit_day", cache.get("submit_day"))
-    merged_payload.setdefault("participants_count", cache.get("participants_count"))
-    text = _render_results_hub_text(payload=merged_payload, lang=lang, from_archive=False)
-    kb = _build_results_hub_kb(day_key=day_key, page_token="-1")
-    await _show_text(callback, text, kb)
+    await _render_day_podium_screen(
+        callback,
+        day_key=day_key,
+        cache=cache,
+        step=1,
+        page_token="-1",
+    )
     await callback.answer()
 
 
@@ -1623,14 +1597,17 @@ async def results_week(callback: CallbackQuery):
 
 @router.callback_query(F.data == "results:me")
 async def results_me(callback: CallbackQuery):
-    kb = build_results_menu_kb()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=HOME, callback_data="menu:back"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="results:latest"),
+            ]
+        ]
+    )
     text = (
         "👤 <b>Мои итоги</b>\n\n"
-        "Сделаем на новой системе красиво:\n"
-        "• моё лучшее фото вчера\n"
-        "• место среди всех/города/страны\n"
-        "• прогресс и ранги\n\n"
-        "<i>Пока этот раздел в разработке.</i>"
+        "<i>Раздел в разработке.</i>"
     )
     await _show_text(callback, text, kb)
     await callback.answer()
