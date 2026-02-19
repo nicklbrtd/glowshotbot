@@ -36,6 +36,10 @@ from utils.ui import cleanup_previous_screen
 router = Router()
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+SECTION_BLOCKED_TEXT = (
+    "Пока что вход в этот раздел запрещен. Возможно ведутся улучшения или исправления багов. "
+    "Подождите пожалуйста!"
+)
 
 
 # --- Глобальный блокировщик на время обновления (не для админов/модераторов) ---
@@ -112,6 +116,32 @@ def _normalize_chat_id(value: str) -> str:
         if tail:
             return "@" + tail
     return v
+
+
+def _blocked_section_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="В меню", callback_data="menu:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _show_blocked_section_from_message(message: Message) -> None:
+    text = SECTION_BLOCKED_TEXT
+    try:
+        tech = await db.get_tech_mode_state()
+        custom = str(tech.get("tech_notice_text") or "").strip()
+        if custom:
+            text = custom
+    except Exception:
+        pass
+    try:
+        await message.answer(
+            text,
+            reply_markup=_blocked_section_kb(),
+            disable_notification=True,
+        )
+    except Exception:
+        pass
 
 
 async def _delete_message_safely(bot, chat_id: int, message_id: int | None) -> None:
@@ -641,6 +671,28 @@ async def handle_main_menu_reply_buttons(message: Message, state: FSMContext):
         return
 
     pseudo_cb = _MessageAsCallback(message)
+    if key in {"rate", "profile", "results"}:
+        section_key = "rate" if key == "rate" else "profile" if key == "profile" else "results"
+        try:
+            blocked = await db.is_section_blocked(section_key)
+        except Exception:
+            blocked = False
+        if blocked:
+            if key != "menu" and current_menu_id:
+                await _delete_message_safely(message.bot, message.chat.id, current_menu_id)
+                data["menu_msg_id"] = None
+                try:
+                    await db.set_user_menu_msg_id(message.from_user.id, None)
+                except Exception:
+                    pass
+                await state.set_data(data)
+            await _show_blocked_section_from_message(message)
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
     try:
         await cleanup_previous_screen(
             message.bot,

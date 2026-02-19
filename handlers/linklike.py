@@ -26,13 +26,30 @@ from database import (
     get_ratings_count_for_photo,
     is_user_premium_active,
     try_award_referral,
+    is_section_blocked,
+    get_tech_mode_state,
 )
 from utils.registration_guard import require_user_name
 from handlers.upload import _tag_label, _device_emoji
 
 router = Router()
+SECTION_BLOCKED_TEXT = (
+    "Пока что вход в этот раздел запрещен. Возможно ведутся улучшения или исправления багов. "
+    "Подождите пожалуйста!"
+)
 
 _BOT_USERNAME: str | None = None
+
+
+async def _blocked_section_text() -> str:
+    try:
+        tech = await get_tech_mode_state()
+        custom = str(tech.get("tech_notice_text") or "").strip()
+        if custom:
+            return custom
+    except Exception:
+        pass
+    return SECTION_BLOCKED_TEXT
 
 async def _get_bot_username(obj: Message | CallbackQuery) -> str:
     global _BOT_USERNAME
@@ -106,6 +123,48 @@ def _rate_kb(
             kb.row(InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data="auth:start"))
 
     return kb.as_markup()
+
+
+def _blocked_section_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="В меню", callback_data="menu:back"))
+    return kb.as_markup()
+
+
+@router.callback_query(F.data.startswith("lr:"))
+async def _link_rate_access_guard(callback: CallbackQuery):
+    try:
+        blocked = await is_section_blocked("rate")
+    except Exception:
+        blocked = False
+    if not blocked:
+        raise SkipHandler
+    text = await _blocked_section_text()
+    try:
+        if getattr(callback.message, "photo", None):
+            await callback.message.edit_caption(
+                caption=text,
+                reply_markup=_blocked_section_kb(),
+                parse_mode="HTML",
+            )
+        else:
+            await callback.message.edit_text(
+                text,
+                reply_markup=_blocked_section_kb(),
+                parse_mode="HTML",
+            )
+    except Exception:
+        try:
+            await callback.message.bot.send_message(
+                chat_id=callback.message.chat.id,
+                text=text,
+                reply_markup=_blocked_section_kb(),
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+        except Exception:
+            pass
+    await callback.answer()
 
 
 def _fmt_pub_date(photo: dict) -> str:
@@ -621,6 +680,24 @@ async def start_rate_link(message: Message, command: CommandObject):
     args = (command.args or "").strip()
     if not args.startswith("rate_"):
         raise SkipHandler
+
+    try:
+        blocked = await is_section_blocked("rate")
+    except Exception:
+        blocked = False
+    if blocked:
+        blocked_text = await _blocked_section_text()
+        await message.answer(
+            blocked_text,
+            reply_markup=_blocked_section_kb(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
 
     payload = args.replace("rate_", "", 1).strip()
     photo_idx = None

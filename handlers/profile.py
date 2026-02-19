@@ -1,4 +1,5 @@
 from aiogram import Router, F
+from aiogram.dispatcher.event.bases import SkipHandler
 import html
 from utils.i18n import t
 from utils.banner import sync_giraffe_section_nav
@@ -39,8 +40,10 @@ from database import (
     get_user_block_status_by_tg_id,
     ensure_user_author_code,
     get_user_stats,
+    is_section_blocked,
+    get_tech_mode_state,
 )
-from keyboards.common import build_back_kb, build_confirm_kb
+from keyboards.common import build_back_kb, build_confirm_kb, build_back_to_menu_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.antispam import should_throttle
 from utils.places import validate_city_and_country_full
@@ -50,6 +53,65 @@ from utils.time import get_moscow_now
 from utils.ui import cleanup_previous_screen, remember_screen
 
 router = Router()
+SECTION_BLOCKED_TEXT = (
+    "Пока что вход в этот раздел запрещен. Возможно ведутся улучшения или исправления багов. "
+    "Подождите пожалуйста!"
+)
+
+
+async def _blocked_section_text() -> str:
+    try:
+        tech = await get_tech_mode_state()
+        custom = str(tech.get("tech_notice_text") or "").strip()
+        if custom:
+            return custom
+    except Exception:
+        pass
+    return SECTION_BLOCKED_TEXT
+
+
+async def _show_profile_blocked(callback: CallbackQuery) -> None:
+    kb = build_back_to_menu_kb()
+    text = await _blocked_section_text()
+    try:
+        if getattr(callback.message, "photo", None):
+            await callback.message.edit_caption(
+                caption=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        else:
+            await callback.message.edit_text(
+                text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        return
+    except Exception:
+        pass
+    try:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("profile:"))
+@router.callback_query(F.data == "menu:profile")
+async def _profile_access_guard(callback: CallbackQuery):
+    try:
+        blocked = await is_section_blocked("profile")
+    except Exception:
+        blocked = False
+    if not blocked:
+        raise SkipHandler
+    await _show_profile_blocked(callback)
+    await callback.answer()
 
 
 async def _profile_tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.8) -> bool:
@@ -630,6 +692,15 @@ async def build_profile_view(user: dict):
 
 @router.callback_query(F.data == "profile:open")
 async def profile_menu(callback: CallbackQuery, state: FSMContext):
+    try:
+        blocked = await is_section_blocked("profile")
+    except Exception:
+        blocked = False
+    if blocked:
+        await _show_profile_blocked(callback)
+        await callback.answer()
+        return
+
     if should_throttle(callback.from_user.id, "profile:open", 1.0):
         try:
             await callback.answer("Секунду…", show_alert=False)

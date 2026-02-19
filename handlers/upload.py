@@ -47,6 +47,9 @@ from database import (
     check_can_upload_today,
     should_show_upload_rules,
     set_upload_rules_ack_at,
+    is_section_blocked,
+    get_effective_economy_settings,
+    get_tech_mode_state,
 )
 
 from database_results import (
@@ -62,6 +65,21 @@ from utils.ui import cleanup_previous_screen, remember_screen
 
 
 router = Router()
+SECTION_BLOCKED_TEXT = (
+    "Пока что вход в этот раздел запрещен. Возможно ведутся улучшения или исправления багов. "
+    "Подождите пожалуйста!"
+)
+
+
+async def _blocked_section_text() -> str:
+    try:
+        tech = await get_tech_mode_state()
+        custom = str(tech.get("tech_notice_text") or "").strip()
+        if custom:
+            return custom
+    except Exception:
+        pass
+    return SECTION_BLOCKED_TEXT
 
 
 # =====================
@@ -118,6 +136,14 @@ async def _tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.7) ->
     except Exception:
         pass
     return True
+
+
+def _upload_blocked_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="В меню", callback_data="menu:back")]
+        ]
+    )
 
 
 def _upload_processing_error_kb() -> InlineKeyboardMarkup:
@@ -297,6 +323,7 @@ async def _show_upload_processing_error(
     message_id: int | None,
     is_photo_message: bool,
     text: str = "❌ Не получилось загрузить фото. Попробуй ещё раз.",
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     await _set_upload_progress(
         state=state,
@@ -305,7 +332,7 @@ async def _show_upload_processing_error(
         message_id=message_id,
         text=text,
         is_photo_message=bool(is_photo_message),
-        reply_markup=_upload_processing_error_kb(),
+        reply_markup=reply_markup or _upload_processing_error_kb(),
     )
     try:
         await state.clear()
@@ -2427,6 +2454,19 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
+    try:
+        upload_blocked = await is_section_blocked("upload")
+    except Exception:
+        upload_blocked = False
+    if upload_blocked:
+        blocked_text = await _blocked_section_text()
+        await _edit_or_replace_text(
+            callback,
+            blocked_text,
+            _upload_blocked_kb(),
+        )
+        await callback.answer()
+        return
 
     user_id = user["id"]
     active_photos = await get_active_photos_for_user(user_id)
@@ -2438,7 +2478,18 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         is_premium_user = False
 
     is_unlimited = is_unlimited_upload_user(user)
-    max_active, _daily_limit = _user_photo_limits(user, {}, is_unlimited=is_unlimited)
+    economy = await get_effective_economy_settings()
+    max_active_normal = int(economy.get("max_active_photos_normal") or 2)
+    max_active_author = int(economy.get("max_active_photos_author") or max_active_normal)
+    max_active_premium = int(economy.get("max_active_photos_premium") or max_active_normal)
+    if is_unlimited:
+        max_active = 10**9
+    elif bool(user.get("is_author")):
+        max_active = max(1, max_active_author)
+    elif is_premium_user:
+        max_active = max(1, max_active_premium)
+    else:
+        max_active = max(1, max_active_normal)
     active_count = len(active_photos)
 
     if not is_unlimited:
@@ -3193,6 +3244,23 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         )
         return
 
+    try:
+        upload_blocked = await is_section_blocked("upload")
+    except Exception:
+        upload_blocked = False
+    if upload_blocked:
+        blocked_text = await _blocked_section_text()
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+            text=blocked_text,
+            reply_markup=_upload_blocked_kb(),
+        )
+        return
+
     sent_msg_id, progress_is_photo = await _set_upload_progress(
         state=state,
         bot=bot,
@@ -3326,7 +3394,10 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             title=title,
         )
         try:
-            await add_credits(int(user_id), 2)
+            economy = await get_effective_economy_settings()
+            publish_bonus = int(economy.get("publish_bonus_credits") or 2)
+            if publish_bonus > 0:
+                await add_credits(int(user_id), int(publish_bonus))
         except Exception:
             pass
         try:

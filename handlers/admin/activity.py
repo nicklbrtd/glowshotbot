@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import html
 import time
 import traceback
 from typing import Any, Awaitable, Callable
@@ -32,6 +33,10 @@ _PERIODS = {"day", "week", "month"}
 _TABS = {"overview", "users", "sections", "spam", "errors"}
 _CACHE_TTL_SEC = 45.0
 _ACTIVITY_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _h(value: object | None) -> str:
+    return html.escape(str(value) if value is not None else "")
 
 
 def _period_title(period: str) -> str:
@@ -404,8 +409,8 @@ async def _render_overview(callback: CallbackQuery, state: FSMContext, *, period
         f"👤 Unique users: <b>{int(overview.get('unique_users') or 0)}</b>",
         f"🧾 Events total: <b>{int(overview.get('total_events') or 0)}</b>",
         f"🧯 Errors: <b>{int(overview.get('errors_total') or 0)}</b>",
-        f"🔥 Топ-раздел: <b>{top_section}</b> — {top_section_cnt}",
-        f"👑 Лидер дня: <b>{top_user_label}</b> — {top_user_cnt} действий",
+        f"🔥 Топ-раздел: <b>{_h(top_section)}</b> — {top_section_cnt}",
+        f"👑 Лидер дня: <b>{_h(top_user_label)}</b> — {top_user_cnt} действий",
     ]
     if peaks:
         caption_lines.append("")
@@ -451,7 +456,7 @@ async def _render_users(callback: CallbackQuery, state: FSMContext, *, period: s
     if top_events:
         for i, row in enumerate(top_events, start=1):
             lines.append(
-                f"{i}) <b>{_user_label(row)}</b> — {int(row.get('metric_count') or 0)} действий "
+                f"{i}) <b>{_h(_user_label(row))}</b> — {int(row.get('metric_count') or 0)} действий "
                 f"(🗳 {int(row.get('votes_count') or 0)} · 📤 {int(row.get('uploads_count') or 0)} · 🚨 {int(row.get('reports_count') or 0)})"
             )
     else:
@@ -460,21 +465,21 @@ async def _render_users(callback: CallbackQuery, state: FSMContext, *, period: s
     lines.extend(["", "🗳 Топ голосующих:"])
     if top_votes:
         for i, row in enumerate(top_votes, start=1):
-            lines.append(f"{i}) {_user_label(row)} — {int(row.get('metric_count') or 0)}")
+            lines.append(f"{i}) {_h(_user_label(row))} — {int(row.get('metric_count') or 0)}")
     else:
         lines.append("— В логах нет детальных vote-событий.")
 
     lines.extend(["", "📤 Топ публикующих:"])
     if top_uploads:
         for i, row in enumerate(top_uploads, start=1):
-            lines.append(f"{i}) {_user_label(row)} — {int(row.get('metric_count') or 0)}")
+            lines.append(f"{i}) {_h(_user_label(row))} — {int(row.get('metric_count') or 0)}")
     else:
         lines.append("— В логах нет детальных upload-событий.")
 
     lines.extend(["", "🚨 Топ жалобщиков:"])
     if top_reports:
         for i, row in enumerate(top_reports, start=1):
-            lines.append(f"{i}) {_user_label(row)} — {int(row.get('metric_count') or 0)}")
+            lines.append(f"{i}) {_h(_user_label(row))} — {int(row.get('metric_count') or 0)}")
     else:
         lines.append("— В логах нет детальных report-событий.")
 
@@ -511,7 +516,7 @@ async def _render_sections(callback: CallbackQuery, state: FSMContext, *, period
     ]
     if sections:
         for i, row in enumerate(sections, start=1):
-            lines.append(f"{i}) <b>{row.get('section') or 'other'}</b> — {int(row.get('cnt') or 0)}")
+            lines.append(f"{i}) <b>{_h(row.get('section') or 'other')}</b> — {int(row.get('cnt') or 0)}")
     else:
         lines.append("— Нет событий за период.")
 
@@ -521,7 +526,7 @@ async def _render_sections(callback: CallbackQuery, state: FSMContext, *, period
         for i, row in enumerate(by_handler[:10], start=1):
             handler = str(row.get("handler") or "unknown")
             section = _map_handler_to_section(handler)
-            lines.append(f"{i}) <code>{handler}</code> · {section} — {int(row.get('cnt') or 0)}")
+            lines.append(f"{i}) <code>{_h(handler)}</code> · {_h(section)} — {int(row.get('cnt') or 0)}")
     else:
         lines.append("— Ошибок по хендлерам нет.")
 
@@ -557,7 +562,7 @@ async def _render_spam(callback: CallbackQuery, state: FSMContext, *, period: st
     if suspects:
         for i, row in enumerate(suspects, start=1):
             lines.append(
-                f"⚠️ {i}) <b>{_user_label(row)}</b> — score {int(row.get('score') or 0)} "
+                f"⚠️ {i}) <b>{_h(_user_label(row))}</b> — score {int(row.get('score') or 0)} "
                 f"(events {int(row.get('total_events') or 0)}, peak/min {int(row.get('peak_per_minute') or 0)}, "
                 f"errors {int(row.get('errors_total') or 0)})"
             )
@@ -598,7 +603,7 @@ async def _render_errors(callback: CallbackQuery, state: FSMContext, *, period: 
     by_type = list(errors.get("by_type") or [])
     if by_type:
         for i, row in enumerate(by_type[:10], start=1):
-            lines.append(f"{i}) <b>{row.get('error_type') or 'Error'}</b> — {int(row.get('cnt') or 0)}")
+            lines.append(f"{i}) <b>{_h(row.get('error_type') or 'Error')}</b> — {int(row.get('cnt') or 0)}")
     else:
         lines.append("— Нет ошибок.")
 
@@ -606,7 +611,7 @@ async def _render_errors(callback: CallbackQuery, state: FSMContext, *, period: 
     by_handler = list(errors.get("by_handler") or [])
     if by_handler:
         for i, row in enumerate(by_handler[:10], start=1):
-            lines.append(f"{i}) <code>{row.get('handler') or 'unknown'}</code> — {int(row.get('cnt') or 0)}")
+            lines.append(f"{i}) <code>{_h(row.get('handler') or 'unknown')}</code> — {int(row.get('cnt') or 0)}")
     else:
         lines.append("— Нет проблемных хендлеров.")
 

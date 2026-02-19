@@ -347,6 +347,28 @@ def _happy_hour_multiplier(now: datetime | None = None) -> int:
     return 4 if is_happy_hour(now) else 2
 
 
+def _is_happy_hour_with_settings(now_dt: datetime, economy: dict) -> bool:
+    if not bool(economy.get("happy_hour_enabled", True)):
+        return False
+    start_hour = _coerce_int(economy.get("happy_hour_start_hour"), 15, min_value=0, max_value=23)
+    duration_minutes = _coerce_int(economy.get("happy_hour_duration_minutes"), 60, min_value=1, max_value=1440)
+    local = now_dt.astimezone(get_bot_now().tzinfo).replace(second=0, microsecond=0)
+    start = local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    end = start + timedelta(minutes=duration_minutes)
+    if duration_minutes >= 1440:
+        return True
+    if end.date() == start.date():
+        return start <= local < end
+    # crossing midnight
+    return local >= start or local < end
+
+
+def _credit_multiplier_for_moment(now_dt: datetime, economy: dict) -> int:
+    normal = _coerce_int(economy.get("credit_to_shows_normal"), 2, min_value=1, max_value=100)
+    happy = _coerce_int(economy.get("credit_to_shows_happyhour"), 4, min_value=1, max_value=100)
+    return happy if _is_happy_hour_with_settings(now_dt, economy) else normal
+
+
 async def add_credits_on_vote(
     voter_id: int,
     *,
@@ -355,10 +377,11 @@ async def add_credits_on_vote(
 ) -> dict:
     """Increment credits for voter and their daily counters. Returns updated stats."""
     p = _assert_pool()
+    economy = await get_effective_economy_settings()
     async with p.acquire() as conn:
         stats = await _ensure_user_stats_row(conn, int(voter_id))
         now_dt = now or get_bot_now()
-        is_hh = is_happy_hour(now_dt)
+        is_hh = _is_happy_hour_with_settings(now_dt, economy)
         stats = await conn.fetchrow(
             """
             UPDATE user_stats
@@ -469,6 +492,71 @@ async def admin_reset_all_credits() -> int:
         return 0
 
 
+async def admin_add_credits_all(amount: int) -> dict:
+    """Admin helper: add credits to all non-deleted users."""
+    delta = int(amount)
+    if delta <= 0:
+        raise ValueError("amount must be positive")
+
+    p = _assert_pool()
+    now_dt = get_bot_now()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO user_stats (
+                    user_id,
+                    credits,
+                    show_tokens,
+                    last_active_at,
+                    votes_given_today,
+                    votes_given_happyhour_today,
+                    public_portfolio
+                )
+                SELECT
+                    u.id,
+                    0,
+                    0,
+                    $1,
+                    0,
+                    0,
+                    FALSE
+                FROM users u
+                LEFT JOIN user_stats us ON us.user_id = u.id
+                WHERE COALESCE(u.is_deleted, 0) = 0
+                  AND us.user_id IS NULL
+                """,
+                now_dt,
+            )
+            res = await conn.execute(
+                """
+                UPDATE user_stats us
+                SET credits = us.credits + $2,
+                    last_active_at = $1
+                FROM users u
+                WHERE u.id = us.user_id
+                  AND COALESCE(u.is_deleted, 0) = 0
+                """,
+                now_dt,
+                delta,
+            )
+            total_users = await conn.fetchval(
+                "SELECT COUNT(*)::int FROM users WHERE COALESCE(is_deleted, 0) = 0"
+            )
+
+    try:
+        affected = int(str(res).split()[-1])
+    except Exception:
+        affected = 0
+
+    return {
+        "added_per_user": int(delta),
+        "affected_users": int(affected),
+        "total_active_users": int(total_users or 0),
+        "total_added": int(affected * delta),
+    }
+
+
 async def admin_delete_all_active_photos() -> int:
     """Admin helper: soft-delete all active photos for all users."""
     p = _assert_pool()
@@ -538,6 +626,188 @@ async def admin_delete_all_archived_photos() -> int:
         return 0
 
 
+async def admin_reset_results_and_archives() -> dict:
+    """
+    Admin helper: full reset of results and archives to start from a clean slate.
+    - Removes archived photos (soft-delete).
+    - Clears legacy and v2 results caches/tables.
+    - Clears queued daily results notifications.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            archived_res = await _clear_archived_photos(conn)
+            results_only = await _clear_results_tables(conn)
+
+    archived_deleted = _affected_count(archived_res)
+    return {
+        **results_only,
+        "archived_photos_deleted": int(archived_deleted),
+        "total_rows_affected": int(archived_deleted + int(results_only.get("results_rows_deleted") or 0)),
+    }
+
+
+def _results_table_names() -> list[str]:
+    return [
+        "result_ranks",
+        "daily_results_cache",
+        "results_v2",
+        "photo_day_metrics",
+        "alltime_cache",
+        "hall_of_fame",
+        "weekly_candidates",
+        "photo_repeats",
+        "my_results",
+    ]
+
+
+def _affected_count(res: object) -> int:
+    try:
+        return int(str(res).split()[-1])
+    except Exception:
+        return 0
+
+
+async def _clear_results_tables(conn: asyncpg.Connection) -> dict:
+    notif_res = await conn.execute(
+        """
+        DELETE FROM notification_queue
+        WHERE type='daily_results_top'
+        """
+    )
+
+    table_counts: dict[str, int] = {}
+    for table_name in _results_table_names():
+        exists = await conn.fetchval("SELECT to_regclass($1)", f"public.{table_name}")
+        if not exists:
+            table_counts[table_name] = 0
+            continue
+        res = await conn.execute(f"DELETE FROM {table_name}")
+        table_counts[table_name] = _affected_count(res)
+
+    results_rows = _affected_count(notif_res) + sum(table_counts.values())
+    return {
+        "notifications_deleted": _affected_count(notif_res),
+        "result_ranks_deleted": int(table_counts.get("result_ranks", 0)),
+        "daily_results_cache_deleted": int(table_counts.get("daily_results_cache", 0)),
+        "results_v2_deleted": int(table_counts.get("results_v2", 0)),
+        "photo_day_metrics_deleted": int(table_counts.get("photo_day_metrics", 0)),
+        "alltime_cache_deleted": int(table_counts.get("alltime_cache", 0)),
+        "hall_of_fame_deleted": int(table_counts.get("hall_of_fame", 0)),
+        "weekly_candidates_deleted": int(table_counts.get("weekly_candidates", 0)),
+        "photo_repeats_deleted": int(table_counts.get("photo_repeats", 0)),
+        "my_results_deleted": int(table_counts.get("my_results", 0)),
+        "results_rows_deleted": int(results_rows),
+    }
+
+
+async def _clear_archived_photos(conn: asyncpg.Connection) -> object:
+    return await conn.execute(
+        """
+        UPDATE photos
+        SET is_deleted=1,
+            status='deleted',
+            deleted_reason='admin_reset_results',
+            deleted_at=NOW()
+        WHERE is_deleted=0
+          AND status='archived'
+        """
+    )
+
+
+async def admin_reset_results_only() -> dict:
+    """Delete only results/caches queues, keep photos untouched."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            res = await _clear_results_tables(conn)
+    return {
+        **res,
+        "archived_photos_deleted": 0,
+        "total_rows_affected": int(res.get("results_rows_deleted") or 0),
+    }
+
+
+async def admin_reset_archives_only() -> dict:
+    """Delete only archived photos, keep results/caches untouched."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            archived_res = await _clear_archived_photos(conn)
+    archived_deleted = _affected_count(archived_res)
+    return {
+        "notifications_deleted": 0,
+        "result_ranks_deleted": 0,
+        "daily_results_cache_deleted": 0,
+        "results_v2_deleted": 0,
+        "photo_day_metrics_deleted": 0,
+        "alltime_cache_deleted": 0,
+        "hall_of_fame_deleted": 0,
+        "weekly_candidates_deleted": 0,
+        "photo_repeats_deleted": 0,
+        "my_results_deleted": 0,
+        "results_rows_deleted": 0,
+        "archived_photos_deleted": int(archived_deleted),
+        "total_rows_affected": int(archived_deleted),
+    }
+
+
+async def get_results_reset_preview_counts() -> dict:
+    """Preview counts for reset confirmations."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        archived_photos = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM photos
+            WHERE is_deleted=0
+              AND status='archived'
+            """
+        )
+        notifications = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM notification_queue
+            WHERE type='daily_results_top'
+            """
+        )
+        days_in_cache = 0
+        daily_cache_exists = await conn.fetchval("SELECT to_regclass('public.daily_results_cache')")
+        if daily_cache_exists:
+            days_in_cache = int(
+                await conn.fetchval(
+                    "SELECT COUNT(DISTINCT submit_day)::int FROM daily_results_cache"
+                )
+                or 0
+            )
+
+        table_counts: dict[str, int] = {}
+        for table_name in _results_table_names():
+            exists = await conn.fetchval("SELECT to_regclass($1)", f"public.{table_name}")
+            if not exists:
+                table_counts[table_name] = 0
+                continue
+            cnt = await conn.fetchval(f"SELECT COUNT(*)::int FROM {table_name}")
+            table_counts[table_name] = int(cnt or 0)
+
+    results_rows_total = int(notifications or 0) + int(sum(table_counts.values()))
+    return {
+        "archived_photos_count": int(archived_photos or 0),
+        "results_rows_count": int(results_rows_total),
+        "parties_days_count": int(days_in_cache),
+        "notifications_count": int(notifications or 0),
+        "result_ranks_count": int(table_counts.get("result_ranks", 0)),
+        "daily_results_cache_count": int(table_counts.get("daily_results_cache", 0)),
+        "results_v2_count": int(table_counts.get("results_v2", 0)),
+        "photo_day_metrics_count": int(table_counts.get("photo_day_metrics", 0)),
+        "alltime_cache_count": int(table_counts.get("alltime_cache", 0)),
+        "hall_of_fame_count": int(table_counts.get("hall_of_fame", 0)),
+        "weekly_candidates_count": int(table_counts.get("weekly_candidates", 0)),
+        "photo_repeats_count": int(table_counts.get("photo_repeats", 0)),
+        "my_results_count": int(table_counts.get("my_results", 0)),
+    }
+
+
 async def consume_credits_on_show(author_user_id: int, *, now: datetime | None = None) -> bool:
     """
     Spend author's credits into show tokens and consume one token per show.
@@ -550,7 +820,8 @@ async def consume_credits_on_show(author_user_id: int, *, now: datetime | None =
     """
     p = _assert_pool()
     now_dt = now or get_bot_now()
-    multiplier = _happy_hour_multiplier(now_dt)
+    economy = await get_effective_economy_settings()
+    multiplier = _credit_multiplier_for_moment(now_dt, economy)
     async with p.acquire() as conn:
         stats = await _ensure_user_stats_row(conn, int(author_user_id))
         async with conn.transaction():
@@ -592,7 +863,8 @@ async def consume_credits_on_rating(author_user_id: int, *, now: datetime | None
     """
     p = _assert_pool()
     now_dt = now or get_bot_now()
-    multiplier = 2
+    economy = await get_effective_economy_settings()
+    multiplier = _coerce_int(economy.get("credit_to_shows_normal"), 2, min_value=1, max_value=100)
     async with p.acquire() as conn:
         await _ensure_user_stats_row(conn, int(author_user_id))
         async with conn.transaction():
@@ -628,7 +900,9 @@ async def consume_credits_on_rating(author_user_id: int, *, now: datetime | None
 
 
 async def happy_hour_multiplier(now: datetime | None = None) -> int:
-    return _happy_hour_multiplier(now)
+    now_dt = now or get_bot_now()
+    economy = await get_effective_economy_settings()
+    return _credit_multiplier_for_moment(now_dt, economy)
 # -------------------- Notifications settings (likes/comments) --------------------
 
 async def _ensure_notify_tables(conn: asyncpg.Connection) -> None:
@@ -814,6 +1088,170 @@ async def _ensure_app_settings_table(conn: asyncpg.Connection) -> None:
     await conn.execute(
         "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS update_notice_text TEXT;"
     )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS upload_blocked INTEGER NOT NULL DEFAULT 0;"
+    )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS rating_blocked INTEGER NOT NULL DEFAULT 0;"
+    )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS results_blocked INTEGER NOT NULL DEFAULT 0;"
+    )
+    await conn.execute(
+        "ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS profile_blocked INTEGER NOT NULL DEFAULT 0;"
+    )
+
+
+async def _ensure_admin_settings_table(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_settings (
+            key TEXT PRIMARY KEY,
+            value JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_settings_updated_at
+        ON admin_settings (updated_at DESC);
+        """
+    )
+
+
+async def get_setting(key: str, default: object = None) -> object:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_admin_settings_table(conn)
+        row = await conn.fetchrow(
+            "SELECT value FROM admin_settings WHERE key=$1",
+            str(key),
+        )
+    if not row:
+        return default
+    return row.get("value")
+
+
+async def set_setting(key: str, value: object) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_admin_settings_table(conn)
+        await conn.execute(
+            """
+            INSERT INTO admin_settings (key, value, updated_at)
+            VALUES ($1, $2::jsonb, NOW())
+            ON CONFLICT (key)
+            DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+            """,
+            str(key),
+            json.dumps(value),
+        )
+
+
+async def delete_setting(key: str) -> None:
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_admin_settings_table(conn)
+        await conn.execute(
+            "DELETE FROM admin_settings WHERE key=$1",
+            str(key),
+        )
+
+
+async def get_settings_bulk(keys: list[str]) -> dict[str, object]:
+    safe_keys = [str(k) for k in keys if str(k).strip()]
+    if not safe_keys:
+        return {}
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_admin_settings_table(conn)
+        rows = await conn.fetch(
+            """
+            SELECT key, value
+            FROM admin_settings
+            WHERE key = ANY($1::text[])
+            """,
+            safe_keys,
+        )
+    return {str(r.get("key")): r.get("value") for r in rows}
+
+
+async def set_settings_bulk(values: dict[str, object]) -> None:
+    if not values:
+        return
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_admin_settings_table(conn)
+        async with conn.transaction():
+            for k, v in values.items():
+                await conn.execute(
+                    """
+                    INSERT INTO admin_settings (key, value, updated_at)
+                    VALUES ($1, $2::jsonb, NOW())
+                    ON CONFLICT (key)
+                    DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+                    """,
+                    str(k),
+                    json.dumps(v),
+                )
+
+
+_TECH_NOTICE_KEY = "tech.notice_text"
+_ACCESS_SETTING_KEYS = {
+    "upload": "access.upload_blocked",
+    "rate": "access.rating_blocked",
+    "results": "access.results_blocked",
+    "profile": "access.profile_blocked",
+}
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    try:
+        s = str(value).strip().lower()
+    except Exception:
+        return bool(default)
+    if s in {"1", "true", "yes", "on", "y", "t"}:
+        return True
+    if s in {"0", "false", "no", "off", "n", "f"}:
+        return False
+    return bool(default)
+
+
+def _coerce_int(value: object, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    if min_value is not None and out < int(min_value):
+        out = int(min_value)
+    if max_value is not None and out > int(max_value):
+        out = int(max_value)
+    return out
+
+
+def _coerce_float(
+    value: object,
+    default: float,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if min_value is not None and out < float(min_value):
+        out = float(min_value)
+    if max_value is not None and out > float(max_value):
+        out = float(max_value)
+    return out
 
 
 async def _ensure_scheduled_broadcasts_table(conn: asyncpg.Connection) -> None:
@@ -964,25 +1402,40 @@ async def set_user_rate_cards_seen(tg_id: int, value: int) -> None:
 # -------------------- Tech mode settings --------------------
 
 async def get_tech_mode_state() -> dict:
-    """Return tech mode state: {tech_enabled: bool, tech_start_at: str | None}."""
+    """Return tech mode state."""
     p = _assert_pool()
     async with p.acquire() as conn:
         await _ensure_app_settings_table(conn)
+        await _ensure_admin_settings_table(conn)
         row = await conn.fetchrow(
             "SELECT tech_enabled, tech_start_at FROM app_settings WHERE id=1"
         )
+        notice = await conn.fetchval(
+            "SELECT value FROM admin_settings WHERE key=$1",
+            _TECH_NOTICE_KEY,
+        )
         if not row:
-            return {"tech_enabled": False, "tech_start_at": None}
+            return {"tech_enabled": False, "tech_start_at": None, "tech_notice_text": None}
         return {
             "tech_enabled": bool(row.get("tech_enabled")),
             "tech_start_at": row.get("tech_start_at"),
+            "tech_notice_text": str(notice).strip() if notice is not None else None,
         }
 
 
-async def set_tech_mode_state(*, enabled: bool, start_at: str | None) -> None:
+_UNSET = object()
+
+
+async def set_tech_mode_state(
+    *,
+    enabled: bool,
+    start_at: str | None,
+    notice_text: str | None | object = _UNSET,
+) -> None:
     p = _assert_pool()
     async with p.acquire() as conn:
         await _ensure_app_settings_table(conn)
+        await _ensure_admin_settings_table(conn)
         await conn.execute(
             """
             UPDATE app_settings
@@ -993,6 +1446,24 @@ async def set_tech_mode_state(*, enabled: bool, start_at: str | None) -> None:
             start_at,
             get_moscow_now_iso(),
         )
+        if notice_text is not _UNSET:
+            text_value = (str(notice_text).strip() if notice_text is not None else "")
+            if text_value:
+                await conn.execute(
+                    """
+                    INSERT INTO admin_settings (key, value, updated_at)
+                    VALUES ($1, $2::jsonb, NOW())
+                    ON CONFLICT (key)
+                    DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+                    """,
+                    _TECH_NOTICE_KEY,
+                    json.dumps(text_value),
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM admin_settings WHERE key=$1",
+                    _TECH_NOTICE_KEY,
+                )
 
 # -------------------- Update mode (обновление) --------------------
 
@@ -1059,6 +1530,293 @@ async def set_update_mode_state(
                 notice_text,
                 get_moscow_now_iso(),
             )
+
+
+_SECTION_BLOCK_COLUMNS = {
+    "upload": "upload_blocked",
+    "rate": "rating_blocked",
+    "results": "results_blocked",
+    "profile": "profile_blocked",
+}
+
+
+async def get_section_access_state() -> dict:
+    """Return section access flags (True means blocked)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_app_settings_table(conn)
+        await _ensure_admin_settings_table(conn)
+        row = await conn.fetchrow(
+            """
+            SELECT upload_blocked, rating_blocked, results_blocked, profile_blocked
+            FROM app_settings
+            WHERE id=1
+            """
+        )
+        settings_rows = await conn.fetch(
+            """
+            SELECT key, value
+            FROM admin_settings
+            WHERE key = ANY($1::text[])
+            """,
+            list(_ACCESS_SETTING_KEYS.values()),
+        )
+        saved = {str(r.get("key")): r.get("value") for r in settings_rows}
+        if not row:
+            row = {}
+        return {
+            "upload_blocked": _coerce_bool(
+                saved.get(_ACCESS_SETTING_KEYS["upload"]),
+                bool((row or {}).get("upload_blocked")),
+            ),
+            "rating_blocked": _coerce_bool(
+                saved.get(_ACCESS_SETTING_KEYS["rate"]),
+                bool((row or {}).get("rating_blocked")),
+            ),
+            "results_blocked": _coerce_bool(
+                saved.get(_ACCESS_SETTING_KEYS["results"]),
+                bool((row or {}).get("results_blocked")),
+            ),
+            "profile_blocked": _coerce_bool(
+                saved.get(_ACCESS_SETTING_KEYS["profile"]),
+                bool((row or {}).get("profile_blocked")),
+            ),
+        }
+
+
+async def set_section_blocked(section: str, blocked: bool) -> dict:
+    key = str(section or "").strip().lower()
+    column = _SECTION_BLOCK_COLUMNS.get(key)
+    if column is None:
+        raise ValueError("unknown section")
+
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        await _ensure_app_settings_table(conn)
+        await _ensure_admin_settings_table(conn)
+        await conn.execute(
+            f"UPDATE app_settings SET {column}=$1, updated_at=$2 WHERE id=1",
+            1 if blocked else 0,
+            get_moscow_now_iso(),
+        )
+        await conn.execute(
+            """
+            INSERT INTO admin_settings (key, value, updated_at)
+            VALUES ($1, $2::jsonb, NOW())
+            ON CONFLICT (key)
+            DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()
+            """,
+            _ACCESS_SETTING_KEYS[key],
+            json.dumps(bool(blocked)),
+        )
+    return await get_section_access_state()
+
+
+async def toggle_section_blocked(section: str) -> dict:
+    key = str(section or "").strip().lower()
+    column = _SECTION_BLOCK_COLUMNS.get(key)
+    if column is None:
+        raise ValueError("unknown section")
+
+    current_state = await get_section_access_state()
+    current = bool(current_state.get(f"{'rating' if key == 'rate' else key}_blocked"))
+    return await set_section_blocked(key, not current)
+
+
+async def is_section_blocked(section: str) -> bool:
+    key = str(section or "").strip().lower()
+    if key not in _SECTION_BLOCK_COLUMNS:
+        return False
+    st = await get_section_access_state()
+    field = f"{'rating' if key == 'rate' else key}_blocked"
+    return bool(st.get(field))
+
+
+async def set_section_access_state(
+    *,
+    upload_blocked: bool,
+    rating_blocked: bool,
+    results_blocked: bool,
+    profile_blocked: bool,
+) -> dict:
+    await set_section_blocked("upload", bool(upload_blocked))
+    await set_section_blocked("rate", bool(rating_blocked))
+    await set_section_blocked("results", bool(results_blocked))
+    await set_section_blocked("profile", bool(profile_blocked))
+    return await get_section_access_state()
+
+
+async def apply_access_preset(preset: str) -> dict:
+    name = str(preset or "").strip().lower()
+    if name == "normal":
+        return await set_section_access_state(
+            upload_blocked=False,
+            rating_blocked=False,
+            results_blocked=False,
+            profile_blocked=False,
+        )
+    if name == "upload_off":
+        return await set_section_access_state(
+            upload_blocked=True,
+            rating_blocked=False,
+            results_blocked=False,
+            profile_blocked=False,
+        )
+    if name == "rate_off":
+        return await set_section_access_state(
+            upload_blocked=False,
+            rating_blocked=True,
+            results_blocked=False,
+            profile_blocked=False,
+        )
+    if name == "read_only":
+        return await set_section_access_state(
+            upload_blocked=True,
+            rating_blocked=True,
+            results_blocked=False,
+            profile_blocked=False,
+        )
+    if name == "full_lock":
+        return await set_section_access_state(
+            upload_blocked=True,
+            rating_blocked=True,
+            results_blocked=True,
+            profile_blocked=True,
+        )
+    raise ValueError("unknown preset")
+
+
+_ECONOMY_SETTING_KEYS = [
+    "economy.daily_free_credits_normal",
+    "economy.daily_free_credits_premium",
+    "economy.daily_free_credits_author",
+    "economy.publish_bonus_credits",
+    "economy.credit_to_shows_normal",
+    "economy.credit_to_shows_happyhour",
+    "economy.happy_hour_enabled",
+    "economy.happy_hour_start_hour",
+    "economy.happy_hour_duration_minutes",
+    "economy.tail_probability",
+    "economy.min_votes_for_normal_feed",
+    "economy.max_active_photos_normal",
+    "economy.max_active_photos_author",
+    "economy.max_active_photos_premium",
+]
+
+_ADS_SETTING_KEYS = [
+    "ads.enabled",
+    "ads.frequency_n",
+    "ads.only_nonpremium",
+]
+
+_PROTECTION_SETTING_KEYS = [
+    "protection.mode_enabled",
+    "protection.max_callbacks_per_minute_per_user",
+    "protection.max_actions_per_10s",
+    "protection.cooldown_on_spike_seconds",
+    "protection.spam_suspect_threshold",
+]
+
+
+def _economy_defaults() -> dict[str, object]:
+    from config import CREDIT_SHOWS_BASE, CREDIT_SHOWS_HAPPY, TAIL_PROBABILITY, MIN_VOTES_FOR_NORMAL_FEED
+    return {
+        "daily_free_credits_normal": 2,
+        "daily_free_credits_premium": 3,
+        "daily_free_credits_author": 3,
+        "publish_bonus_credits": 2,
+        "credit_to_shows_normal": int(CREDIT_SHOWS_BASE),
+        "credit_to_shows_happyhour": int(CREDIT_SHOWS_HAPPY),
+        "happy_hour_enabled": True,
+        "happy_hour_start_hour": 15,
+        "happy_hour_duration_minutes": 60,
+        "tail_probability": float(TAIL_PROBABILITY),
+        "min_votes_for_normal_feed": int(MIN_VOTES_FOR_NORMAL_FEED),
+        "max_active_photos_normal": 2,
+        "max_active_photos_author": 2,
+        "max_active_photos_premium": 2,
+    }
+
+
+def _ads_defaults() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "frequency_n": 3,
+        "only_nonpremium": True,
+    }
+
+
+def _protection_defaults() -> dict[str, object]:
+    return {
+        "mode_enabled": False,
+        "max_callbacks_per_minute_per_user": 120,
+        "max_actions_per_10s": 20,
+        "cooldown_on_spike_seconds": 10,
+        "spam_suspect_threshold": 120,
+    }
+
+
+async def get_effective_economy_settings() -> dict:
+    defaults = _economy_defaults()
+    raw = await get_settings_bulk(_ECONOMY_SETTING_KEYS)
+    return {
+        "daily_free_credits_normal": _coerce_int(raw.get("economy.daily_free_credits_normal"), int(defaults["daily_free_credits_normal"]), min_value=0, max_value=100),
+        "daily_free_credits_premium": _coerce_int(raw.get("economy.daily_free_credits_premium"), int(defaults["daily_free_credits_premium"]), min_value=0, max_value=100),
+        "daily_free_credits_author": _coerce_int(raw.get("economy.daily_free_credits_author"), int(defaults["daily_free_credits_author"]), min_value=0, max_value=100),
+        "publish_bonus_credits": _coerce_int(raw.get("economy.publish_bonus_credits"), int(defaults["publish_bonus_credits"]), min_value=0, max_value=100),
+        "credit_to_shows_normal": _coerce_int(raw.get("economy.credit_to_shows_normal"), int(defaults["credit_to_shows_normal"]), min_value=1, max_value=100),
+        "credit_to_shows_happyhour": _coerce_int(raw.get("economy.credit_to_shows_happyhour"), int(defaults["credit_to_shows_happyhour"]), min_value=1, max_value=100),
+        "happy_hour_enabled": _coerce_bool(raw.get("economy.happy_hour_enabled"), bool(defaults["happy_hour_enabled"])),
+        "happy_hour_start_hour": _coerce_int(raw.get("economy.happy_hour_start_hour"), int(defaults["happy_hour_start_hour"]), min_value=0, max_value=23),
+        "happy_hour_duration_minutes": _coerce_int(raw.get("economy.happy_hour_duration_minutes"), int(defaults["happy_hour_duration_minutes"]), min_value=1, max_value=1440),
+        "tail_probability": _coerce_float(raw.get("economy.tail_probability"), float(defaults["tail_probability"]), min_value=0.0, max_value=1.0),
+        "min_votes_for_normal_feed": _coerce_int(raw.get("economy.min_votes_for_normal_feed"), int(defaults["min_votes_for_normal_feed"]), min_value=0, max_value=500),
+        "max_active_photos_normal": _coerce_int(raw.get("economy.max_active_photos_normal"), int(defaults["max_active_photos_normal"]), min_value=1, max_value=20),
+        "max_active_photos_author": _coerce_int(raw.get("economy.max_active_photos_author"), int(defaults["max_active_photos_author"]), min_value=1, max_value=20),
+        "max_active_photos_premium": _coerce_int(raw.get("economy.max_active_photos_premium"), int(defaults["max_active_photos_premium"]), min_value=1, max_value=20),
+    }
+
+
+async def get_effective_ads_settings() -> dict:
+    defaults = _ads_defaults()
+    raw = await get_settings_bulk(_ADS_SETTING_KEYS)
+    return {
+        "enabled": _coerce_bool(raw.get("ads.enabled"), bool(defaults["enabled"])),
+        "frequency_n": _coerce_int(raw.get("ads.frequency_n"), int(defaults["frequency_n"]), min_value=1, max_value=1000),
+        "only_nonpremium": _coerce_bool(raw.get("ads.only_nonpremium"), bool(defaults["only_nonpremium"])),
+    }
+
+
+async def get_effective_protection_settings() -> dict:
+    defaults = _protection_defaults()
+    raw = await get_settings_bulk(_PROTECTION_SETTING_KEYS)
+    return {
+        "mode_enabled": _coerce_bool(raw.get("protection.mode_enabled"), bool(defaults["mode_enabled"])),
+        "max_callbacks_per_minute_per_user": _coerce_int(
+            raw.get("protection.max_callbacks_per_minute_per_user"),
+            int(defaults["max_callbacks_per_minute_per_user"]),
+            min_value=10,
+            max_value=2000,
+        ),
+        "max_actions_per_10s": _coerce_int(
+            raw.get("protection.max_actions_per_10s"),
+            int(defaults["max_actions_per_10s"]),
+            min_value=1,
+            max_value=500,
+        ),
+        "cooldown_on_spike_seconds": _coerce_int(
+            raw.get("protection.cooldown_on_spike_seconds"),
+            int(defaults["cooldown_on_spike_seconds"]),
+            min_value=0,
+            max_value=300,
+        ),
+        "spam_suspect_threshold": _coerce_int(
+            raw.get("protection.spam_suspect_threshold"),
+            int(defaults["spam_suspect_threshold"]),
+            min_value=1,
+            max_value=5000,
+        ),
+    }
 
 
 async def get_user_update_notice_ver(tg_id: int) -> int:
@@ -5822,6 +6580,7 @@ async def next_photo_for_viewer(viewer_user_id: int) -> dict | None:
     """
     p = _assert_pool()
     now = get_bot_now()
+    economy = await get_effective_economy_settings()
     async def _pick(require_credit: bool, *, spend_token: bool, max_votes: int | None = None) -> dict | None:
         async with p.acquire() as conn:
             async with conn.transaction():
@@ -5870,7 +6629,7 @@ async def next_photo_for_viewer(viewer_user_id: int) -> dict | None:
                 if require_credit and credits <= 0 and tokens <= 0:
                     return None
 
-                multiplier = _happy_hour_multiplier(now)
+                multiplier = _credit_multiplier_for_moment(now, economy)
                 new_credits = credits
                 new_tokens = tokens
                 if spend_token and new_tokens <= 0 and new_credits > 0:
@@ -5911,9 +6670,10 @@ async def next_photo_for_viewer(viewer_user_id: int) -> dict | None:
     if photo:
         return photo
     # tail без списания кредитов с вероятностью
-    from config import MIN_VOTES_FOR_NORMAL_FEED, TAIL_PROBABILITY
-    if random.random() <= float(TAIL_PROBABILITY):
-        return await _pick(False, spend_token=False, max_votes=int(MIN_VOTES_FOR_NORMAL_FEED))
+    tail_probability = _coerce_float(economy.get("tail_probability"), 0.05, min_value=0.0, max_value=1.0)
+    min_votes = _coerce_int(economy.get("min_votes_for_normal_feed"), 5, min_value=0, max_value=500)
+    if random.random() <= float(tail_probability):
+        return await _pick(False, spend_token=False, max_votes=int(min_votes))
     return await _pick(False, spend_token=False)
 
 
@@ -6679,6 +7439,10 @@ async def grant_daily_credits_once(day: date | None = None, *, batch_size: int =
       - premium users: +3 credits
     """
     target_day = day or get_bot_today()
+    economy = await get_effective_economy_settings()
+    normal_credits = _coerce_int(economy.get("daily_free_credits_normal"), 2, min_value=0, max_value=100)
+    premium_credits = _coerce_int(economy.get("daily_free_credits_premium"), 3, min_value=0, max_value=100)
+    author_credits = _coerce_int(economy.get("daily_free_credits_author"), premium_credits, min_value=0, max_value=100)
     p = _assert_pool()
     granted_total = 0
     batches = 0
@@ -6713,7 +7477,11 @@ async def grant_daily_credits_once(day: date | None = None, *, batch_size: int =
                         FOR UPDATE OF us SKIP LOCKED
                     )
                     UPDATE user_stats us
-                    SET credits = us.credits + CASE WHEN COALESCE(u.is_premium,0)=1 THEN 3 ELSE 2 END,
+                    SET credits = us.credits + CASE
+                        WHEN COALESCE(u.is_author,0)=1 THEN $3
+                        WHEN COALESCE(u.is_premium,0)=1 THEN $4
+                        ELSE $5
+                    END,
                         last_daily_grant_day = $1::date,
                         last_active_at = COALESCE(us.last_active_at, NOW())
                     FROM picked p
@@ -6723,6 +7491,9 @@ async def grant_daily_credits_once(day: date | None = None, *, batch_size: int =
                     """,
                     target_day,
                     int(batch_size),
+                    int(author_credits),
+                    int(premium_credits),
+                    int(normal_credits),
                 )
         count = len(rows)
         if count <= 0:

@@ -9,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import (
     get_user_by_username,
     admin_add_credits,
+    admin_add_credits_all,
     admin_remove_credits,
     admin_reset_all_credits,
 )
@@ -20,15 +21,17 @@ router = Router(name="admin_credits")
 class CreditsAdminStates(StatesGroup):
     waiting_grant_input = State()
     waiting_remove_input = State()
+    waiting_grant_all_amount = State()
 
 
 def _credits_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📤 Отправить", callback_data="admin:credits:grant")
+    kb.button(text="🌐 Выдать всем", callback_data="admin:credits:grant_all:ask")
     kb.button(text="📥 Удалить", callback_data="admin:credits:remove")
     kb.button(text="♻️ Сбросить всем", callback_data="admin:credits:reset:ask")
     kb.button(text="⬅️ В админ-меню", callback_data="admin:menu")
-    kb.adjust(2, 1, 1)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -67,6 +70,56 @@ def _parse_credit_input(raw: str) -> tuple[str | None, int | None, str | None]:
     return username, amount, None
 
 
+def _parse_positive_amount(raw: str) -> tuple[int | None, str | None]:
+    s = (raw or "").strip()
+    if not s:
+        return None, "Укажи число больше нуля."
+    try:
+        amount = int(s)
+    except Exception:
+        return None, "Количество должно быть целым числом."
+    if amount <= 0:
+        return None, "Количество должно быть больше нуля."
+    return amount, None
+
+
+def _grant_all_amount_picker_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for amount in (1, 2, 3, 5, 10, 20):
+        kb.button(
+            text=f"+{amount}",
+            callback_data=f"admin:credits:grant_all:preset:{amount}",
+        )
+    kb.button(text="⬅️ Назад", callback_data="admin:credits")
+    kb.adjust(3, 3, 1)
+    return kb.as_markup()
+
+
+def _grant_all_confirm_kb(amount: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Выдать всем +{amount}", callback_data="admin:credits:grant_all:do")
+    kb.button(text="✏️ Изменить число", callback_data="admin:credits:grant_all:ask")
+    kb.button(text="❌ Отмена", callback_data="admin:credits")
+    kb.adjust(1, 1, 1)
+    return kb.as_markup()
+
+
+async def _show_grant_all_confirm(target_message: Message, state: FSMContext, amount: int) -> None:
+    await state.update_data(admin_credits_grant_all_amount=int(amount))
+    await edit_or_answer(
+        target_message,
+        state,
+        prefix="admin_credits",
+        text=(
+            "⚠️ Подтверди массовую выдачу\n\n"
+            f"Будет начислено: +{int(amount)} credits\n"
+            "Кому: всем пользователям в боте\n"
+            "Уведомления пользователям отправляться не будут."
+        ),
+        reply_markup=_grant_all_confirm_kb(int(amount)),
+    )
+
+
 @router.callback_query(F.data == "admin:credits")
 async def admin_credits_menu(callback: CallbackQuery, state: FSMContext):
     admin = await _ensure_admin(callback)
@@ -80,6 +133,7 @@ async def admin_credits_menu(callback: CallbackQuery, state: FSMContext):
     text = (
         "💳 Кредиты\n\n"
         "• 📤 Отправить — выдать кредиты пользователю по @username\n"
+        "• 🌐 Выдать всем — массово начислить credits всем пользователям\n"
         "• 📥 Удалить — убрать кредиты у пользователя по @username\n"
         "• ♻️ Сбросить всем — обнулить кредиты и show-токены у всех\n\n"
         "Формат ввода: @username 10\n"
@@ -116,6 +170,89 @@ async def admin_credits_grant_start(callback: CallbackQuery, state: FSMContext):
         reply_markup=_back_to_credits_kb(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:credits:grant_all:ask")
+async def admin_credits_grant_all_ask(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    await state.set_state(CreditsAdminStates.waiting_grant_all_amount)
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_credits",
+        text=(
+            "🌐 Выдать всем кредиты\n\n"
+            "Выбери готовое значение кнопкой ниже\n"
+            "или отправь число сообщением (например: 5).\n\n"
+            "Начисление будет выполнено тихо, без уведомлений пользователям."
+        ),
+        reply_markup=_grant_all_amount_picker_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:credits:grant_all:preset:"))
+async def admin_credits_grant_all_preset(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    raw = (callback.data or "").split(":")[-1]
+    amount, err = _parse_positive_amount(raw)
+    if err:
+        await callback.answer("Неверное значение", show_alert=True)
+        return
+    if callback.message:
+        await _show_grant_all_confirm(callback.message, state, int(amount))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:credits:grant_all:do")
+async def admin_credits_grant_all_do(callback: CallbackQuery, state: FSMContext):
+    admin = await _ensure_admin(callback)
+    if not admin:
+        return
+
+    data = await state.get_data()
+    amount = int(data.get("admin_credits_grant_all_amount") or 0)
+    if amount <= 0:
+        await state.set_state(CreditsAdminStates.waiting_grant_all_amount)
+        await edit_or_answer(
+            callback.message,
+            state,
+            prefix="admin_credits",
+            text=(
+                "⚠️ Сначала выбери количество credits для массовой выдачи.\n"
+                "Можно нажать готовую кнопку или отправить число сообщением."
+            ),
+            reply_markup=_grant_all_amount_picker_kb(),
+        )
+        await callback.answer("Нет выбранного количества", show_alert=True)
+        return
+
+    result = await admin_add_credits_all(int(amount))
+    try:
+        await state.set_state(None)
+    except Exception:
+        pass
+    await state.update_data(admin_credits_grant_all_amount=None)
+    await edit_or_answer(
+        callback.message,
+        state,
+        prefix="admin_credits",
+        text=(
+            "✅ Массовая выдача выполнена.\n"
+            f"Начислено каждому: +{result['added_per_user']} credits\n"
+            f"Затронуто пользователей: {result['affected_users']}\n"
+            f"Всего добавлено credits: {result['total_added']}\n"
+            "Уведомления пользователям не отправлялись."
+        ),
+        reply_markup=_credits_menu_kb(),
+    )
+    await callback.answer("Готово")
 
 
 @router.callback_query(F.data == "admin:credits:remove")
@@ -300,8 +437,39 @@ async def admin_credits_remove_input(message: Message, state: FSMContext):
     )
 
 
+@router.message(CreditsAdminStates.waiting_grant_all_amount, F.text)
+async def admin_credits_grant_all_amount_input(message: Message, state: FSMContext):
+    admin = await _ensure_admin(message)
+    if not admin:
+        return
+
+    raw = message.text or ""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    amount, err = _parse_positive_amount(raw)
+    if err:
+        await edit_or_answer(
+            message,
+            state,
+            prefix="admin_credits",
+            text=(
+                f"⚠️ {err}\n\n"
+                "Отправь целое число больше нуля.\n"
+                "Пример: 5"
+            ),
+            reply_markup=_grant_all_amount_picker_kb(),
+        )
+        return
+
+    await _show_grant_all_confirm(message, state, int(amount))
+
+
 @router.message(CreditsAdminStates.waiting_grant_input)
 @router.message(CreditsAdminStates.waiting_remove_input)
+@router.message(CreditsAdminStates.waiting_grant_all_amount)
 async def admin_credits_ignore_non_text(message: Message):
     try:
         await message.delete()

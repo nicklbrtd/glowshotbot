@@ -14,6 +14,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from keyboards.common import build_viewed_kb
+from keyboards.common import build_back_to_menu_kb
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from utils.antispam import should_throttle
 from utils.moderation import (
@@ -53,6 +54,7 @@ from database import (
     get_active_photos_for_user,
     get_random_active_ad,
     get_ads_enabled_by_tg_id,
+    get_effective_ads_settings,
     has_user_commented,
     get_user_ui_state,
     set_user_rate_kb_msg_id,
@@ -63,6 +65,8 @@ from database import (
     mark_user_suspicious_rating,
     consume_credits_on_rating,
     get_author_settings,
+    is_section_blocked,
+    get_tech_mode_state,
 )
 from handlers.upload import EDIT_TAGS
 from html import escape
@@ -80,6 +84,21 @@ from utils.registration_guard import require_user_name
 
 router = Router()
 logger = logging.getLogger(__name__)
+SECTION_BLOCKED_TEXT = (
+    "Пока что вход в этот раздел запрещен. Возможно ведутся улучшения или исправления багов. "
+    "Подождите пожалуйста!"
+)
+
+
+async def _blocked_section_text() -> str:
+    try:
+        tech = await get_tech_mode_state()
+        custom = str(tech.get("tech_notice_text") or "").strip()
+        if custom:
+            return custom
+    except Exception:
+        pass
+    return SECTION_BLOCKED_TEXT
 
 
 async def _rate_tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.6) -> bool:
@@ -90,6 +109,65 @@ async def _rate_tap_guard(callback: CallbackQuery, key: str, seconds: float = 0.
     except Exception:
         pass
     return True
+
+
+async def _show_rate_blocked_callback(callback: CallbackQuery) -> None:
+    kb = build_back_to_menu_kb()
+    text = await _blocked_section_text()
+    try:
+        if getattr(callback.message, "photo", None):
+            await callback.message.edit_caption(
+                caption=text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        else:
+            await callback.message.edit_text(
+                text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        return
+    except Exception:
+        pass
+    try:
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        pass
+
+
+async def _show_rate_blocked_message(message: Message) -> None:
+    text = await _blocked_section_text()
+    try:
+        await message.answer(
+            text,
+            reply_markup=build_back_to_menu_kb(),
+            parse_mode="HTML",
+            disable_notification=True,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("rate:"))
+async def _rate_access_guard(callback: CallbackQuery):
+    try:
+        blocked = await is_section_blocked("rate")
+    except Exception:
+        blocked = False
+    if not blocked:
+        raise SkipHandler
+    await _show_rate_blocked_callback(callback)
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 
 # --- Helper: Touch giraffe banner without changing reply-keyboard (for inline callbacks) ---
@@ -1750,6 +1828,7 @@ async def build_rate_caption(
     except Exception:
         viewer_is_premium = False
 
+    ad_cfg = await get_effective_ads_settings()
     ads_enabled = None
     try:
         ads_enabled = await get_ads_enabled_by_tg_id(int(viewer_tg_id))
@@ -1759,6 +1838,10 @@ async def build_rate_caption(
     # если пользователь не задавал — по умолчанию: у премиум выкл, у остальных вкл
     if ads_enabled is None:
         ads_enabled = not viewer_is_premium
+    if not bool(ad_cfg.get("enabled", True)):
+        ads_enabled = False
+    if bool(ad_cfg.get("only_nonpremium", True)) and viewer_is_premium:
+        ads_enabled = False
 
     ad_lines: list[str] = []
     if ads_enabled and show_ad:
@@ -1843,7 +1926,11 @@ async def show_next_photo_for_rating(
     except Exception:
         rate_cards_seen = 0
 
-    show_ad = ((rate_cards_seen + 1) % 3 == 0)
+    ad_cfg = await get_effective_ads_settings()
+    freq = int(ad_cfg.get("frequency_n") or 3)
+    if freq <= 0:
+        freq = 1
+    show_ad = bool(ad_cfg.get("enabled", True)) and ((rate_cards_seen + 1) % int(freq) == 0)
     card = await _build_next_rating_card(user_id, viewer_tg_id=viewer_tg_id, show_ad=show_ad)
 
     if state is not None:
@@ -3155,6 +3242,26 @@ async def rate_score(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        raise SkipHandler
+    is_next_tap = text == t("rate.btn.next", "ru") or text == t("rate.btn.next", "en")
+    is_score_tap = text.isdigit()
+    if not is_next_tap and not is_score_tap:
+        raise SkipHandler
+
+    try:
+        rate_blocked = await is_section_blocked("rate")
+    except Exception:
+        rate_blocked = False
+    if rate_blocked:
+        await _show_rate_blocked_message(message)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     if await _deny_if_full_banned(message=message):
         return
     try:
@@ -3162,9 +3269,7 @@ async def rate_score_from_keyboard(message: Message, state: FSMContext) -> None:
             return
     except Exception:
         pass
-    text = (message.text or "").strip()
-    if text.startswith("/"):
-        raise SkipHandler
+
     if text == t("rate.btn.next", "ru") or text == t("rate.btn.next", "en"):
         data = await state.get_data()
         photo_id = data.get("rate_current_photo_id")
@@ -3583,6 +3688,18 @@ async def rate_back(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:rate")
 async def rate_root(callback: CallbackQuery, state: FSMContext | None = None, replace_message: bool = True) -> None:
+    try:
+        blocked = await is_section_blocked("rate")
+    except Exception:
+        blocked = False
+    if blocked:
+        await _show_rate_blocked_callback(callback)
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
+
     if should_throttle(callback.from_user.id, "rate:root", 0.8):
         try:
             await callback.answer("Секунду…", show_alert=False)

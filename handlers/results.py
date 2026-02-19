@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import html
 
 from aiogram import Router, F, Bot
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -48,12 +49,47 @@ from database import (
     get_latest_daily_results_cache,
     get_daily_results_cache,
     list_daily_results_days,
+    is_section_blocked,
+    get_tech_mode_state,
 )
 from utils.registration_guard import require_user_name
 
 
 
 router = Router()
+SECTION_BLOCKED_TEXT = (
+    "Пока что вход в этот раздел запрещен. Возможно ведутся улучшения или исправления багов. "
+    "Подождите пожалуйста!"
+)
+
+
+async def _blocked_section_text() -> str:
+    try:
+        tech = await get_tech_mode_state()
+        custom = str(tech.get("tech_notice_text") or "").strip()
+        if custom:
+            return custom
+    except Exception:
+        pass
+    return SECTION_BLOCKED_TEXT
+
+
+@router.callback_query(F.data.startswith("results:"))
+async def _results_access_guard(callback: CallbackQuery, state: FSMContext | None = None):
+    try:
+        blocked = await is_section_blocked("results")
+    except Exception:
+        blocked = False
+    if not blocked:
+        raise SkipHandler
+
+    sent_id = await _show_text(callback, await _blocked_section_text(), build_back_to_menu_kb())
+    if sent_id is not None and state is not None:
+        try:
+            await remember_screen(callback.from_user.id, int(sent_id), state=state)
+        except Exception:
+            pass
+    await callback.answer()
 
 def _lang(user: dict | None) -> str:
     try:
@@ -1331,6 +1367,20 @@ async def _get_top_cached_day(day_key: str, scope_type: str, scope_key: str, lim
 
 @router.callback_query(F.data == "results:menu")
 async def results_menu(callback: CallbackQuery, state: FSMContext | None = None):
+    try:
+        blocked = await is_section_blocked("results")
+    except Exception:
+        blocked = False
+    if blocked:
+        sent_id = await _show_text(callback, await _blocked_section_text(), build_back_to_menu_kb())
+        if sent_id is not None and state is not None:
+            try:
+                await remember_screen(callback.from_user.id, int(sent_id), state=state)
+            except Exception:
+                pass
+        await callback.answer()
+        return
+
     if not await require_user_name(callback):
         return
     await cleanup_previous_screen(
