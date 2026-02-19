@@ -3164,10 +3164,12 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_rank_points ON users(rank_points);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_country ON users(country);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at ON bot_error_logs(created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_created_at_ts ON bot_error_logs((created_at::timestamp));")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_news_created_at ON premium_news(created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_expiry_reminders_sent_at ON premium_expiry_reminders(sent_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_premium_expiry_reminders_tg_id ON premium_expiry_reminders(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_tg_user_id ON bot_error_logs(tg_user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_error_logs_handler_created_at ON bot_error_logs(handler, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_user_id ON photos(user_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_day_key ON photos(day_key);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(moderation_status);")
@@ -3193,6 +3195,10 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_photo_created ON votes(photo_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_created ON votes(voter_id, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photo_views_viewer ON photo_views(viewer_id, created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_events_created_at ON activity_events(created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_events_created_at_ts ON activity_events((created_at::timestamp));")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_events_user_created_at ON activity_events(user_id, created_at);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_events_kind_created_at ON activity_events(kind, created_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_result_ranks_submit_day ON result_ranks(submit_day, final_rank);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_result_ranks_photo_submit ON result_ranks(photo_id, submit_day DESC);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_results_cache_published ON daily_results_cache(published_at DESC, submit_day DESC);")
@@ -7117,6 +7123,64 @@ async def get_photo_ids_for_user(user_id: int) -> list[int]:
     return [int(r["id"]) for r in rows]
 
 
+async def get_moderation_author_metrics(user_id: int, *, days: int = 30) -> dict:
+    """Lightweight author metrics for moderator profile screen."""
+    p = _assert_pool()
+    since_iso = (get_moscow_now() - timedelta(days=max(1, int(days)))).isoformat()
+    async with p.acquire() as conn:
+        active_photos = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM photos
+            WHERE user_id=$1
+              AND COALESCE(is_deleted, 0)=0
+              AND COALESCE(moderation_status,'') IN ('active','good','under_review','under_detailed_review')
+            """,
+            int(user_id),
+        )
+        deleted_by_mod_30d = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM moderator_reviews mr
+            JOIN photos p ON p.id = mr.photo_id
+            WHERE p.user_id=$1
+              AND mr.created_at >= $2
+              AND mr.action LIKE '%:delete:%'
+            """,
+            int(user_id),
+            since_iso,
+        )
+        reports_30d = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM photo_reports pr
+            JOIN photos p ON p.id = pr.photo_id
+            WHERE p.user_id=$1
+              AND pr.created_at >= $2
+            """,
+            int(user_id),
+            since_iso,
+        )
+        bans_30d = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM moderator_reviews mr
+            JOIN photos p ON p.id = mr.photo_id
+            WHERE p.user_id=$1
+              AND mr.created_at >= $2
+              AND mr.action LIKE '%:ban:%'
+            """,
+            int(user_id),
+            since_iso,
+        )
+    return {
+        "active_photos": int(active_photos or 0),
+        "deleted_by_mod_30d": int(deleted_by_mod_30d or 0),
+        "reports_30d": int(reports_30d or 0),
+        "bans_30d": int(bans_30d or 0),
+    }
+
+
 async def get_photo_report_stats(photo_id: int) -> dict:
     p = _assert_pool()
     async with p.acquire() as conn:
@@ -8409,6 +8473,362 @@ async def get_activity_counts_by_day(start_iso: object, end_iso: object) -> list
             end_dt,
         )
     return [dict(r) for r in rows]
+
+
+def _activity_section_case_sql() -> str:
+    return """
+        CASE
+          WHEN lower(coalesce(kind, '')) LIKE '%rate%' OR lower(coalesce(kind, '')) LIKE '%vote%' THEN 'rate'
+          WHEN lower(coalesce(kind, '')) LIKE '%upload%' OR lower(coalesce(kind, '')) LIKE '%photo%' THEN 'upload'
+          WHEN lower(coalesce(kind, '')) LIKE '%profile%' THEN 'profile'
+          WHEN lower(coalesce(kind, '')) LIKE '%result%' THEN 'results'
+          WHEN lower(coalesce(kind, '')) LIKE '%support%' THEN 'support'
+          WHEN lower(coalesce(kind, '')) LIKE '%admin%' THEN 'admin'
+          WHEN lower(coalesce(kind, '')) = 'callback' THEN 'menu'
+          WHEN lower(coalesce(kind, '')) = 'message' THEN 'messages'
+          ELSE 'other'
+        END
+    """
+
+
+async def get_activity_overview(start_iso: object, end_iso: object) -> dict:
+    """Overview metrics for admin activity dashboard."""
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    section_case = _activity_section_case_sql()
+
+    async with p.acquire() as conn:
+        totals = await conn.fetchrow(
+            """
+            SELECT
+              COUNT(*)::int AS total_events,
+              COUNT(DISTINCT user_id)::int AS unique_users
+            FROM activity_events
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            """,
+            start_dt,
+            end_dt,
+        )
+        top_section = await conn.fetchrow(
+            f"""
+            SELECT {section_case} AS section, COUNT(*)::int AS cnt
+            FROM activity_events
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            GROUP BY 1
+            ORDER BY cnt DESC, section ASC
+            LIMIT 1
+            """,
+            start_dt,
+            end_dt,
+        )
+        top_user = await conn.fetchrow(
+            """
+            SELECT
+              u.id AS user_id,
+              u.tg_id AS tg_id,
+              u.name AS name,
+              u.username AS username,
+              u.author_code AS author_code,
+              COUNT(*)::int AS cnt
+            FROM activity_events ae
+            JOIN users u ON u.id = ae.user_id
+            WHERE ae.created_at::timestamp >= $1::timestamp
+              AND ae.created_at::timestamp < $2::timestamp
+              AND ae.user_id IS NOT NULL
+            GROUP BY u.id
+            ORDER BY cnt DESC, u.id DESC
+            LIMIT 1
+            """,
+            start_dt,
+            end_dt,
+        )
+        errors_total = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM bot_error_logs
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            """,
+            start_dt,
+            end_dt,
+        )
+
+    return {
+        "total_events": int((totals or {}).get("total_events") or 0),
+        "unique_users": int((totals or {}).get("unique_users") or 0),
+        "errors_total": int(errors_total or 0),
+        "top_section": (top_section or {}).get("section"),
+        "top_section_cnt": int((top_section or {}).get("cnt") or 0),
+        "top_user": dict(top_user) if top_user else None,
+        "top_user_cnt": int((top_user or {}).get("cnt") or 0),
+    }
+
+
+async def get_top_users_activity(
+    start_iso: object,
+    end_iso: object,
+    limit: int = 10,
+    kind: str = "events",
+) -> list[dict]:
+    """Top users for selected activity metric from activity_events logs."""
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    lim = max(1, min(int(limit or 10), 100))
+
+    vote_expr = "SUM(CASE WHEN lower(coalesce(ae.kind,'')) LIKE '%rate%' OR lower(coalesce(ae.kind,'')) LIKE '%vote%' THEN 1 ELSE 0 END)"
+    upload_expr = "SUM(CASE WHEN lower(coalesce(ae.kind,'')) LIKE '%upload%' OR lower(coalesce(ae.kind,'')) LIKE '%photo%' THEN 1 ELSE 0 END)"
+    report_expr = "SUM(CASE WHEN lower(coalesce(ae.kind,'')) LIKE '%report%' OR lower(coalesce(ae.kind,'')) LIKE '%complaint%' THEN 1 ELSE 0 END)"
+    metric_map = {
+        "events": "COUNT(*)",
+        "votes": vote_expr,
+        "uploads": upload_expr,
+        "reports": report_expr,
+    }
+    metric_expr = metric_map.get(str(kind or "events").strip().lower(), "COUNT(*)")
+
+    query = f"""
+        SELECT
+          u.id AS user_id,
+          u.tg_id AS tg_id,
+          u.name AS name,
+          u.username AS username,
+          u.author_code AS author_code,
+          COUNT(*)::int AS total_events,
+          {vote_expr}::int AS votes_count,
+          {upload_expr}::int AS uploads_count,
+          {report_expr}::int AS reports_count,
+          {metric_expr}::int AS metric_count
+        FROM activity_events ae
+        JOIN users u ON u.id = ae.user_id
+        WHERE ae.created_at::timestamp >= $1::timestamp
+          AND ae.created_at::timestamp < $2::timestamp
+          AND ae.user_id IS NOT NULL
+        GROUP BY u.id
+        HAVING {metric_expr} > 0
+        ORDER BY metric_count DESC, total_events DESC, u.id DESC
+        LIMIT $3
+    """
+    async with p.acquire() as conn:
+        rows = await conn.fetch(query, start_dt, end_dt, lim)
+    return [dict(r) for r in rows]
+
+
+async def get_top_sections(start_iso: object, end_iso: object, limit: int = 10) -> list[dict]:
+    """Top activity sections from activity_events.kind (mapped)."""
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    lim = max(1, min(int(limit or 10), 100))
+    section_case = _activity_section_case_sql()
+    query = f"""
+        SELECT {section_case} AS section, COUNT(*)::int AS cnt
+        FROM activity_events
+        WHERE created_at::timestamp >= $1::timestamp
+          AND created_at::timestamp < $2::timestamp
+        GROUP BY 1
+        ORDER BY cnt DESC, section ASC
+        LIMIT $3
+    """
+    async with p.acquire() as conn:
+        rows = await conn.fetch(query, start_dt, end_dt, lim)
+    return [dict(r) for r in rows]
+
+
+async def get_spam_suspects(start_iso: object, end_iso: object, limit: int = 10) -> list[dict]:
+    """Suspicious users based on activity/error burst aggregates."""
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    lim = max(1, min(int(limit or 10), 100))
+
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH act_min AS (
+              SELECT
+                user_id,
+                date_trunc('minute', created_at::timestamp) AS minute_bucket,
+                COUNT(*)::int AS cnt
+              FROM activity_events
+              WHERE created_at::timestamp >= $1::timestamp
+                AND created_at::timestamp < $2::timestamp
+                AND user_id IS NOT NULL
+              GROUP BY user_id, minute_bucket
+            ),
+            act_agg AS (
+              SELECT
+                user_id,
+                SUM(cnt)::int AS total_events,
+                MAX(cnt)::int AS peak_per_minute,
+                COUNT(*)::int AS active_minutes
+              FROM act_min
+              GROUP BY user_id
+            ),
+            act_kind AS (
+              SELECT
+                user_id,
+                SUM(CASE WHEN lower(coalesce(kind,''))='callback' THEN 1 ELSE 0 END)::int AS callback_events,
+                SUM(CASE WHEN lower(coalesce(kind,''))='message' THEN 1 ELSE 0 END)::int AS message_events
+              FROM activity_events
+              WHERE created_at::timestamp >= $1::timestamp
+                AND created_at::timestamp < $2::timestamp
+                AND user_id IS NOT NULL
+              GROUP BY user_id
+            ),
+            err AS (
+              SELECT
+                tg_user_id,
+                COUNT(*)::int AS errors_total,
+                SUM(CASE WHEN lower(coalesce(error_type,'')) LIKE '%badrequest%' THEN 1 ELSE 0 END)::int AS bad_request_cnt,
+                SUM(CASE WHEN lower(coalesce(error_type,'')) LIKE '%flood%' THEN 1 ELSE 0 END)::int AS flood_cnt
+              FROM bot_error_logs
+              WHERE created_at::timestamp >= $1::timestamp
+                AND created_at::timestamp < $2::timestamp
+                AND tg_user_id IS NOT NULL
+              GROUP BY tg_user_id
+            )
+            SELECT
+              u.id AS user_id,
+              u.tg_id AS tg_id,
+              u.name AS name,
+              u.username AS username,
+              u.author_code AS author_code,
+              COALESCE(a.total_events, 0)::int AS total_events,
+              COALESCE(a.peak_per_minute, 0)::int AS peak_per_minute,
+              COALESCE(a.active_minutes, 0)::int AS active_minutes,
+              COALESCE(k.callback_events, 0)::int AS callback_events,
+              COALESCE(k.message_events, 0)::int AS message_events,
+              COALESCE(e.errors_total, 0)::int AS errors_total,
+              COALESCE(e.bad_request_cnt, 0)::int AS bad_request_cnt,
+              COALESCE(e.flood_cnt, 0)::int AS flood_cnt,
+              (
+                COALESCE(a.peak_per_minute, 0) * 5
+                + COALESCE(e.errors_total, 0) * 2
+                + COALESCE(e.bad_request_cnt, 0) * 3
+                + COALESCE(e.flood_cnt, 0) * 4
+              )::int AS score
+            FROM users u
+            LEFT JOIN act_agg a ON a.user_id = u.id
+            LEFT JOIN act_kind k ON k.user_id = u.id
+            LEFT JOIN err e ON e.tg_user_id = u.tg_id
+            WHERE COALESCE(a.total_events, 0) > 0
+               OR COALESCE(e.errors_total, 0) > 0
+            ORDER BY score DESC, errors_total DESC, total_events DESC, u.id DESC
+            LIMIT $3
+            """,
+            start_dt,
+            end_dt,
+            lim,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_error_counts_by_type(start_iso: object, end_iso: object, limit: int = 10) -> list[dict]:
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    lim = max(1, min(int(limit or 10), 100))
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT COALESCE(NULLIF(error_type, ''), 'Error') AS error_type, COUNT(*)::int AS cnt
+            FROM bot_error_logs
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            GROUP BY 1
+            ORDER BY cnt DESC, error_type ASC
+            LIMIT $3
+            """,
+            start_dt,
+            end_dt,
+            lim,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_error_counts_by_handler(start_iso: object, end_iso: object, limit: int = 10) -> list[dict]:
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    lim = max(1, min(int(limit or 10), 100))
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT COALESCE(NULLIF(handler, ''), 'unknown') AS handler, COUNT(*)::int AS cnt
+            FROM bot_error_logs
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            GROUP BY 1
+            ORDER BY cnt DESC, handler ASC
+            LIMIT $3
+            """,
+            start_dt,
+            end_dt,
+            lim,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_error_rate(start_iso: object, end_iso: object) -> float:
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    async with p.acquire() as conn:
+        errors_total = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM bot_error_logs
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            """,
+            start_dt,
+            end_dt,
+        )
+        events_total = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM activity_events
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            """,
+            start_dt,
+            end_dt,
+        )
+    events_val = int(events_total or 0)
+    if events_val <= 0:
+        return 0.0
+    return (int(errors_total or 0) * 100.0) / float(events_val)
+
+
+async def get_errors_summary(start_iso: object, end_iso: object, limit: int = 10) -> dict:
+    p = _assert_pool()
+    start_dt = _coerce_datetime(start_iso)
+    end_dt = _coerce_datetime(end_iso)
+    lim = max(1, min(int(limit or 10), 100))
+    by_type = await get_error_counts_by_type(start_dt, end_dt, lim)
+    by_handler = await get_error_counts_by_handler(start_dt, end_dt, lim)
+    rate = await get_error_rate(start_dt, end_dt)
+    async with p.acquire() as conn:
+        total = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM bot_error_logs
+            WHERE created_at::timestamp >= $1::timestamp
+              AND created_at::timestamp < $2::timestamp
+            """,
+            start_dt,
+            end_dt,
+        )
+    return {
+        "total_errors": int(total or 0),
+        "error_rate": float(rate),
+        "by_type": by_type,
+        "by_handler": by_handler,
+    }
 
 # --- premium / new / blocked ---
 

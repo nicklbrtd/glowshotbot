@@ -56,6 +56,17 @@ REPORT_REASON_LABELS: Final[dict[ReportReason, str]] = {
     "other": "📝 Другое",
 }
 
+MODERATION_REASON_TEXTS: Final[dict[ReportReason, str]] = {
+    "selfie": "Селфи/портрет — GlowShot про фотографию и кадры, не соцсеть.",
+    "porn": "18+ контент запрещён.",
+    "stolen": "Похоже на чужую работу/ворованный контент.",
+    "propaganda": "Политическая пропаганда запрещена.",
+    "violence": "Шок/насилие запрещены.",
+    "hate": "Разжигание ненависти запрещено.",
+    "illegal_ads": "Реклама/продажа запрещены.",
+    "other": "Нарушение правил платформы.",
+}
+
 
 def get_report_reasons() -> Sequence[ReportReason]:
     return (
@@ -193,6 +204,7 @@ def get_one_day_ban_until(now: datetime | None = None) -> datetime:
 __all__ = [
     "ReportReason",
     "REPORT_REASON_LABELS",
+    "MODERATION_REASON_TEXTS",
     "get_report_reasons",
     "REPORT_THRESHOLD",
     "ReportStats",
