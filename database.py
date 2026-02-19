@@ -564,7 +564,7 @@ async def admin_delete_all_active_photos() -> int:
         async with conn.transaction():
             rows = await conn.fetch(
                 """
-                SELECT id
+                SELECT id, submit_day
                 FROM photos
                 WHERE is_deleted=0
                   AND COALESCE(status,'active')='active'
@@ -602,6 +602,21 @@ async def admin_delete_all_active_photos() -> int:
                 """,
                 photo_ids,
             )
+            submit_days = sorted(
+                {
+                    str(r.get("submit_day"))
+                    for r in rows
+                    if r.get("submit_day") is not None and str(r.get("submit_day")).strip()
+                }
+            )
+            if submit_days:
+                await conn.execute(
+                    """
+                    DELETE FROM daily_results_cache
+                    WHERE submit_day = ANY($1::date[])
+                    """,
+                    submit_days,
+                )
             return len(photo_ids)
 
 
