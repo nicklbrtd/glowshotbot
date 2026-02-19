@@ -2023,12 +2023,21 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         snapshot = await get_photo_stats_snapshot(photo_id, include_author_metrics=is_author_user)
     except Exception:
         snapshot = {}
+    try:
+        photo_stats = await get_photo_stats(photo_id)
+    except Exception:
+        photo_stats = {}
     if not snapshot:
         await callback.answer("⚠️ Не удалось загрузить статистику. Попробуй ещё раз через пару секунд.", show_alert=True)
         return
 
     votes_count = int(snapshot.get("votes_count") or 0)
     avg_score = float(snapshot.get("avg_score") or 0.0)
+    bayes_raw = photo_stats.get("bayes_score")
+    try:
+        bayes_score = float(bayes_raw) if bayes_raw is not None else None
+    except Exception:
+        bayes_score = None
     rank = snapshot.get("rank")
     total_in_party = snapshot.get("total_in_party")
     views_total = int(snapshot.get("views_total") or 0)
@@ -2048,7 +2057,10 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         rank_str = f"— / {int(total_in_party)}"
 
     status_raw = str(snapshot.get("status") or photo.get("status") or "active").lower()
-    computed_status = _compute_photo_status(rank=rank, votes_count=votes_count, avg_score=avg_score)
+    status_score = avg_score
+    if status_score <= 0 and bayes_score is not None:
+        status_score = bayes_score
+    computed_status = _compute_photo_status(rank=rank, votes_count=votes_count, avg_score=status_score)
     time_left = _format_time_left(snapshot.get("expires_at") or photo.get("expires_at"))
     party_id = _esc_html(_photo_party_id(photo))
 
@@ -2057,8 +2069,8 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         lines.append("📊 <b>Итоги фото</b>")
         lines.append("")
         lines.append(f"🧩 Партия: <b>{party_id}</b>")
-        if avg_score > 0:
-            lines.append(f"⭐ Финальный рейтинг: <b>{_fmt_avg(avg_score)}</b>")
+        if votes_count > 0 and bayes_score is not None:
+            lines.append(f"⭐ Финальный рейтинг: <b>{_fmt_avg(bayes_score)}</b>")
         lines.append(f"🏆 Итоговое место: <b>{rank_str}</b>")
         lines.append(f"🗳 Голосов: <b>{votes_count}</b>")
         if positive_percent > 0:
@@ -2069,8 +2081,8 @@ async def myphoto_stats(callback: CallbackQuery, state: FSMContext):
         lines.append("📊 <b>Статистика фото</b>")
         lines.append("")
         lines.append(f"🧩 Партия: <b>{party_id}</b>")
-        if avg_score > 0:
-            lines.append(f"⭐ Рейтинг: <b>{_fmt_avg(avg_score)}</b>")
+        if votes_count > 0 and bayes_score is not None:
+            lines.append(f"⭐ Рейтинг: <b>{_fmt_avg(bayes_score)}</b>")
         lines.append(f"🏆 Место: <b>{rank_str}</b>")
         lines.append(f"🗳 Голосов: <b>{votes_count}</b>")
         lines.append("")
