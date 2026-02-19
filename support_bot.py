@@ -906,7 +906,7 @@ async def main():
                 support_resolved_count[message.from_user.id] = support_resolved_count.get(message.from_user.id, 0) + 1
         except Exception:
             pass
-        await _send_support_menu(message.bot, user_id)
+        await _send_support_menu(message.bot, message.from_user.id)
         await message.answer(f"Тикет #{ticket_id} помечен как решенный ✅")
 
 
@@ -1045,7 +1045,7 @@ async def main():
         except Exception:
             pass
 
-        await _send_support_menu(message.bot, user_id)
+        await _send_support_menu(message.bot, message.from_user.id)
 
         # Если кто-то держит режим ответа на этот тикет — снимем
         try:
@@ -1529,7 +1529,7 @@ async def main():
         except Exception:
             pass
 
-        await _send_support_menu(callback.bot, user_id)
+        await _send_support_menu(callback.bot, callback.from_user.id)
 
         await callback.answer("Тикет закрыт ✅")
 

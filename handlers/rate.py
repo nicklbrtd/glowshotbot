@@ -378,6 +378,24 @@ def _get_link_button_from_photo(
 
 async def _ensure_author_premium_active(photo: dict, author: dict | None = None) -> bool:
     """Returns active premium status; updates cached flags in photo/author."""
+    def _active_from_raw(is_premium_raw: object, premium_until_raw: object) -> bool:
+        if not bool(is_premium_raw):
+            return False
+        until = str(premium_until_raw).strip() if premium_until_raw is not None else ""
+        if not until:
+            return True
+        try:
+            dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+        except Exception:
+            return False
+        now = get_moscow_now()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=now.tzinfo)
+        try:
+            return dt > now
+        except Exception:
+            return False
+
     active: bool | None = None
     tg_id = None
     try:
@@ -392,7 +410,17 @@ async def _ensure_author_premium_active(photo: dict, author: dict | None = None)
             active = None
 
     if active is None:
-        if "user_is_premium_active" in photo:
+        if "user_is_premium" in photo:
+            active = _active_from_raw(
+                photo.get("user_is_premium"),
+                photo.get("user_premium_until"),
+            )
+        elif author and "is_premium" in author:
+            active = _active_from_raw(
+                author.get("is_premium"),
+                author.get("premium_until"),
+            )
+        elif "user_is_premium_active" in photo:
             active = bool(photo.get("user_is_premium_active"))
         elif author and "is_premium_active" in author:
             active = bool(author.get("is_premium_active"))

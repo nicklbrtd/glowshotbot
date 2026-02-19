@@ -26,7 +26,7 @@ from database import (
     get_user_rating_summary,
     get_user_admin_stats,
     get_awards_for_user,
-    get_today_photo_for_user,
+    get_active_photos_for_user,
     get_photo_admin_stats,
     get_photo_report_stats,
     get_photo_stats,
@@ -660,9 +660,10 @@ async def admin_users_photo(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сначала найди пользователя по @username или ID.", show_alert=True)
         return
 
-    photo = await get_today_photo_for_user(target_user_id)
+    active_photos = await get_active_photos_for_user(int(target_user_id), limit=1)
+    photo = active_photos[0] if active_photos else None
     if not photo or photo.get("is_deleted"):
-        text = "У пользователя нет активного фото.\n\nОно не загружено сегодня или уже удалено."
+        text = "У пользователя нет активного фото.\n\nВозможно оно уже скрыто, удалено или завершился срок показа."
         profile_payload = await _refresh_selected_user_profile(state, full=False)
         kb = profile_payload[1] if profile_payload else _build_user_admin_profile_kb(is_blocked=False, full=False)
         await _edit_user_prompt_or_answer(

@@ -4776,13 +4776,21 @@ async def is_user_premium_active(tg_id: int) -> bool:
     u = await get_user_by_tg_id(tg_id)
     if not u or not u.get("is_premium"):
         return False
-    until = u.get("premium_until")
+    until_raw = u.get("premium_until")
+    until = str(until_raw).strip() if until_raw is not None else ""
     if not until:
         return True
     try:
-        return datetime.fromisoformat(until) > get_moscow_now()
+        dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
     except Exception:
-        return True
+        return False
+    now = get_moscow_now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=now.tzinfo)
+    try:
+        return dt > now
+    except Exception:
+        return False
 
 
 # --- Premium expiry reminders ---
