@@ -604,9 +604,9 @@ async def admin_delete_all_active_photos() -> int:
             )
             submit_days = sorted(
                 {
-                    str(r.get("submit_day"))
+                    r.get("submit_day")
                     for r in rows
-                    if r.get("submit_day") is not None and str(r.get("submit_day")).strip()
+                    if r.get("submit_day") is not None
                 }
             )
             if submit_days:
