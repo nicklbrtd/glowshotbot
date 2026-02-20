@@ -28,7 +28,6 @@ from config import (
     REQUIRED_CHANNEL_ID,
     REQUIRED_CHANNEL_LINK,
 )
-from utils.time import is_happy_hour
 from utils.banner import ensure_giraffe_banner
 from utils.update_guard import should_block as should_block_update, send_notice_once, UPDATE_DEFAULT_TEXT
 from utils.ui import cleanup_previous_screen
@@ -484,7 +483,7 @@ async def build_menu_text(*, tg_id: int, user: dict | None, is_premium: bool, la
             stats = await db.get_user_stats(int(user["id"]))
             credits = int(stats.get("credits") or 0)
             tokens = int(stats.get("show_tokens") or 0)
-            mult = 4 if is_happy_hour() else 2
+            mult = int(await db.happy_hour_multiplier())
             approx = credits * mult + tokens
             credits_line = f"💳 Credits: {credits} (≈ {approx} показов)"
         except Exception:

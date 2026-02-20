@@ -374,6 +374,7 @@ async def add_credits_on_vote(
     *,
     delta: int = 1,
     now: datetime | None = None,
+    apply_happy_hour_bonus: bool = False,
 ) -> dict:
     """Increment credits for voter and their daily counters. Returns updated stats."""
     p = _assert_pool()
@@ -382,6 +383,10 @@ async def add_credits_on_vote(
         stats = await _ensure_user_stats_row(conn, int(voter_id))
         now_dt = now or get_bot_now()
         is_hh = _is_happy_hour_with_settings(now_dt, economy)
+        credits_delta = int(delta)
+        if apply_happy_hour_bonus and is_hh:
+            # Happy Hour reward for rating actions.
+            credits_delta = 4
         stats = await conn.fetchrow(
             """
             UPDATE user_stats
@@ -393,7 +398,7 @@ async def add_credits_on_vote(
             RETURNING *
             """,
             int(voter_id),
-            int(delta),
+            int(credits_delta),
             now_dt,
             is_hh,
         )
@@ -7852,7 +7857,11 @@ async def add_rating(user_id: int, photo_id: int, value: int) -> bool:
             # credits to voter
             if int(value) > 0:
                 try:
-                    await add_credits_on_vote(int(user_id), now=now_dt)
+                    await add_credits_on_vote(
+                        int(user_id),
+                        now=now_dt,
+                        apply_happy_hour_bonus=True,
+                    )
                 except Exception:
                     pass
     return True
