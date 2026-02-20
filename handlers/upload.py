@@ -1,6 +1,7 @@
 import io
 import random
 import asyncio
+import re
 from PIL import Image  # type: ignore
 from utils.validation import has_links_or_usernames, has_promo_channel_invite
 from datetime import date, datetime, timedelta
@@ -26,6 +27,7 @@ from database import (
     get_photo_by_id,
     update_photo_editable_fields,
     toggle_photo_ratings_enabled,
+    disable_photo_ratings_forever,
     get_photo_stats,
     get_user_block_status_by_tg_id,
     set_user_block_status_by_tg_id,
@@ -45,6 +47,7 @@ from database import (
     get_user_stats,
     add_credits,
     check_can_upload_today,
+    get_pending_scheduled_photo_for_user,
     should_show_upload_rules,
     set_upload_rules_ack_at,
     is_section_blocked,
@@ -497,6 +500,7 @@ class MyPhotoStates(StatesGroup):
     waiting_title = State()
     waiting_device_type = State()
     waiting_description = State()
+    waiting_deferred_time = State()
 
 
 class EditPhotoStates(StatesGroup):
@@ -745,6 +749,133 @@ def build_upload_intro_kb(
     return kb.as_markup()
 
 
+def _deferred_publish_default_dt() -> datetime:
+    now = get_moscow_now()
+    tz = now.tzinfo
+    tomorrow = now.date() + timedelta(days=1)
+    return datetime(
+        tomorrow.year,
+        tomorrow.month,
+        tomorrow.day,
+        0,
+        1,
+        0,
+        0,
+        tzinfo=tz,
+    )
+
+
+def _format_publish_msk_human(value: object) -> str:
+    dt = _parse_dt(value)
+    if not dt:
+        return "завтра в 00:01 по МСК"
+    now = get_moscow_now()
+    if dt.tzinfo is None and now.tzinfo is not None:
+        dt = dt.replace(tzinfo=now.tzinfo)
+    local = dt.astimezone(now.tzinfo) if now.tzinfo else dt
+    tomorrow = now.date() + timedelta(days=1)
+    if local.date() == tomorrow:
+        return f"завтра в {local.strftime('%H:%M')} по МСК"
+    return local.strftime("%d.%m.%Y %H:%M МСК")
+
+
+def _parse_tomorrow_hhmm_msk(raw: str) -> tuple[datetime | None, str | None]:
+    text = (raw or "").strip()
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text)
+    if not m:
+        return None, "Нужен формат времени HH:MM, например 09:30."
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    now = get_moscow_now()
+    tomorrow = now.date() + timedelta(days=1)
+    dt = datetime(
+        tomorrow.year,
+        tomorrow.month,
+        tomorrow.day,
+        hour,
+        minute,
+        0,
+        0,
+        tzinfo=now.tzinfo,
+    )
+    return dt, None
+
+
+def build_deferred_intro_kb(
+    *,
+    remaining: int | None = None,
+    limit: int | None = None,
+) -> InlineKeyboardMarkup:
+    return build_upload_intro_kb(
+        remaining=remaining,
+        limit=limit,
+        idea_cb="myphoto:idea:deferred",
+        upload_cb="myphoto:deferred:start",
+    )
+
+
+def build_deferred_ratings_step_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✅ Оставить включенным", callback_data=f"myphoto:deferred:ratings:on:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🚫 Выключить оценивание", callback_data=f"myphoto:deferred:ratings:off:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"myphoto:deferred:ratings:skip:{photo_id}"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def build_deferred_ratings_confirm_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="✅ Подтвердить отключение", callback_data=f"myphoto:deferred:ratings:off:confirm:{photo_id}"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:deferred:ratings:back:{photo_id}"),
+    )
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def build_deferred_tag_step_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for tag_key, label in EDIT_TAGS:
+        kb.row(InlineKeyboardButton(text=label, callback_data=f"myphoto:deferred:tag:{photo_id}:{tag_key}"))
+    kb.row(InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"myphoto:deferred:tag:{photo_id}:skip"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def build_deferred_device_step_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="📱 Смартфон", callback_data=f"myphoto:deferred:device:{photo_id}:phone"),
+        InlineKeyboardButton(text="📸 Камера", callback_data=f"myphoto:deferred:device:{photo_id}:camera"),
+    )
+    kb.row(InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"myphoto:deferred:device:{photo_id}:skip"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def build_deferred_schedule_step_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🕛 Сразу завтра (00:01)", callback_data=f"myphoto:deferred:schedule:default:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="🕒 Завтра в своё время", callback_data=f"myphoto:deferred:schedule:custom:{photo_id}"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def build_deferred_time_input_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:deferred:schedule:back:{photo_id}"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
+def build_deferred_time_confirm_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✅ Сохранить отложенную загрузку", callback_data=f"myphoto:deferred:schedule:confirm:{photo_id}"))
+    kb.row(InlineKeyboardButton(text="⬅️ Изменить время", callback_data=f"myphoto:deferred:schedule:custom:{photo_id}"))
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
 UPLOAD_RULES_WAIT_SECONDS = 3
 
 
@@ -820,6 +951,39 @@ async def _render_upload_intro_screen(
         ),
     )
     kb = build_upload_intro_kb(remaining=remaining, limit=limit)
+    sent_id = await _edit_or_replace_text(callback, text, kb)
+    if sent_id is not None:
+        await remember_screen(callback.from_user.id, sent_id, state=state)
+
+
+async def _render_deferred_intro_screen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    user: dict,
+) -> None:
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(user["tg_id"])
+    except Exception:
+        is_premium_user = False
+
+    limit, _current, remaining = await _idea_counters(user, is_premium_user)
+    pending = await get_pending_scheduled_photo_for_user(int(user["id"]))
+    publish_line = ""
+    if pending:
+        publish_line = f"\n\n⚠️ Уже есть отложенная загрузка: {_format_publish_msk_human(pending.get('publish_at'))}."
+
+    idea_title, idea_hint = _get_daily_idea()
+    text = (
+        "⏳ <b>Отложенная загрузка</b>\n\n"
+        "Ты уже занял(а) слот публикации сегодня. Можно подготовить следующую фотографию на завтра."
+        f"\n\n💡 <b>Идея дня:</b> {idea_title}\n"
+        f"🔍 <b>Попробуй:</b> {idea_hint}."
+        f"{publish_line}\n\n"
+        "Нажми «Загрузить» и пройди короткие шаги настройки."
+    )
+    kb = build_deferred_intro_kb(remaining=remaining, limit=limit)
     sent_id = await _edit_or_replace_text(callback, text, kb)
     if sent_id is not None:
         await remember_screen(callback.from_user.id, sent_id, state=state)
@@ -907,6 +1071,17 @@ def build_edit_menu_kb(photo_id: int) -> InlineKeyboardMarkup:
     )
     return kb.as_markup()
 
+
+def build_ratings_disable_confirm_kb(photo_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="✅ Отключить", callback_data=f"myphoto:ratings:disable:confirm:{photo_id}"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"myphoto:ratings:disable:cancel:{photo_id}"),
+    )
+    kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
+    return kb.as_markup()
+
+
 def build_device_type_kb(photo_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -936,6 +1111,7 @@ def _build_edit_menu_text(photo: dict) -> str:
     desc = (photo.get("description") or "").strip()
     tag = (photo.get("tag") or "").strip()
     ratings_enabled = bool(photo.get("ratings_enabled", True))
+    ratings_locked = bool(photo.get("ratings_locked", False))
 
     tag_label = "🚫 Без тега" if tag == "" else tag
     for k, lbl in EDIT_TAGS:
@@ -956,7 +1132,12 @@ def _build_edit_menu_text(photo: dict) -> str:
     text = "✏️ <b>Редактирование</b>\n\n"
     text += f"<b>{header}</b>\n"
     text += f"Тег: <b>{_esc_html(tag_line)}</b>\n"
-    text += f"Оценки: <b>{'включены' if ratings_enabled else 'выключены'}</b>"
+    if ratings_enabled:
+        text += "Оценки: <b>включены</b>"
+    elif ratings_locked:
+        text += "Оценки: <b>выключены навсегда для этой фотографии</b>"
+    else:
+        text += "Оценки: <b>выключены</b>"
     return text
 
 
@@ -1180,6 +1361,7 @@ def _build_myphoto_gallery_kb(
     photos: list[dict],
     *,
     can_add_more: bool,
+    force_add_button: bool = False,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for photo in photos:
@@ -1191,7 +1373,7 @@ def _build_myphoto_gallery_kb(
                 callback_data=f"myphoto:view:{int(photo['id'])}",
             )
         )
-    if can_add_more:
+    if can_add_more or force_add_button:
         kb.row(InlineKeyboardButton(text="➕ Добавить фото", callback_data="myphoto:add"))
     kb.row(InlineKeyboardButton(text=HOME, callback_data="menu:back"))
     return kb.as_markup()
@@ -1201,6 +1383,7 @@ async def _build_myphoto_gallery_text(
     photos: list[dict],
     *,
     denied_reason: str | None = None,
+    pending_scheduled: dict | None = None,
 ) -> str:
     lines: list[str] = ["🖼 <b>Галерея активных фотографий</b>", ""]
     for idx, photo in enumerate(photos, start=1):
@@ -1229,6 +1412,19 @@ async def _build_myphoto_gallery_text(
             lines.append("🚀 До “стабильного рейтинга”: ещё 0 (уже ок)")
         lines.append("")
 
+    if pending_scheduled:
+        sched_title = _esc_html(str(pending_scheduled.get("title") or "Без названия"))
+        sched_tag = str(pending_scheduled.get("tag") or "").strip()
+        sched_device = str(pending_scheduled.get("device_type") or "").strip()
+        tag_emoji = _tag_emoji(sched_tag) if sched_tag else "🏷️"
+        device_emoji = _device_emoji(sched_device) or "📷"
+        publish_human = _esc_html(_format_publish_msk_human(pending_scheduled.get("publish_at")))
+        lines.append("<b>ОТЛОЖЕННАЯ ЗАГРУЗКА:</b>")
+        lines.append(f"· <code>\"{sched_title}\"</code>")
+        lines.append(f"{tag_emoji} · {device_emoji}")
+        lines.append(f"Опубликуется {publish_human}")
+        lines.append("")
+
     if denied_reason:
         lines.append(f"⚠️ {_esc_html(denied_reason)}")
         lines.append("")
@@ -1253,15 +1449,18 @@ async def _render_myphoto_gallery(
 
     can_upload_today = True
     denied_reason: str | None = None
+    pending_scheduled = await get_pending_scheduled_photo_for_user(user_id)
     if not is_unlimited_upload_user(user):
         can_upload_today, denied_reason = await check_can_upload_today(user_id)
 
     can_add_more = len(photos) < 2 and can_upload_today
+    force_add_button = bool(pending_scheduled) and not can_add_more
     text = await _build_myphoto_gallery_text(
         photos,
         denied_reason=denied_reason if (len(photos) < 2 and not can_upload_today) else None,
+        pending_scheduled=pending_scheduled,
     )
-    kb = _build_myphoto_gallery_kb(photos, can_add_more=can_add_more)
+    kb = _build_myphoto_gallery_kb(photos, can_add_more=can_add_more, force_add_button=force_add_button)
     sent_id = await _edit_or_replace_text(callback, text, kb)
     if sent_id is not None:
         await remember_screen(callback.from_user.id, sent_id, state=state)
@@ -1784,6 +1983,7 @@ async def myphoto_view(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "myphoto:idea")
+@router.callback_query(F.data == "myphoto:idea:deferred")
 async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
     if await _tap_guard(callback, "myphoto:idea", 0.9):
         return
@@ -1822,7 +2022,12 @@ async def myphoto_generate_idea(callback: CallbackQuery, state: FSMContext):
         idea_hint=idea_hint,
     )
     remaining_after = max(limit_per_week - new_count, 0)
-    kb = build_upload_intro_kb(remaining=remaining_after, limit=limit_per_week)
+    is_deferred = (callback.data or "") == "myphoto:idea:deferred"
+    kb = (
+        build_deferred_intro_kb(remaining=remaining_after, limit=limit_per_week)
+        if is_deferred
+        else build_upload_intro_kb(remaining=remaining_after, limit=limit_per_week)
+    )
 
     try:
         if callback.message and getattr(callback.message, "photo", None):
@@ -2174,7 +2379,7 @@ async def myphoto_generate_idea_extra(callback: CallbackQuery, state: FSMContext
     await myphoto_generate_idea(callback, state)
 
 
-@router.callback_query(F.data.startswith("myphoto:ratings:"))
+@router.callback_query(F.data.regexp(r"^myphoto:ratings:(\d+)$"))
 async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
     if await _tap_guard(callback, "myphoto:ratings_toggle", 0.8):
         return
@@ -2200,19 +2405,102 @@ async def myphoto_toggle_ratings(callback: CallbackQuery, state: FSMContext):
     if int(photo.get("user_id", 0)) != int(user.get("id", 0)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
+    ratings_enabled = bool(photo.get("ratings_enabled", True))
+    ratings_locked = bool(photo.get("ratings_locked", False))
 
+    # Выключение требует подтверждения.
+    if ratings_enabled:
+        text = (
+            "⚠️ <b>Отключить оценивание?</b>\n\n"
+            "После отключения:\n"
+            "• фото перестанет участвовать в оценивании;\n"
+            "• фото не попадет в итоги;\n"
+            "• включить обратно для этой фотографии будет нельзя."
+        )
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(
+                    caption=text,
+                    reply_markup=build_ratings_disable_confirm_kb(photo_id),
+                    parse_mode="HTML",
+                )
+            else:
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=build_ratings_disable_confirm_kb(photo_id),
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+        await callback.answer()
+        return
+
+    # Если уже выключено и зафиксировано — обратного переключения нет.
+    if ratings_locked:
+        await callback.answer("Для этой фотографии оценки уже отключены без возможности включить обратно.", show_alert=True)
+        return
+
+    # Backward-compatible: старые фото с выключенными, но ещё не locked, можно включить.
     new_state = await toggle_photo_ratings_enabled(photo_id, int(user["id"]))
     if new_state is None:
         await callback.answer("Не удалось переключить.", show_alert=True)
         return
-
-    try:
-        photo = await get_photo_by_id(photo_id) or photo
-    except Exception:
-        pass
-
+    photo = await get_photo_by_id(photo_id) or photo
     await _edit_or_replace_my_photo_message(callback, state, photo)
     await callback.answer("Оценки включены" if new_state else "Оценки выключены")
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:ratings:disable:confirm:(\d+)$"))
+async def myphoto_disable_ratings_confirm(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    try:
+        photo_id = int((callback.data or "").split(":")[4])
+    except Exception:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user.get("id", 0)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    ok = await disable_photo_ratings_forever(int(photo_id), int(user["id"]))
+    if not ok:
+        await callback.answer("Не удалось отключить оценки.", show_alert=True)
+        return
+    photo = await get_photo_by_id(photo_id) or photo
+    await _edit_or_replace_my_photo_message(callback, state, photo)
+    await callback.answer("Оценивание отключено для этой фотографии.")
+
+
+@router.callback_query(F.data.regexp(r"^myphoto:ratings:disable:cancel:(\d+)$"))
+async def myphoto_disable_ratings_cancel(callback: CallbackQuery, state: FSMContext):
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    try:
+        photo_id = int((callback.data or "").split(":")[4])
+    except Exception:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    photo = await get_photo_by_id(photo_id)
+    if not photo or photo.get("is_deleted") or int(photo.get("user_id", 0)) != int(user.get("id", 0)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    new_msg_id, is_photo_msg = await _render_myphoto_edit_menu(
+        bot=callback.message.bot,
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id,
+        photo=photo,
+        had_photo=bool(callback.message.photo),
+    )
+    await state.update_data(
+        edit_target_chat_id=callback.message.chat.id,
+        edit_target_msg_id=new_msg_id,
+        edit_target_is_photo=is_photo_msg,
+    )
+    await callback.answer("Отменено.")
 
 
 # ========= ДОБАВЛЕНИЕ ФОТО =========
@@ -2229,11 +2517,19 @@ async def myphoto_upload_cancel(callback: CallbackQuery, state: FSMContext):
     user = await _ensure_user(callback)
     if user is None:
         return
+    data = await state.get_data()
+    was_deferred = bool(data.get("upload_deferred_mode"))
     try:
         await state.clear()
     except Exception:
         pass
 
+    if was_deferred:
+        photos = await _load_active_myphoto_gallery(int(user["id"]))
+        if photos:
+            await _render_myphoto_gallery(callback, state, user, photos=photos)
+            await callback.answer()
+            return
     await _render_upload_intro_screen(callback, state, user)
     await callback.answer()
 
@@ -2326,6 +2622,7 @@ async def _start_upload_wizard(
     state: FSMContext,
     *,
     user_id: int,
+    deferred_mode: bool = False,
 ) -> None:
     await state.set_state(MyPhotoStates.waiting_photo)
     await _clear_rules_state(state)
@@ -2336,9 +2633,22 @@ async def _start_upload_wizard(
         upload_user_id=user_id,
         file_id=None,
         title=None,
+        upload_deferred_mode=bool(deferred_mode),
+        deferred_ratings_enabled=True,
+        deferred_ratings_locked=False,
+        deferred_tag="",
+        deferred_device_type="",
+        deferred_publish_at_iso=None,
     )
 
-    text = "Отправь фотографию (1 шт.), которую хочешь добавить."
+    if deferred_mode:
+        text = (
+            "⏳ <b>Отложенная загрузка</b>\n\n"
+            "Отправь фотографию (1 шт.). После названия можно выбрать: "
+            "оценивание, тег, устройство и время публикации на завтра (МСК)."
+        )
+    else:
+        text = "Отправь фотографию (1 шт.), которую хочешь добавить."
     kb = build_upload_wizard_kb(back_to="menu")
     sent_msg_id = await _edit_or_replace_text(callback, text, kb, parse_mode="HTML")
     if sent_msg_id is None:
@@ -2349,6 +2659,92 @@ async def _start_upload_wizard(
         upload_is_photo=False,
     )
     await remember_screen(callback.from_user.id, int(sent_msg_id), state=state)
+
+
+def _deferred_flow_token_from_state(data: dict) -> int:
+    try:
+        return int(data.get("upload_user_id") or 0)
+    except Exception:
+        return 0
+
+
+async def _show_deferred_ratings_step(*, state: FSMContext, bot, chat_id: int, message_id: int | None, is_photo: bool) -> None:
+    data = await state.get_data()
+    flow_token = _deferred_flow_token_from_state(data)
+    text = (
+        "⏳ <b>Отложенная загрузка</b>\n\n"
+        "Шаг 1/4: оценивание.\n"
+        "По умолчанию оценки включены. При отключении для этой фотографии включить обратно нельзя."
+    )
+    await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=int(chat_id),
+        message_id=message_id,
+        text=text,
+        is_photo_message=bool(is_photo),
+        reply_markup=build_deferred_ratings_step_kb(flow_token),
+    )
+
+
+async def _show_deferred_tag_step(*, state: FSMContext, bot, chat_id: int, message_id: int | None, is_photo: bool) -> None:
+    data = await state.get_data()
+    flow_token = _deferred_flow_token_from_state(data)
+    text = "⏳ <b>Отложенная загрузка</b>\n\nШаг 2/4: выбери тег (или пропусти)."
+    await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=int(chat_id),
+        message_id=message_id,
+        text=text,
+        is_photo_message=bool(is_photo),
+        reply_markup=build_deferred_tag_step_kb(flow_token),
+    )
+
+
+async def _show_deferred_device_step(*, state: FSMContext, bot, chat_id: int, message_id: int | None, is_photo: bool) -> None:
+    data = await state.get_data()
+    flow_token = _deferred_flow_token_from_state(data)
+    text = "⏳ <b>Отложенная загрузка</b>\n\nШаг 3/4: выбери устройство (или пропусти)."
+    await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=int(chat_id),
+        message_id=message_id,
+        text=text,
+        is_photo_message=bool(is_photo),
+        reply_markup=build_deferred_device_step_kb(flow_token),
+    )
+
+
+async def _show_deferred_schedule_step(*, state: FSMContext, bot, chat_id: int, message_id: int | None, is_photo: bool) -> None:
+    data = await state.get_data()
+    flow_token = _deferred_flow_token_from_state(data)
+    text = (
+        "⏳ <b>Отложенная загрузка</b>\n\n"
+        "Шаг 4/4: когда публиковать?\n"
+        "Можно выбрать 00:01 завтра или указать своё время (МСК)."
+    )
+    await _set_upload_progress(
+        state=state,
+        bot=bot,
+        chat_id=int(chat_id),
+        message_id=message_id,
+        text=text,
+        is_photo_message=bool(is_photo),
+        reply_markup=build_deferred_schedule_step_kb(flow_token),
+    )
+
+
+async def _ensure_deferred_flow_state(callback: CallbackQuery, state: FSMContext) -> dict | None:
+    data = await state.get_data()
+    if not bool(data.get("upload_deferred_mode")):
+        await callback.answer("Сессия отложенной загрузки не найдена.", show_alert=True)
+        return None
+    if not data.get("file_id") or not data.get("title"):
+        await callback.answer("Сначала загрузи фото и название.", show_alert=True)
+        return None
+    return data
 
 
 async def _show_upload_rules_screen(
@@ -2503,10 +2899,28 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     else:
         max_active = max(1, max_active_normal)
     active_count = len(active_photos)
+    pending_scheduled = await get_pending_scheduled_photo_for_user(int(user_id))
+    deferred_allowed_role = bool(user.get("is_author")) or bool(is_premium_user)
 
     if not is_unlimited:
         can_upload, deny_reason = await check_can_upload_today(int(user_id))
         if not can_upload:
+            tomorrow = get_moscow_now().date() + timedelta(days=1)
+            can_schedule_tomorrow, _ = await check_can_upload_today(int(user_id), today=tomorrow)
+            can_offer_deferred = (
+                deferred_allowed_role
+                and active_count >= 1
+                and active_count < max_active
+                and pending_scheduled is None
+                and can_schedule_tomorrow
+            )
+            if can_offer_deferred:
+                await _render_deferred_intro_screen(callback, state, user)
+                await callback.answer()
+                return
+            if pending_scheduled is not None:
+                await callback.answer("Загрузки закончились.", show_alert=False)
+                return
             limit, _current, remaining = await _idea_counters(user, is_premium_user)
             idea_title, idea_hint = _get_daily_idea()
             text = _build_upload_intro_text(
@@ -2526,16 +2940,7 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
 
     # Проверка лимита активных фото
     if active_count >= max_active:
-        await _edit_or_replace_text(
-            callback,
-            "Лимит активных фото достигнут. Подожди, пока фото уйдут в архив.",
-            InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text=HOME, callback_data="menu:back")]
-                ]
-            ),
-        )
-        await callback.answer()
+        await callback.answer("Загрузки закончились.", show_alert=False)
         return
 
     if await should_show_upload_rules(int(user_id)):
@@ -2543,6 +2948,30 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
         return
 
     await _start_upload_wizard(callback, state, user_id=int(user_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "myphoto:deferred:start")
+async def myphoto_deferred_start(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:deferred:start", 1.0):
+        return
+    user = await _ensure_user(callback)
+    if user is None:
+        return
+    is_premium_user = False
+    try:
+        if user.get("tg_id"):
+            is_premium_user = await is_user_premium_active(int(user.get("tg_id")))
+    except Exception:
+        is_premium_user = False
+    if not (bool(user.get("is_author")) or is_premium_user):
+        await callback.answer("Недоступно.", show_alert=True)
+        return
+    pending = await get_pending_scheduled_photo_for_user(int(user["id"]))
+    if pending:
+        await callback.answer("Загрузки закончились.", show_alert=False)
+        return
+    await _start_upload_wizard(callback, state, user_id=int(user["id"]), deferred_mode=True)
     await callback.answer()
 
 
@@ -2656,6 +3085,17 @@ async def myphoto_got_title(message: Message, state: FSMContext):
     await state.update_data(title=title)
     await message.delete()
 
+    data_after = await state.get_data()
+    if bool(data_after.get("upload_deferred_mode")):
+        await _show_deferred_ratings_step(
+            state=state,
+            bot=message.bot,
+            chat_id=int(upload_chat_id),
+            message_id=int(upload_msg_id),
+            is_photo=bool(data_after.get("upload_is_photo")),
+        )
+        return
+
     # Раньше здесь был выбор устройства/описания. Сейчас — сразу публикуем.
     await _finalize_photo_creation(message, state)
     return
@@ -2665,6 +3105,251 @@ async def myphoto_got_title(message: Message, state: FSMContext):
 async def myphoto_waiting_title_wrong(message: Message):
 
     await message.delete()
+
+
+# === ОТЛОЖЕННАЯ ЗАГРУЗКА (author/premium) ===
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:ratings:off:confirm:"))
+async def myphoto_deferred_ratings_off_confirm(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:deferred:ratings:off:confirm", 0.6):
+        return
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    await state.update_data(
+        deferred_ratings_enabled=False,
+        deferred_ratings_locked=True,
+    )
+    await _show_deferred_tag_step(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        is_photo=bool(data.get("upload_is_photo")),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:ratings:back:"))
+async def myphoto_deferred_ratings_back(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:deferred:ratings:back", 0.6):
+        return
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    await _show_deferred_ratings_step(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        is_photo=bool(data.get("upload_is_photo")),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:ratings:off:"))
+async def myphoto_deferred_ratings_off(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    flow_token = _deferred_flow_token_from_state(data)
+    warn = (
+        "⚠️ <b>Подтверждение отключения оценивания</b>\n\n"
+        "После отключения:\n"
+        "• фотография не попадёт в оценивание;\n"
+        "• не попадёт в итоги;\n"
+        "• включить оценки обратно для этой фотографии будет нельзя.\n\n"
+        "Отключить?"
+    )
+    await _set_upload_progress(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        text=warn,
+        is_photo_message=bool(data.get("upload_is_photo")),
+        reply_markup=build_deferred_ratings_confirm_kb(flow_token),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:ratings:on:"))
+@router.callback_query(F.data.startswith("myphoto:deferred:ratings:skip:"))
+async def myphoto_deferred_ratings_on_or_skip(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:deferred:ratings:on_skip", 0.6):
+        return
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    await state.update_data(
+        deferred_ratings_enabled=True,
+        deferred_ratings_locked=False,
+    )
+    await _show_deferred_tag_step(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        is_photo=bool(data.get("upload_is_photo")),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:tag:"))
+async def myphoto_deferred_tag_pick(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:deferred:tag", 0.45):
+        return
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    parts = (callback.data or "").split(":", 4)
+    tag_value = parts[4] if len(parts) >= 5 else ""
+    if tag_value == "skip":
+        tag_value = ""
+    await state.update_data(deferred_tag=str(tag_value))
+    await _show_deferred_device_step(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        is_photo=bool(data.get("upload_is_photo")),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:device:"))
+async def myphoto_deferred_device_pick(callback: CallbackQuery, state: FSMContext):
+    if await _tap_guard(callback, "myphoto:deferred:device", 0.45):
+        return
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    parts = (callback.data or "").split(":")
+    choice = parts[4] if len(parts) >= 5 else "skip"
+    if choice not in {"phone", "camera"}:
+        choice = ""
+    await state.update_data(deferred_device_type=str(choice))
+    await _show_deferred_schedule_step(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        is_photo=bool(data.get("upload_is_photo")),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:schedule:back:"))
+async def myphoto_deferred_schedule_back(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    await state.set_state(None)
+    await _show_deferred_schedule_step(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        is_photo=bool(data.get("upload_is_photo")),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:schedule:default:"))
+async def myphoto_deferred_schedule_default(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    await state.update_data(deferred_publish_at_iso=_deferred_publish_default_dt().isoformat())
+    await _finalize_photo_creation(callback, state)
+    await callback.answer("Отложенная загрузка сохранена.")
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:schedule:custom:"))
+async def myphoto_deferred_schedule_custom(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    await state.set_state(MyPhotoStates.waiting_deferred_time)
+    flow_token = _deferred_flow_token_from_state(data)
+    text = (
+        "🕒 <b>Время публикации</b>\n\n"
+        "Отправь время на завтра в формате <b>HH:MM</b> по МСК.\n"
+        "Пример: <code>09:30</code>"
+    )
+    await _set_upload_progress(
+        state=state,
+        bot=callback.message.bot,
+        chat_id=int(data.get("upload_chat_id") or callback.message.chat.id),
+        message_id=int(data.get("upload_msg_id") or callback.message.message_id),
+        text=text,
+        is_photo_message=bool(data.get("upload_is_photo")),
+        reply_markup=build_deferred_time_input_kb(flow_token),
+    )
+    await callback.answer()
+
+
+@router.message(MyPhotoStates.waiting_deferred_time, F.text)
+async def myphoto_deferred_time_input(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if not bool(data.get("upload_deferred_mode")):
+        await state.clear()
+        await message.delete()
+        return
+    upload_chat_id = int(data.get("upload_chat_id") or message.chat.id)
+    upload_msg_id = int(data.get("upload_msg_id") or 0)
+    dt, error = _parse_tomorrow_hhmm_msk(message.text or "")
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    flow_token = _deferred_flow_token_from_state(data)
+    if dt is None:
+        await _set_upload_progress(
+            state=state,
+            bot=message.bot,
+            chat_id=upload_chat_id,
+            message_id=upload_msg_id,
+            text=f"❌ {error or 'Неверный формат.'}\n\nВведите время в формате HH:MM.",
+            is_photo_message=bool(data.get("upload_is_photo")),
+            reply_markup=build_deferred_time_input_kb(flow_token),
+        )
+        return
+    await state.update_data(deferred_publish_at_iso=dt.isoformat())
+    await state.set_state(None)
+    text = (
+        "✅ <b>Время принято</b>\n\n"
+        f"Опубликуется {_format_publish_msk_human(dt)}.\n"
+        "Подтвердить сохранение отложенной загрузки?"
+    )
+    await _set_upload_progress(
+        state=state,
+        bot=message.bot,
+        chat_id=upload_chat_id,
+        message_id=upload_msg_id,
+        text=text,
+        is_photo_message=bool(data.get("upload_is_photo")),
+        reply_markup=build_deferred_time_confirm_kb(flow_token),
+    )
+
+
+@router.message(MyPhotoStates.waiting_deferred_time)
+async def myphoto_deferred_time_input_wrong(message: Message):
+    await message.delete()
+
+
+@router.callback_query(F.data.startswith("myphoto:deferred:schedule:confirm:"))
+async def myphoto_deferred_schedule_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await _ensure_deferred_flow_state(callback, state)
+    if data is None:
+        return
+    publish_iso = str(data.get("deferred_publish_at_iso") or "").strip()
+    if not publish_iso:
+        await callback.answer("Сначала укажи время публикации.", show_alert=True)
+        return
+    await _finalize_photo_creation(callback, state)
+    await callback.answer("Отложенная загрузка сохранена.")
 
 
 # === ОБРАБОТКА ВЫБОРА ТИПА УСТРОЙСТВА ===
@@ -3238,6 +3923,19 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     user_id = data.get("upload_user_id")
     file_id = data.get("file_id")
     title = data.get("title")
+    deferred_mode = bool(data.get("upload_deferred_mode"))
+    deferred_tag = str(data.get("deferred_tag") or "").strip()
+    deferred_device_type = str(data.get("deferred_device_type") or "").strip()
+    deferred_ratings_enabled = bool(data.get("deferred_ratings_enabled", True))
+    deferred_ratings_locked = bool(data.get("deferred_ratings_locked", False))
+    deferred_publish_at = _parse_dt(data.get("deferred_publish_at_iso")) if deferred_mode else None
+    if deferred_mode and deferred_publish_at is None:
+        deferred_publish_at = _deferred_publish_default_dt()
+    if deferred_mode and deferred_publish_at is not None:
+        now_msk = get_moscow_now()
+        if deferred_publish_at.tzinfo is None and now_msk.tzinfo is not None:
+            deferred_publish_at = deferred_publish_at.replace(tzinfo=now_msk.tzinfo)
+    deferred_submit_day = deferred_publish_at.date() if deferred_mode and deferred_publish_at else None
     upload_msg_id = data.get("upload_msg_id")
     upload_chat_id = data.get("upload_chat_id")
 
@@ -3289,15 +3987,23 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
     is_unlimited_actor = bool(actor and is_unlimited_upload_user(actor))
 
     if not is_unlimited_actor:
-        can_upload_now, denied_reason = await check_can_upload_today(int(user_id))
+        can_upload_now, denied_reason = await check_can_upload_today(
+            int(user_id),
+            today=deferred_submit_day if deferred_mode else None,
+        )
         if not can_upload_now:
+            denied_fallback = (
+                "❌ На выбранный день уже есть публикация. Выбери другое время."
+                if deferred_mode
+                else "❌ Сегодня новая публикация недоступна. Завтра можно."
+            )
             await _show_upload_processing_error(
                 state=state,
                 bot=bot,
                 chat_id=chat_id,
                 message_id=sent_msg_id,
                 is_photo_message=progress_is_photo,
-                text=denied_reason or "❌ Сегодня новая публикация недоступна. Завтра можно.",
+                text=denied_reason or denied_fallback,
             )
             return
 
@@ -3391,7 +4097,7 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         bot=bot,
         chat_id=chat_id,
         message_id=sent_msg_id,
-        text="📦 Сохраняем и добавляем в ленту…",
+        text="📦 Сохраняем отложенную загрузку…" if deferred_mode else "📦 Сохраняем и добавляем в ленту…",
         is_photo_message=True,
     )
     if sent_msg_id is None:
@@ -3404,6 +4110,13 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             file_id_public=file_id_public,
             file_id_original=file_id,
             title=title,
+            tag=deferred_tag if deferred_mode else None,
+            device_type=deferred_device_type or None,
+            ratings_enabled=deferred_ratings_enabled if deferred_mode else True,
+            ratings_locked=deferred_ratings_locked if deferred_mode else False,
+            submit_day=deferred_submit_day if deferred_mode else None,
+            status="scheduled" if deferred_mode else "active",
+            publish_at=deferred_publish_at if deferred_mode else None,
         )
         try:
             economy = await get_effective_economy_settings()
@@ -3418,13 +4131,18 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
         except Exception:
             pass
     except UniqueViolationError:
+        err_text = (
+            "❌ На выбранный день уже есть публикация. Выбери другое время."
+            if deferred_mode
+            else "❌ Ты уже загружал(а) фотографию сегодня. Новая публикация будет доступна завтра."
+        )
         await _show_upload_processing_error(
             state=state,
             bot=bot,
             chat_id=chat_id,
             message_id=sent_msg_id,
             is_photo_message=progress_is_photo,
-            text="❌ Ты уже загружал(а) фотографию сегодня. Новая публикация будет доступна завтра.",
+            text=err_text,
         )
         return
     except Exception:
@@ -3447,6 +4165,44 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
             is_photo_message=progress_is_photo,
             text="❌ Ошибка при сохранении фотографии. Попробуй ещё раз.",
         )
+        return
+
+    if deferred_mode:
+        await _set_upload_progress(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            text=f"🏁 Готово! Отложенная загрузка сохранена.\nОпубликуется {_format_publish_msk_human(deferred_publish_at)}.",
+            is_photo_message=True,
+        )
+        try:
+            await state.clear()
+        except Exception:
+            pass
+        if isinstance(event, CallbackQuery):
+            gallery_user = actor
+            if gallery_user is None and tg_id:
+                gallery_user = await get_user_by_tg_id(int(tg_id))
+            if gallery_user:
+                photos = await _load_active_myphoto_gallery(int(user_id))
+                if photos:
+                    await _render_myphoto_gallery(event, state, gallery_user, photos=photos)
+                else:
+                    await _render_upload_intro_screen(event, state, gallery_user)
+        else:
+            # Для message-флоу оставляем чистый финальный экран без новых сообщений.
+            await _set_upload_progress(
+                state=state,
+                bot=bot,
+                chat_id=chat_id,
+                message_id=sent_msg_id,
+                text=f"🏁 Готово! Отложенная загрузка сохранена.\nОпубликуется {_format_publish_msk_human(deferred_publish_at)}.",
+                is_photo_message=True,
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text=HOME, callback_data="menu:back")]]
+                ),
+            )
         return
 
     sent_msg_id, progress_is_photo = await _set_upload_progress(

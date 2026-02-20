@@ -11,6 +11,7 @@ from database import (
     grant_daily_credits_once,
     fetch_pending_notifications,
     mark_notification_done,
+    activate_scheduled_photos,
 )
 
 
@@ -68,6 +69,16 @@ async def daily_results_publish_job(bot: Bot) -> None:
 async def daily_recap_job(bot: Bot) -> None:
     """Deprecated wrapper: kept for backward compatibility."""
     await daily_results_publish_job(bot)
+
+
+async def scheduled_photos_activate_job(bot: Bot) -> None:
+    """Каждые ~20 секунд активирует фото с отложенной публикацией, без уведомлений."""
+    while True:
+        try:
+            await activate_scheduled_photos(limit=200)
+        except Exception:
+            pass
+        await asyncio.sleep(20)
 
 
 async def notifications_worker(bot: Bot, send_fn: Callable[[int, dict], asyncio.Future] | None = None) -> None:

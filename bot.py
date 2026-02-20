@@ -19,6 +19,7 @@ from services.jobs import (
     daily_credits_grant_job,
     daily_results_publish_job,
     notifications_worker,
+    scheduled_photos_activate_job,
 )
 from database import (
     init_db,
@@ -791,6 +792,7 @@ async def main() -> None:
     asyncio.create_task(finalize_party_job(bot))
     asyncio.create_task(daily_credits_grant_job(bot))
     asyncio.create_task(daily_results_publish_job(bot))
+    asyncio.create_task(scheduled_photos_activate_job(bot))
 
     async def _send_notification(_: int, item: dict):
         """Простой отправитель уведомлений из notification_queue."""

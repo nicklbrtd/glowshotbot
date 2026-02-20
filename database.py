@@ -3359,6 +3359,7 @@ async def ensure_schema() -> None:
               day_key TEXT,
               submit_day DATE,
               expires_at TIMESTAMPTZ,
+              publish_at TIMESTAMPTZ,
               status TEXT NOT NULL DEFAULT 'active',
               votes_count INTEGER NOT NULL DEFAULT 0,
               sum_score INTEGER NOT NULL DEFAULT 0,
@@ -3368,6 +3369,7 @@ async def ensure_schema() -> None:
               tg_file_id TEXT,
               moderation_status TEXT NOT NULL DEFAULT 'active',
               ratings_enabled INTEGER NOT NULL DEFAULT 1,
+              ratings_locked INTEGER NOT NULL DEFAULT 0,
               is_deleted INTEGER NOT NULL DEFAULT 0,
               deleted_at TIMESTAMPTZ,
               created_at TEXT NOT NULL
@@ -3921,6 +3923,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE rating_feed_state ADD COLUMN IF NOT EXISTS last_author_id BIGINT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS submit_day DATE;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS votes_count INTEGER NOT NULL DEFAULT 0;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS sum_score INTEGER NOT NULL DEFAULT 0;")
@@ -3930,6 +3933,7 @@ async def ensure_schema() -> None:
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS tg_file_id TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS deleted_reason TEXT;")
         await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;")
+        await conn.execute("ALTER TABLE photos ADD COLUMN IF NOT EXISTS ratings_locked INTEGER NOT NULL DEFAULT 0;")
 
         # ======== CREATE INDEX IF NOT EXISTS ========
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_ratings_photo_source ON ratings(photo_id, source);")
@@ -3960,6 +3964,7 @@ async def ensure_schema() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_tag ON photos(tag);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_submit_day ON photos(submit_day);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status_new ON photos(status);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status_publish_at ON photos(status, publish_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_expires_at ON photos(expires_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status_expires ON photos(status, expires_at);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_submit_status ON photos(submit_day, status);")
@@ -6003,9 +6008,14 @@ async def create_today_photo(
     category: str | None = None,
     device_type: str | None = None,
     device_info: str | None = None,
+    tag: str | None = None,
     ratings_enabled: bool | None = None,
+    ratings_locked: bool = False,
+    submit_day: date | None = None,
+    status: str = "active",
+    publish_at: datetime | None = None,
 ) -> int:
-    """Создать новую фотографию пользователя на текущий день.
+    """Создать новую фотографию пользователя на выбранный submit_day.
 
     Заполняем:
       - submit_day (date) для итогов/партий,
@@ -6015,9 +6025,9 @@ async def create_today_photo(
     """
     p = _assert_pool()
     now_iso = get_bot_now_iso()
-    today = get_bot_today()
-    day_key = str(today)
-    expires_at = end_of_day(today + timedelta(days=1))
+    target_day = submit_day or get_bot_today()
+    day_key = str(target_day)
+    expires_at = end_of_day(target_day + timedelta(days=1))
 
     # Если описания нет, явно сохраняем метку "нет"
     if description is not None:
@@ -6037,6 +6047,10 @@ async def create_today_photo(
         public_id = file_id_public or file_id
         orig_id = file_id_original or file_id
 
+        safe_status = str(status or "active").strip().lower()
+        if safe_status not in {"active", "scheduled"}:
+            safe_status = "active"
+
         row = await conn.fetchrow(
             """
             INSERT INTO photos (
@@ -6047,18 +6061,24 @@ async def create_today_photo(
                 title,
                 description,
                 category,
-            device_type,
-            device_info,
-            day_key,
-            submit_day,
-            expires_at,
+                device_type,
+                device_info,
+                tag,
+                day_key,
+                submit_day,
+                expires_at,
+                publish_at,
                 status,
                 moderation_status,
                 ratings_enabled,
+                ratings_locked,
                 is_deleted,
                 created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active','active',$13,0,$14)
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                $11,$12,$13,$14,$15,'active',$16,$17,0,$18
+            )
             RETURNING id
             """,
             int(user_id),
@@ -6070,10 +6090,14 @@ async def create_today_photo(
             category,
             device_type,
             device_info,
+            tag,
             day_key,
-            today,
+            target_day,
             expires_at,
+            publish_at,
+            safe_status,
             1 if enabled else 0,
+            1 if ratings_locked else 0,
             now_iso,
         )
 
@@ -6173,6 +6197,57 @@ async def get_active_photos_for_user(user_id: int, limit: int = 50, offset: int 
             int(user_id), int(limit), int(offset)
         )
     return [dict(r) for r in rows]
+
+
+async def get_pending_scheduled_photo_for_user(user_id: int) -> dict | None:
+    """Return nearest pending scheduled upload for user (if any)."""
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM photos
+            WHERE user_id=$1
+              AND is_deleted=0
+              AND status='scheduled'
+              AND COALESCE(publish_at, NOW() + INTERVAL '100 years') > NOW()
+            ORDER BY publish_at ASC NULLS LAST, created_at ASC, id ASC
+            LIMIT 1
+            """,
+            int(user_id),
+        )
+    return dict(row) if row else None
+
+
+async def activate_scheduled_photos(limit: int = 200) -> int:
+    """
+    Move due scheduled photos into active feed silently.
+
+    Returns number of activated rows.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH picked AS (
+                SELECT id
+                FROM photos
+                WHERE is_deleted=0
+                  AND status='scheduled'
+                  AND COALESCE(publish_at, NOW()) <= NOW()
+                ORDER BY publish_at ASC NULLS FIRST, id ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE photos p
+            SET status='active'
+            FROM picked
+            WHERE p.id = picked.id
+            RETURNING p.id
+            """,
+            int(limit),
+        )
+    return len(rows)
 
 
 async def get_latest_photos_for_user(user_id: int, limit: int = 2) -> list[dict]:
@@ -6418,12 +6493,46 @@ async def set_photo_ratings_enabled(photo_id: int, enabled: bool, *, user_id: in
                 1 if enabled else 0,
             )
         else:
-            res = await conn.execute(
-                "UPDATE photos SET ratings_enabled=$2 WHERE id=$1 AND user_id=$3",
-                int(photo_id),
-                1 if enabled else 0,
-                int(user_id),
-            )
+            if enabled:
+                # Владелец не может обратно включить оценки, если фото уже заблокировано по правилам.
+                res = await conn.execute(
+                    """
+                    UPDATE photos
+                    SET ratings_enabled=1
+                    WHERE id=$1
+                      AND user_id=$2
+                      AND COALESCE(ratings_locked,0)=0
+                    """,
+                    int(photo_id),
+                    int(user_id),
+                )
+            else:
+                res = await conn.execute(
+                    "UPDATE photos SET ratings_enabled=0 WHERE id=$1 AND user_id=$2",
+                    int(photo_id),
+                    int(user_id),
+                )
+    return res.startswith("UPDATE ") and not res.endswith(" 0")
+
+
+async def disable_photo_ratings_forever(photo_id: int, user_id: int) -> bool:
+    """
+    Disable ratings permanently for this photo (owner action only).
+
+    After this operation user cannot turn ratings back on for the same photo.
+    """
+    p = _assert_pool()
+    async with p.acquire() as conn:
+        res = await conn.execute(
+            """
+            UPDATE photos
+            SET ratings_enabled=0,
+                ratings_locked=1
+            WHERE id=$1 AND user_id=$2
+            """,
+            int(photo_id),
+            int(user_id),
+        )
     return res.startswith("UPDATE ") and not res.endswith(" 0")
 
 
@@ -6434,7 +6543,11 @@ async def toggle_photo_ratings_enabled(photo_id: int, user_id: int) -> bool | No
         row = await conn.fetchrow(
             """
             UPDATE photos
-            SET ratings_enabled = CASE WHEN ratings_enabled=0 THEN 1 ELSE 0 END
+            SET ratings_enabled = CASE
+                WHEN ratings_enabled=0 AND COALESCE(ratings_locked,0)=1 THEN 0
+                WHEN ratings_enabled=0 THEN 1
+                ELSE 0
+            END
             WHERE id=$1 AND user_id=$2
             RETURNING ratings_enabled
             """,
@@ -7270,6 +7383,7 @@ async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> 
             JOIN photos p ON p.id = rr.photo_id
             WHERE rr.submit_day=$1::date
               AND COALESCE(p.is_deleted,0)=0
+              AND COALESCE(p.ratings_enabled,1)=1
             """,
             submit_day,
         )
@@ -7290,6 +7404,7 @@ async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> 
             LEFT JOIN users u ON u.id = p.user_id
             WHERE rr.submit_day=$1::date
               AND COALESCE(p.is_deleted,0)=0
+              AND COALESCE(p.ratings_enabled,1)=1
             ORDER BY rr.final_rank ASC
             LIMIT $2
             """,
@@ -7572,22 +7687,25 @@ async def finalize_party(submit_day: date | None = None, *, min_votes: int = 7, 
                         except Exception:
                             sd = now.date()
                     day_key = str(sd)
-                    rank_by_day.setdefault(day_key, 0)
-                    rank_by_day[day_key] += 1
-                    rank = rank_by_day[day_key]
+                    rank: int | None = None
+                    if bool(r.get("ratings_enabled", 1)):
+                        rank_by_day.setdefault(day_key, 0)
+                        rank_by_day[day_key] += 1
+                        rank = rank_by_day[day_key]
 
                     photo_id = int(r["id"])
-                    await conn.execute(
-                        """
-                        INSERT INTO result_ranks (photo_id, submit_day, final_rank, finalized_at)
-                        VALUES ($1,$2,$3,NOW())
-                        ON CONFLICT (photo_id, submit_day)
-                        DO UPDATE SET final_rank=EXCLUDED.final_rank, finalized_at=EXCLUDED.finalized_at
-                        """,
-                        photo_id,
-                        sd,
-                        rank,
-                    )
+                    if rank is not None:
+                        await conn.execute(
+                            """
+                            INSERT INTO result_ranks (photo_id, submit_day, final_rank, finalized_at)
+                            VALUES ($1,$2,$3,NOW())
+                            ON CONFLICT (photo_id, submit_day)
+                            DO UPDATE SET final_rank=EXCLUDED.final_rank, finalized_at=EXCLUDED.finalized_at
+                            """,
+                            photo_id,
+                            sd,
+                            rank,
+                        )
                     await conn.execute(
                         "UPDATE photos SET status='archived' WHERE id=$1",
                         photo_id,
@@ -7611,6 +7729,7 @@ async def daily_recap(submit_day: date, *, min_votes: int = 7, top_n: int = 3) -
             WHERE submit_day=$1::date
               AND is_deleted=0
               AND COALESCE(status,'active')='active'
+              AND COALESCE(ratings_enabled,1)=1
               AND (expires_at IS NULL OR expires_at > NOW())
               AND votes_count >= $2
             ORDER BY avg_score DESC, votes_count DESC, created_at ASC
