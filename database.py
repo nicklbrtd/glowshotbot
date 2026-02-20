@@ -6147,11 +6147,23 @@ async def check_can_upload_today(user_id: int, today: date | None = None) -> tup
     target_day = today or get_bot_today()
     day_key = str(target_day)
     async with p.acquire() as conn:
+        role_row = await conn.fetchrow(
+            "SELECT COALESCE(is_admin,0)::int AS is_admin, COALESCE(is_helper,0)::int AS is_helper FROM users WHERE id=$1",
+            int(user_id),
+        )
         row = await conn.fetchrow(
             """
             SELECT
                 COUNT(*)::int AS total,
-                BOOL_OR(COALESCE(deleted_reason, '')='user') AS has_user_deleted
+                BOOL_OR(COALESCE(deleted_reason, '')='user') AS has_user_deleted,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(is_deleted,0)=0
+                      AND COALESCE(status,'active')='active'
+                )::int AS active_count,
+                COUNT(*) FILTER (
+                    WHERE COALESCE(is_deleted,0)=0
+                      AND COALESCE(status,'active')='scheduled'
+                )::int AS scheduled_count
             FROM photos
             WHERE user_id=$1
               AND (
@@ -6163,9 +6175,19 @@ async def check_can_upload_today(user_id: int, today: date | None = None) -> tup
             target_day,
             day_key,
         )
+    can_replace_same_day = bool((role_row or {}).get("is_admin") or (role_row or {}).get("is_helper"))
     total = int((row or {}).get("total") or 0)
     if total <= 0:
         return True, None
+
+    if can_replace_same_day:
+        active_count = int((row or {}).get("active_count") or 0)
+        scheduled_count = int((row or {}).get("scheduled_count") or 0)
+        if active_count <= 0 and scheduled_count <= 0:
+            return True, None
+        if active_count > 0:
+            return False, "Сначала удали активное фото за этот день, потом можно загрузить новое."
+        return False, "На этот день уже есть отложенная публикация. Сначала удали её."
 
     if bool((row or {}).get("has_user_deleted")):
         return (

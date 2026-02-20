@@ -606,7 +606,7 @@ def is_admin_user(user: dict) -> bool:
 
 
 def is_unlimited_upload_user(user: dict) -> bool:
-    """Админ и помощник могут бесконечно публиковать в течение дня (для тестов)."""
+    """Админ/хелпер: особое правило — можно перевыложить в тот же день после удаления активной."""
     return bool(user.get("is_admin") or user.get("is_helper"))
 
 
@@ -933,10 +933,7 @@ async def _render_upload_intro_screen(
         is_premium_user = False
 
     limit, _current, remaining = await _idea_counters(user, is_premium_user)
-    can_upload_today = True
-    denied_reason = None
-    if not is_unlimited_upload_user(user):
-        can_upload_today, denied_reason = await check_can_upload_today(int(user["id"]))
+    can_upload_today, denied_reason = await check_can_upload_today(int(user["id"]))
 
     idea_title, idea_hint = _get_daily_idea()
     text = _build_upload_intro_text(
@@ -1447,11 +1444,10 @@ async def _render_myphoto_gallery(
     if not photos:
         return False
 
-    can_upload_today = True
-    denied_reason: str | None = None
+    can_upload_today: bool
+    denied_reason: str | None
     pending_scheduled = await get_pending_scheduled_photo_for_user(user_id)
-    if not is_unlimited_upload_user(user):
-        can_upload_today, denied_reason = await check_can_upload_today(user_id)
+    can_upload_today, denied_reason = await check_can_upload_today(user_id)
 
     can_add_more = len(photos) < 2 and can_upload_today
     force_add_button = bool(pending_scheduled) and not can_add_more
@@ -2902,41 +2898,40 @@ async def myphoto_add(callback: CallbackQuery, state: FSMContext):
     pending_scheduled = await get_pending_scheduled_photo_for_user(int(user_id))
     deferred_allowed_role = bool(user.get("is_author")) or bool(is_premium_user)
 
-    if not is_unlimited:
-        can_upload, deny_reason = await check_can_upload_today(int(user_id))
-        if not can_upload:
-            tomorrow = get_moscow_now().date() + timedelta(days=1)
-            can_schedule_tomorrow, _ = await check_can_upload_today(int(user_id), today=tomorrow)
-            can_offer_deferred = (
-                deferred_allowed_role
-                and active_count >= 1
-                and active_count < max_active
-                and pending_scheduled is None
-                and can_schedule_tomorrow
-            )
-            if can_offer_deferred:
-                await _render_deferred_intro_screen(callback, state, user)
-                await callback.answer()
-                return
-            if pending_scheduled is not None:
-                await callback.answer("Загрузки закончились.", show_alert=False)
-                return
-            limit, _current, remaining = await _idea_counters(user, is_premium_user)
-            idea_title, idea_hint = _get_daily_idea()
-            text = _build_upload_intro_text(
-                user,
-                idea_label="Идея дня",
-                idea_title=idea_title,
-                idea_hint=idea_hint,
-                publish_notice=deny_reason or "Публикация сегодня недоступна. Завтра можно.",
-            )
-            await _edit_or_replace_text(
-                callback,
-                text,
-                build_upload_intro_kb(remaining=remaining, limit=limit),
-            )
+    can_upload, deny_reason = await check_can_upload_today(int(user_id))
+    if not can_upload:
+        tomorrow = get_moscow_now().date() + timedelta(days=1)
+        can_schedule_tomorrow, _ = await check_can_upload_today(int(user_id), today=tomorrow)
+        can_offer_deferred = (
+            deferred_allowed_role
+            and active_count >= 1
+            and active_count < max_active
+            and pending_scheduled is None
+            and can_schedule_tomorrow
+        )
+        if can_offer_deferred:
+            await _render_deferred_intro_screen(callback, state, user)
             await callback.answer()
             return
+        if pending_scheduled is not None:
+            await callback.answer("Загрузки закончились.", show_alert=False)
+            return
+        limit, _current, remaining = await _idea_counters(user, is_premium_user)
+        idea_title, idea_hint = _get_daily_idea()
+        text = _build_upload_intro_text(
+            user,
+            idea_label="Идея дня",
+            idea_title=idea_title,
+            idea_hint=idea_hint,
+            publish_notice=deny_reason or "Публикация сегодня недоступна. Завтра можно.",
+        )
+        await _edit_or_replace_text(
+            callback,
+            text,
+            build_upload_intro_kb(remaining=remaining, limit=limit),
+        )
+        await callback.answer()
+        return
 
     # Проверка лимита активных фото
     if active_count >= max_active:
@@ -3984,28 +3979,25 @@ async def _finalize_photo_creation(event: Message | CallbackQuery, state: FSMCon
 
     tg_id = int(getattr(event.from_user, "id", 0) or 0)
     actor = await get_user_by_tg_id(tg_id) if tg_id else None
-    is_unlimited_actor = bool(actor and is_unlimited_upload_user(actor))
-
-    if not is_unlimited_actor:
-        can_upload_now, denied_reason = await check_can_upload_today(
-            int(user_id),
-            today=deferred_submit_day if deferred_mode else None,
+    can_upload_now, denied_reason = await check_can_upload_today(
+        int(user_id),
+        today=deferred_submit_day if deferred_mode else None,
+    )
+    if not can_upload_now:
+        denied_fallback = (
+            "❌ На выбранный день уже есть публикация. Выбери другое время."
+            if deferred_mode
+            else "❌ Сегодня новая публикация недоступна. Завтра можно."
         )
-        if not can_upload_now:
-            denied_fallback = (
-                "❌ На выбранный день уже есть публикация. Выбери другое время."
-                if deferred_mode
-                else "❌ Сегодня новая публикация недоступна. Завтра можно."
-            )
-            await _show_upload_processing_error(
-                state=state,
-                bot=bot,
-                chat_id=chat_id,
-                message_id=sent_msg_id,
-                is_photo_message=progress_is_photo,
-                text=denied_reason or denied_fallback,
-            )
-            return
+        await _show_upload_processing_error(
+            state=state,
+            bot=bot,
+            chat_id=chat_id,
+            message_id=sent_msg_id,
+            is_photo_message=progress_is_photo,
+            text=denied_reason or denied_fallback,
+        )
+        return
 
     try:
         author_code = await ensure_user_author_code(int(tg_id))
