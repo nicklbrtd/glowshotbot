@@ -1450,7 +1450,38 @@ async def _render_myphoto_gallery(
     can_upload_today, denied_reason = await check_can_upload_today(user_id)
 
     can_add_more = len(photos) < 2 and can_upload_today
-    force_add_button = bool(pending_scheduled) and not can_add_more
+    can_offer_deferred = False
+    if (not can_upload_today) and (pending_scheduled is None):
+        is_premium_user = False
+        try:
+            if user.get("tg_id"):
+                is_premium_user = await is_user_premium_active(int(user["tg_id"]))
+        except Exception:
+            is_premium_user = False
+
+        economy = await get_effective_economy_settings()
+        max_active_normal = int(economy.get("max_active_photos_normal") or 2)
+        max_active_author = int(economy.get("max_active_photos_author") or max_active_normal)
+        max_active_premium = int(economy.get("max_active_photos_premium") or max_active_normal)
+        if bool(user.get("is_admin") or user.get("is_helper")):
+            max_active = 10**9
+        elif bool(user.get("is_author")):
+            max_active = max(1, max_active_author)
+        elif is_premium_user:
+            max_active = max(1, max_active_premium)
+        else:
+            max_active = max(1, max_active_normal)
+
+        tomorrow = get_moscow_now().date() + timedelta(days=1)
+        can_schedule_tomorrow, _ = await check_can_upload_today(user_id, today=tomorrow)
+        can_offer_deferred = (
+            (bool(user.get("is_author")) or is_premium_user)
+            and len(photos) >= 1
+            and len(photos) < max_active
+            and can_schedule_tomorrow
+        )
+
+    force_add_button = (bool(pending_scheduled) or can_offer_deferred) and not can_add_more
     text = await _build_myphoto_gallery_text(
         photos,
         denied_reason=denied_reason if (len(photos) < 2 and not can_upload_today) else None,
