@@ -7396,11 +7396,9 @@ def _daily_results_top_threshold(participants_count: int) -> int:
     return 10
 
 
-async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> dict:
-    """
-    Build immutable daily results payload for archived party (submit_day).
-    Uses result_ranks + precomputed photo counters (no heavy real-time aggregates).
-    """
+async def get_daily_results_top_live(submit_day: date | str, *, limit: int = 10) -> dict:
+    """Read daily top directly from result_ranks/photos (without daily cache)."""
+    day = submit_day if isinstance(submit_day, date) else date.fromisoformat(str(submit_day))
     p = _assert_pool()
     async with p.acquire() as conn:
         participants_count = await conn.fetchval(
@@ -7412,7 +7410,7 @@ async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> 
               AND COALESCE(p.is_deleted,0)=0
               AND COALESCE(p.ratings_enabled,1)=1
             """,
-            submit_day,
+            day,
         )
         rows = await conn.fetch(
             """
@@ -7435,12 +7433,10 @@ async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> 
             ORDER BY rr.final_rank ASC
             LIMIT $2
             """,
-            submit_day,
+            day,
             int(limit),
         )
-
     participants = int(participants_count or 0)
-    threshold = _daily_results_top_threshold(participants)
     top: list[dict] = []
     for r in rows:
         top.append(
@@ -7457,11 +7453,19 @@ async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> 
             }
         )
     return {
-        "submit_day": str(submit_day),
+        "submit_day": str(day),
         "participants_count": participants,
-        "top_threshold": threshold,
+        "top_threshold": _daily_results_top_threshold(participants),
         "top": top,
     }
+
+
+async def build_daily_results_snapshot(submit_day: date, *, limit: int = 10) -> dict:
+    """
+    Build immutable daily results payload for archived party (submit_day).
+    Uses result_ranks + precomputed photo counters (no heavy real-time aggregates).
+    """
+    return await get_daily_results_top_live(submit_day, limit=int(limit))
 
 
 async def publish_daily_results(submit_day: date, *, limit: int = 10) -> dict:

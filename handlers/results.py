@@ -49,6 +49,7 @@ from database import (
     set_user_screen_msg_id,
     get_latest_daily_results_cache,
     get_daily_results_cache,
+    get_daily_results_top_live,
     list_daily_results_days,
     publish_daily_results,
     is_section_blocked,
@@ -175,6 +176,41 @@ async def _get_day_cache_ready(day_key: str) -> dict | None:
                 except Exception:
                     pass
             cache = await get_daily_results_cache(day_key)
+
+    # Fallback: read directly from result_ranks if cache payload is stale-empty.
+    payload = cache.get("payload") if cache and isinstance(cache.get("payload"), dict) else {}
+    participants = _daily_int((payload or {}).get("participants_count") or (cache or {}).get("participants_count") or 0, 0)
+    top = (payload or {}).get("top") if isinstance((payload or {}).get("top"), list) else []
+    if (cache is None) or (participants >= PODIUM_MIN_PARTICIPANTS and not top):
+        try:
+            live = await get_daily_results_top_live(day_key, limit=10)
+        except Exception:
+            live = {}
+        live_participants = _daily_int(live.get("participants_count") or 0, 0)
+        live_top = live.get("top") if isinstance(live.get("top"), list) else []
+        if cache is None and (live_participants > 0 or live_top):
+            cache = {
+                "submit_day": str(live.get("submit_day") or day_key),
+                "participants_count": int(live_participants),
+                "top_threshold": _daily_int(live.get("top_threshold") or 0, 0),
+                "published_at": None,
+                "payload": {
+                    "submit_day": str(live.get("submit_day") or day_key),
+                    "participants_count": int(live_participants),
+                    "top_threshold": _daily_int(live.get("top_threshold") or 0, 0),
+                    "top": [dict(x) for x in live_top if isinstance(x, dict)],
+                },
+            }
+        elif cache is not None:
+            merged_payload = dict(payload or {})
+            merged_payload["submit_day"] = str(live.get("submit_day") or cache.get("submit_day") or day_key)
+            merged_payload["participants_count"] = int(live_participants)
+            merged_payload["top_threshold"] = _daily_int(live.get("top_threshold") or cache.get("top_threshold") or 0, 0)
+            merged_payload["top"] = [dict(x) for x in live_top if isinstance(x, dict)]
+            cache = dict(cache)
+            cache["participants_count"] = int(live_participants)
+            cache["top_threshold"] = _daily_int(live.get("top_threshold") or cache.get("top_threshold") or 0, 0)
+            cache["payload"] = merged_payload
 
     return cache
 
