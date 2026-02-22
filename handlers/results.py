@@ -563,7 +563,7 @@ async def _render_day_top10_screen(
     elif participants < PODIUM_MIN_PARTICIPANTS:
         lines.append("")
     else:
-        lines.extend(["<i>Рейтинг зафиксирован после окончания партии.</i>", ""])
+        lines.append("")
     medal = {1: "🥇", 2: "🥈", 3: "🥉"}
     if participants < PODIUM_MIN_PARTICIPANTS:
         for item in top:
@@ -575,16 +575,21 @@ async def _render_day_top10_screen(
         lines.append("<i>Партия маленькая, результаты менее стабильны.</i>")
     else:
         for i, item in enumerate(top, start=1):
-            icon = medal.get(i, "•")
+            if i == 4:
+                lines.append("")
             title = html.escape(_daily_title(item), quote=False)
             bayes = _fmt_daily_bayes(item)
             votes = _daily_votes(item)
-            lines.append(f"{icon} {i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
+            if i <= 3:
+                icon = medal.get(i, "🏅")
+                lines.append(f"{icon} <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
+            else:
+                lines.append(f"{i}. <code>\"{title}\"</code> — ⭐ {bayes} · 🗳 {votes}")
     lines.extend(
         [
             "",
-            "💡 Хочешь больше оценок? Оценивай других → credits → твои фото покажут чаще.",
-            "⚖️ Если рейтинги совпали, выше работа с большим числом оценок; дальше — по времени публикации.",
+            "💡 Хочешь больше оценок? Оценивай других → Получай кредиты → Другие оценивают тебя.",
+            "⚖️ Рейтинг считается по системе Байес! Комментарии, просмотры, оценки и жалобы влияют на ваш рейтинг.",
         ]
     )
     kb = _build_top10_kb(day_key=day_key, page_token=page_token)
