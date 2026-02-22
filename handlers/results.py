@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+import time
 import html
 
 from aiogram import Router, F, Bot
@@ -49,6 +50,7 @@ from database import (
     get_latest_daily_results_cache,
     get_daily_results_cache,
     list_daily_results_days,
+    publish_daily_results,
     is_section_blocked,
     get_tech_mode_state,
 )
@@ -133,6 +135,48 @@ async def _get_user_place(user_tg_id: int) -> tuple[str, str]:
 
 PODIUM_MIN_PARTICIPANTS = 3
 TOP10_DEFAULT = 10
+_DAY_CACHE_REBUILD_COOLDOWN_SEC = 60.0
+_DAY_CACHE_REBUILD_TS: dict[str, float] = {}
+
+
+def _parse_day_key(day_key: str) -> date | None:
+    try:
+        return date.fromisoformat(str(day_key or "").strip())
+    except Exception:
+        return None
+
+
+async def _get_day_cache_ready(day_key: str) -> dict | None:
+    """
+    Ensure daily cache is present and not stale-empty for podium/top views.
+
+    If cache is missing or has participants>=3 but empty top, try to rebuild once per cooldown.
+    """
+    cache = await get_daily_results_cache(day_key)
+    should_rebuild = False
+    if not cache:
+        should_rebuild = True
+    else:
+        payload = cache.get("payload") if isinstance(cache.get("payload"), dict) else {}
+        participants = _daily_int(payload.get("participants_count") or cache.get("participants_count") or 0, 0)
+        top = payload.get("top") if isinstance(payload.get("top"), list) else []
+        if participants >= PODIUM_MIN_PARTICIPANTS and not top:
+            should_rebuild = True
+
+    if should_rebuild:
+        now_ts = time.monotonic()
+        last_ts = float(_DAY_CACHE_REBUILD_TS.get(day_key) or 0.0)
+        if now_ts - last_ts >= _DAY_CACHE_REBUILD_COOLDOWN_SEC:
+            _DAY_CACHE_REBUILD_TS[day_key] = now_ts
+            day = _parse_day_key(day_key)
+            if day is not None:
+                try:
+                    await publish_daily_results(day, limit=10)
+                except Exception:
+                    pass
+            cache = await get_daily_results_cache(day_key)
+
+    return cache
 
 
 def build_results_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
@@ -1465,7 +1509,7 @@ async def results_archive_day_simple(callback: CallbackQuery):
         await callback.answer()
         return
     day = str(parts[2] or "")
-    cache = await get_daily_results_cache(day)
+    cache = await _get_day_cache_ready(day)
     if not cache:
         kb = _build_cache_wait_kb(
             refresh_cb=f"results:daycache:{day}",
@@ -1496,7 +1540,7 @@ async def results_archive_day(callback: CallbackQuery):
     except Exception:
         page = 0
 
-    cache = await get_daily_results_cache(day)
+    cache = await _get_day_cache_ready(day)
     if not cache:
         kb = _build_cache_wait_kb(
             refresh_cb=f"results:daycache:{day}:{page}",
@@ -1525,7 +1569,7 @@ async def results_hub_day(callback: CallbackQuery):
     day = str(parts[2] or "")
     page_token = str(parts[3] or "-1")
     page = _parse_page_token(page_token)
-    cache = await get_daily_results_cache(day)
+    cache = await _get_day_cache_ready(day)
     if not cache:
         kb = _build_cache_wait_kb(
             refresh_cb=f"results:hub:{day}:{page_token}",
@@ -1557,7 +1601,7 @@ async def results_podium(callback: CallbackQuery):
         step = 1
     page_token = str(parts[4] or "-1")
     page = _parse_page_token(page_token)
-    cache = await get_daily_results_cache(day)
+    cache = await _get_day_cache_ready(day)
     if not cache:
         kb = _build_cache_wait_kb(
             refresh_cb=f"results:podium:{day}:{step}:{page_token}",
@@ -1586,7 +1630,7 @@ async def results_top10_day(callback: CallbackQuery):
     page_token = str(parts[3] or "-1")
     page = _parse_page_token(page_token)
 
-    cache = await get_daily_results_cache(day)
+    cache = await _get_day_cache_ready(day)
     if not cache:
         kb = _build_cache_wait_kb(
             refresh_cb=f"results:top10:{day}:{page_token}",
@@ -1650,7 +1694,7 @@ async def results_day(callback: CallbackQuery):
         await callback.answer()
         return
     day_key = (now.date() - timedelta(days=2)).isoformat()
-    cache = await get_daily_results_cache(day_key)
+    cache = await _get_day_cache_ready(day_key)
     if not cache:
         kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
         await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
@@ -1680,7 +1724,7 @@ async def results_day_nav(callback: CallbackQuery):
     if step > 4:
         step = 4
     if step == 0:
-        cache = await get_daily_results_cache(day_key)
+        cache = await _get_day_cache_ready(day_key)
         if not cache:
             kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
             await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
@@ -1696,7 +1740,7 @@ async def results_day_nav(callback: CallbackQuery):
         await callback.answer()
         return
     if step in (1, 2, 3):
-        cache = await get_daily_results_cache(day_key)
+        cache = await _get_day_cache_ready(day_key)
         if not cache:
             kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
             await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
@@ -1711,7 +1755,7 @@ async def results_day_nav(callback: CallbackQuery):
         )
         await callback.answer()
         return
-    cache = await get_daily_results_cache(day_key)
+    cache = await _get_day_cache_ready(day_key)
     if not cache:
         kb = _build_cache_wait_kb(refresh_cb="results:day", archive_cb="results:archive:0")
         await _show_text(callback, "⏳ Итоги ещё готовятся или недоступны.\nПопробуй через минуту.", kb)
